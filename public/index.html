@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#1f1f1f" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="MAMMORY" />
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="icons/icon-192.png?v=3" />
+<link rel="icon" href="icons/icon-192.png?v=3" />
+<title>MAMMORY</title>
+<link rel="stylesheet" href="css/style.css?v=7" />
+<style>body{padding-bottom:0}</style>
+</head>
+<body>
+<div class="splash-screen" id="splashScreen">
+  <div class="splash-word">MAMMORY</div>
+  <div class="splash-hint">화면을 터치하세요</div>
+</div>
+
+<div class="role-hero">
+  <img class="mark" src="img/mascot-bear.png" alt="MAMMORY" />
+  <div class="store-name">MAMMORY</div>
+  <div class="tagline">Mammoth Express Store Inventory System</div>
+
+  <div class="role-cards">
+    <!-- Step 1: phone number -->
+    <div class="pin-box show" id="phoneStep" style="text-align:left;">
+      <div class="desc" style="margin-bottom:10px; color:var(--muted)">휴대폰 번호로 로그인</div>
+      <input type="tel" inputmode="numeric" id="phoneInput" placeholder="010-1234-5678" maxlength="13" />
+      <button class="btn gold block" id="phoneNext" style="margin-top:10px">다음</button>
+    </div>
+
+    <!-- Step 2a: existing owner account re-enters PIN -->
+    <div class="pin-box" id="ownerLoginBox" style="text-align:left;">
+      <div class="desc" id="ownerLoginLabel" style="margin-bottom:10px; color:var(--muted)">사장님 계정이에요. PIN을 입력하세요</div>
+      <input type="tel" inputmode="numeric" id="ownerLoginPin" maxlength="8" placeholder="PIN" />
+      <button class="btn gold block" id="ownerLoginConfirm" style="margin-top:10px">로그인</button>
+    </div>
+
+    <!-- Step 2b: new number -> register -->
+    <div id="registerStep" style="display:none">
+      <div class="pin-box show" style="text-align:left; margin-bottom:14px;">
+        <div class="desc" style="margin-bottom:10px; color:var(--muted)">처음 뵙네요! 이름을 알려주세요</div>
+        <input type="text" id="nameInput" placeholder="예: 서리" />
+        <input type="text" id="accessCodeInput" placeholder="가입 코드 (사장님에게 문의)" style="margin-top:8px;" />
+      </div>
+      <div style="display:flex; flex-direction:column; gap:14px;">
+        <button class="role-card" id="pickStaff">
+          <div>
+            <div class="title">직원</div>
+            <div class="desc">매장 자재를 확인하고 발주 요청을 담습니다</div>
+          </div>
+          <div class="arrow">›</div>
+        </button>
+        <button class="role-card" id="pickOwner">
+          <div>
+            <div class="title">사장님</div>
+            <div class="desc">직원이 담은 발주 리스트만 모아 확인합니다</div>
+          </div>
+          <div class="arrow">›</div>
+        </button>
+      </div>
+      <div class="pin-box" id="pinBox" style="margin-top:14px;">
+        <div class="desc" id="pinBoxLabel" style="color:var(--muted); margin-bottom:10px;">사장님 PIN을 입력하세요</div>
+        <input type="tel" inputmode="numeric" id="pinInput" maxlength="8" placeholder="숫자 4자리 이상" />
+        <input type="tel" inputmode="numeric" id="pinConfirmInput" maxlength="8" placeholder="PIN 확인 (다시 입력)" style="margin-top:8px; display:none;" />
+        <button class="btn gold block" id="pinConfirm" style="margin-top:10px">가입 완료</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="lock-note" id="lockNote">전화번호로 등록하면 어떤 기기로 로그인해도 같은 화면이 떠요</div>
+  <div class="dev-credit">© MAMMORY · Developed by 진우</div>
+</div>
+
+<script type="module" src="js/login.js"></script>
+<script src="js/register-sw.js"></script>
+</body>
+</html>

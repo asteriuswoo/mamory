@@ -1,0 +1,28 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 이 링크를 아는 사람만 접근할 수 있는 내부용 앱입니다.
+    // 익명(anonymous) 로그인된 사용자만 읽고 쓸 수 있도록 최소한의 보호를 겁니다.
+    match /materials/{materialId} {
+      allow read, write: if request.auth != null;
+    }
+    match /checks/{dateId} {
+      allow read, write: if request.auth != null;
+      match /items/{itemId} {
+        allow read, write: if request.auth != null;
+      }
+    }
+    match /shares/{dateId} {
+      allow read, write: if request.auth != null;
+      match /items/{itemId} {
+        allow read, write: if request.auth != null;
+      }
+    }
+    match /accounts/{phone} {
+      allow read, write: if request.auth != null;
+    }
+    match /config/{doc} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}

@@ -1,0 +1,21 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // 발주 메모에 첨부하는 사진. 익명 인증만 요구 — Firestore 규칙과 동일한 수준.
+    match /notePhotos/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && request.resource.size < 8 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if request.auth != null;
+    }
+    // 프로필 사진. 계정 전화번호별 고정 경로라 재업로드하면 이전 사진을 덮어씀.
+    match /avatars/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && request.resource.size < 4 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if request.auth != null;
+    }
+  }
+}

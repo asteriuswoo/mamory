@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#fbf3e6" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="MAMMORY" />
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="icons/icon-192.png?v=3" />
+<link rel="icon" href="icons/icon-192.png?v=3" />
+<title>발주 리스트 - MAMMORY</title>
+<link rel="stylesheet" href="css/style.css?v=7" />
+</head>
+<body class="has-bottom-tabs">
+<header class="topbar">
+  <div class="brandrow">
+    <div>
+      <h1><span class="store">MAMMORY</span></h1>
+      <div class="header-meta">
+        <span class="app-tagline">Inventory System for MAMMOTH</span>
+        <span class="sub" id="pageSub"></span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main id="mainContent">
+  <div class="card">
+    <div class="row-between">
+      <div>
+        <div id="accountName">-</div>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <button class="logout-btn" id="refreshBtn">새로고침</button>
+        <button class="logout-btn" id="logoutBtn">로그아웃</button>
+      </div>
+    </div>
+    <a href="staff.html" class="btn soft block" style="margin-top:10px;">내가 직접 발주 요청하기</a>
+  </div>
+
+  <div class="card">
+    <div class="row-between">
+      <div style="font-size:13px; color:var(--muted)">직원이 발주 요청을 제출하면 알림을 받아요</div>
+      <button class="btn secondary" id="notifyBtn" style="padding:8px 14px; font-size:12px; white-space:nowrap;">알림 켜기</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="field" style="margin-bottom:10px">
+      <label>최근 7일</label>
+      <div class="day-chip-row" id="dayChips"></div>
+    </div>
+    <div class="row-between">
+      <div class="field" style="margin:0; flex:1">
+        <label for="datePick">다른 날짜 직접 선택</label>
+        <input type="date" id="datePick" />
+      </div>
+      <button class="btn secondary" id="todayBtn" style="margin-top:20px">오늘</button>
+    </div>
+  </div>
+
+  <div class="card" id="newRequestCard">
+    <div class="row-between">
+      <div id="newRequestText" style="font-weight:800;">신규발주요청 0건</div>
+      <div style="font-size:12px; color:var(--muted)">긴급 <strong id="urgentCount" style="color:var(--urgent)">0</strong></div>
+    </div>
+  </div>
+
+  <div id="orderList"></div>
+
+  <div class="card">
+    <div class="field" style="margin-bottom:10px">
+      <label>발주 사이트 바로가기</label>
+      <div class="quick-order-row" id="quickOrderLinks"></div>
+    </div>
+    <button class="btn gold block" id="shareBtn">발주 리스트 공유하기</button>
+  </div>
+
+  <div class="card" id="previewCard" style="display:none">
+    <div class="field">
+      <label>공유 미리보기 (자동 공유가 안 되면 아래 텍스트를 복사하세요)</label>
+      <pre class="share-preview" id="sharePreview"></pre>
+      <button class="btn secondary block" id="copyBtn" style="margin-top:10px">텍스트 복사하기</button>
+    </div>
+  </div>
+</main>
+
+<nav class="bottom-tabs">
+  <a href="share.html" class="bottom-tab">
+    <span class="bottom-tab-icon">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+      <span class="corner-badge" id="shareNavBadge" style="display:none;"></span>
+    </span>
+    <span>공유하기</span>
+  </a>
+  <a href="owner.html" class="bottom-tab active">
+    <span class="bottom-tab-icon">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path></svg>
+    </span>
+    <span>오늘 발주</span>
+  </a>
+  <a href="admin.html" class="bottom-tab">
+    <span class="bottom-tab-icon">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+    </span>
+    <span>자재 관리</span>
+  </a>
+</nav>
+
+<script type="module" src="js/app-shell.js"></script>
+<script src="js/register-sw.js"></script>
+</body>
+</html>

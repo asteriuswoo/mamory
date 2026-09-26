@@ -1,0 +1,462 @@
+// 공유하기 (품절 공유 / 공유해요) — 직원 화면(staff.js)과 사장님 화면(share.js)에서
+// 공통으로 쓰는 렌더링/데이터 모듈. mountShareBoard(el, account)로 붙여 쓴다.
+import { db, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, getDocs, serverTimestamp, arrayUnion, arrayRemove, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
+import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, toast, escapeHtml, resizeImageFile } from "./util.js";
+import { avatarHtml, watchAccounts } from "./avatar.js";
+
+const date = todayStr();
+const recentDates = Array.from({ length: 7 }, (_, i) => dateStrDaysAgo(i));
+
+function dowLabel(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const days = ["일", "월", "화", "수", "목", "금", "토"];
+  return { dow: days[new Date(y, m - 1, d).getDay()], dnum: d };
+}
+
+function tsMillis(ts) {
+  if (!ts) return Infinity; // optimistic write not yet confirmed by the server — sorts last for now
+  return typeof ts.toDate === "function" ? ts.toDate().getTime() : ts.seconds * 1000;
+}
+
+function sortByTime(list) {
+  return [...list].sort((a, b) => tsMillis(a.createdAt) - tsMillis(b.createdAt));
+}
+
+const REACTIONS = [
+  { key: "heart", emoji: "❤️" },
+  { key: "like", emoji: "👍" },
+  { key: "sad", emoji: "😢" },
+  { key: "awesome", emoji: "👏" },
+];
+
+function reactionRow(it, deleteBtnHtml) {
+  return `<div class="reaction-row">
+    <div class="reaction-row-emojis">${REACTIONS.map((r) => {
+      const list = (it.reactions && it.reactions[r.key]) || [];
+      const mine = list.includes(account.phone);
+      return `<button class="reaction-btn ${mine ? "active" : ""}" data-react-id="${it.id}" data-react-key="${r.key}">${r.emoji}${list.length > 0 ? ` ${list.length}` : ""}</button>`;
+    }).join("")}</div>
+    ${deleteBtnHtml || ""}
+  </div>`;
+}
+
+async function toggleReaction(itemId, key) {
+  const it = shareItems.find((x) => x.id === itemId);
+  if (!it) return;
+  const list = (it.reactions && it.reactions[key]) || [];
+  const mine = list.includes(account.phone);
+  await updateDoc(doc(db, "shares", shareDate, "items", itemId), {
+    [`reactions.${key}`]: mine ? arrayRemove(account.phone) : arrayUnion(account.phone),
+  });
+}
+
+// Replies live as a plain array on the parent note (not a subcollection) so
+// they ride along on the same listener — serverTimestamp() can't be used
+// inside an array element, so each reply just stamps a client-side ms clock.
+// Which items currently have their reply textbox expanded — starts closed
+// for everything so opening the board doesn't show an input under every
+// note; a "댓글달기" button reveals it on demand instead.
+const openReplyFor = new Set();
+
+function repliesHtml(it, isToday) {
+  const replies = it.replies || [];
+  let html = "";
+  if (replies.length > 0) {
+    html += `<div class="reply-list">${replies
+      .map(
+        (r, idx) => `
+        <div class="reply-row">
+          ${avatarHtml(r.staffPhone, r.staffName, 18)}
+          <span class="reply-who">${escapeHtml(r.staffName || "")}님</span>
+          <span class="reply-content">${escapeHtml(r.content)}</span>
+          ${isToday && r.staffPhone === account.phone ? `<button class="reply-delete-btn" data-reply-delete-item="${it.id}" data-reply-delete-idx="${idx}">삭제</button>` : ""}
+        </div>`
+      )
+      .join("")}</div>`;
+  }
+  if (isToday) {
+    if (openReplyFor.has(it.id)) {
+      html += `
+        <div class="reply-input-row">
+          <input type="text" class="reply-input" data-reply-for="${it.id}" placeholder="답글 달기" />
+          <button class="reply-send-btn" data-reply-send="${it.id}">등록</button>
+        </div>`;
+    } else {
+      html += `<button class="reply-toggle-btn" data-reply-toggle="${it.id}">댓글달기</button>`;
+    }
+  }
+  return html;
+}
+
+async function addReply(itemId, content) {
+  const text = (content || "").trim();
+  if (!text) {
+    toast("답글 내용을 입력해주세요");
+    return;
+  }
+  await updateDoc(doc(db, "shares", date, "items", itemId), {
+    replies: arrayUnion({ content: text, staffName: account.name, staffPhone: account.phone, createdAt: Date.now() }),
+  });
+}
+
+async function deleteReplyAt(itemId, idx) {
+  const it = shareItems.find((x) => x.id === itemId);
+  const reply = it && it.replies && it.replies[idx];
+  if (!reply) return;
+  if (reply.staffPhone !== account.phone) {
+    toast("본인이 작성한 답글만 삭제할 수 있어요");
+    return;
+  }
+  if (!confirm("답글을 삭제할까요?")) return;
+  await updateDoc(doc(db, "shares", date, "items", itemId), {
+    replies: arrayRemove(reply),
+  });
+}
+
+let rootEl = null;
+let account = { name: "", phone: "" };
+let started = false;
+
+let shareDate = date;
+let shareItems = [];
+let shareTodayItems = []; // always-live today's items, independent of which day is being browsed
+const chipCounts = {};
+const chipUnseen = {}; // date -> true if that date has any item this viewer hasn't seen yet
+
+function canDeleteShare(it) {
+  // Legacy items with no staffPhone stamped can't be attributed — allow
+  // deletion rather than permanently locking them.
+  return !it.staffPhone || it.staffPhone === account.phone;
+}
+
+function isNewToMe(it) {
+  return !(it.seenBy || []).includes(account.phone);
+}
+
+// Opening the tab and looking at an item counts as "checking" it — the N
+// badge (and the day-chip's unseen dot) clears itself rather than needing a
+// separate dismiss action. Works for any date being browsed, not just today.
+function markSeen(items, forDate) {
+  items.forEach((it) => {
+    if (isNewToMe(it)) {
+      updateDoc(doc(db, "shares", forDate, "items", it.id), { seenBy: arrayUnion(account.phone) }).catch(() => {});
+    }
+  });
+}
+
+function render() {
+  if (!rootEl) return;
+  const isToday = shareDate === date;
+  const soldoutList = sortByTime(shareItems.filter((it) => it.type === "soldout"));
+  const noteList = sortByTime(shareItems.filter((it) => it.type === "note"));
+
+  markSeen(shareItems, shareDate);
+
+  let html = `
+    <div class="card">
+      <div class="field" style="margin:0">
+        <label>최근 7일</label>
+        <div class="day-chip-row" id="shareDayChips"></div>
+      </div>
+    </div>
+
+    <div class="category-title">품절 공유<span class="sub">${soldoutList.length}건</span></div>
+    <div class="card">`;
+
+  if (soldoutList.length === 0) {
+    html += `<div class="empty">공유된 품절 자재가 없어요.</div>`;
+  } else {
+    for (const it of soldoutList) {
+      html += `
+        <div class="item-row">
+          <div class="post-head">
+            <div class="post-avatar-col">
+              ${avatarHtml(it.staffPhone, it.staffName, 36)}
+              <div class="post-author-name">${escapeHtml(it.staffName || "")}</div>
+            </div>
+            <div class="post-top-row">
+              <div class="name">${isToday && isNewToMe(it) ? `<span class="tag new">N</span>` : ""}${escapeHtml(it.content)}</div>
+              <div class="who">${formatDateLabel(shareDate)}${formatTimeLabel(it.createdAt) ? ` · ${formatTimeLabel(it.createdAt)}` : ""}</div>
+            </div>
+            ${isToday && canDeleteShare(it) ? `<button class="post-delete-btn" data-share-remove="${it.id}">삭제</button>` : ""}
+          </div>
+        </div>`;
+    }
+  }
+  if (isToday) {
+    html += `
+      <div style="display:flex; gap:8px; margin-top:12px;">
+        <input type="text" id="soldoutInput" placeholder="품절된 자재 이름" style="flex:1;" />
+        <button class="btn gold" id="soldoutAddBtn" style="white-space:nowrap;">공유</button>
+      </div>`;
+  }
+  html += `</div>`;
+
+  html += `
+    <div class="category-title">공유해요<span class="sub">${noteList.length}건</span></div>
+    <div class="card">`;
+  if (noteList.length === 0) {
+    html += `<div class="empty">공유된 특이사항이 없어요.</div>`;
+  } else {
+    for (const it of noteList) {
+      html += `
+        <div class="item-row">
+          <div class="post-head">
+            <div class="post-avatar-col">
+              ${avatarHtml(it.staffPhone, it.staffName, 36)}
+              <div class="post-author-name">${escapeHtml(it.staffName || "")}</div>
+            </div>
+            <div class="post-top-row">
+              <div class="name">${isToday && isNewToMe(it) ? `<span class="tag new">N</span>` : ""}${escapeHtml(it.content)}</div>
+              <div class="who">${formatDateLabel(shareDate)}${formatTimeLabel(it.createdAt) ? ` · ${formatTimeLabel(it.createdAt)}` : ""}</div>
+            </div>
+          </div>
+          <div class="post-body">
+            ${it.photoUrl ? `<a href="${it.photoUrl}" target="_blank" rel="noopener"><img src="${it.photoUrl}" class="note-photo-thumb" alt="첨부 사진" /></a>` : ""}
+            ${reactionRow(it, isToday && canDeleteShare(it) ? `<button class="post-delete-btn" data-share-remove="${it.id}">삭제</button>` : "")}
+            ${repliesHtml(it, isToday)}
+          </div>
+        </div>`;
+    }
+  }
+  if (isToday) {
+    html += `
+      <div style="margin-top:12px;">
+        <textarea id="noteInput" rows="3" placeholder="근무 중이 아닌 직원도 볼 수 있게 특이사항을 남겨주세요" style="width:100%;">${escapeHtml(noteDraftText)}</textarea>
+        <div class="photo-attach-row">
+          <input type="file" accept="image/*" id="noteImageInput" style="display:none;" />
+          ${notePhotoUrl ? `
+            <div class="photo-preview">
+              <a href="${notePhotoUrl}" target="_blank" rel="noopener"><img src="${notePhotoUrl}" alt="첨부 사진" /></a>
+              <button class="photo-remove-btn" id="noteImageRemoveBtn">✕</button>
+            </div>` : `<button class="photo-add-btn" id="noteImageAddBtn">📷 사진 첨부</button>`}
+        </div>
+        <button class="btn gold block" id="noteAddBtn" style="margin-top:8px;">공유하기</button>
+      </div>`;
+  }
+  html += `</div>`;
+
+  rootEl.innerHTML = html;
+  wireShareDayChips();
+
+  const soldoutInput = rootEl.querySelector("#soldoutInput");
+  const soldoutAddBtn = rootEl.querySelector("#soldoutAddBtn");
+  if (soldoutAddBtn) {
+    soldoutAddBtn.addEventListener("click", () => addShareItem("soldout", soldoutInput.value));
+    // isComposing guards against IME text (한글 등) firing Enter's keydown
+    // twice — once to finalize the composed character, once for real —
+    // which would otherwise post the same entry twice.
+    soldoutInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) addShareItem("soldout", soldoutInput.value); });
+  }
+  const noteInput = rootEl.querySelector("#noteInput");
+  if (noteInput) {
+    noteInput.addEventListener("input", (e) => { noteDraftText = e.target.value; });
+  }
+  const noteImageInput = rootEl.querySelector("#noteImageInput");
+  const noteImageAddBtn = rootEl.querySelector("#noteImageAddBtn");
+  const noteImageRemoveBtn = rootEl.querySelector("#noteImageRemoveBtn");
+  if (noteImageAddBtn) noteImageAddBtn.addEventListener("click", () => noteImageInput.click());
+  if (noteImageInput) noteImageInput.addEventListener("change", (e) => onNotePhotoSelected(e.target.files[0]));
+  if (noteImageRemoveBtn) noteImageRemoveBtn.addEventListener("click", () => { notePhotoUrl = ""; render(); });
+  const noteAddBtn = rootEl.querySelector("#noteAddBtn");
+  if (noteAddBtn) {
+    noteAddBtn.addEventListener("click", async () => {
+      const text = noteDraftText.trim();
+      if (!text) {
+        toast("내용을 입력해주세요");
+        return;
+      }
+      await addShareItem("note", text, notePhotoUrl);
+      noteDraftText = "";
+      notePhotoUrl = "";
+      render();
+    });
+  }
+  rootEl.querySelectorAll("[data-share-remove]").forEach((el) => {
+    el.addEventListener("click", () => deleteShareItem(el.dataset.shareRemove));
+  });
+  rootEl.querySelectorAll("[data-react-id]").forEach((el) => {
+    el.addEventListener("click", () => toggleReaction(el.dataset.reactId, el.dataset.reactKey));
+  });
+  rootEl.querySelectorAll("[data-reply-toggle]").forEach((el) => {
+    el.addEventListener("click", () => {
+      openReplyFor.add(el.dataset.replyToggle);
+      render();
+      const input = rootEl.querySelector(`.reply-input[data-reply-for="${el.dataset.replyToggle}"]`);
+      if (input) input.focus();
+    });
+  });
+  rootEl.querySelectorAll("[data-reply-send]").forEach((el) => {
+    const itemId = el.dataset.replySend;
+    const input = rootEl.querySelector(`.reply-input[data-reply-for="${itemId}"]`);
+    el.addEventListener("click", () => addReply(itemId, input.value));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) addReply(itemId, input.value);
+    });
+  });
+  rootEl.querySelectorAll("[data-reply-delete-item]").forEach((el) => {
+    el.addEventListener("click", () => deleteReplyAt(el.dataset.replyDeleteItem, Number(el.dataset.replyDeleteIdx)));
+  });
+}
+
+function wireShareDayChips() {
+  const chipsEl = rootEl.querySelector("#shareDayChips");
+  chipsEl.innerHTML = recentDates
+    .map((d) => {
+      const { dow, dnum } = dowLabel(d);
+      const count = chipCounts[d] || 0;
+      const active = d === shareDate;
+      const unseen = !!chipUnseen[d];
+      return `
+        <button class="day-chip ${active ? "active" : ""}" data-sdate="${d}">
+          <div class="dow">${d === date ? "오늘" : dow}</div>
+          <div class="dnum">${dnum}</div>
+          <div class="dcount">${count > 0 ? count + "건" : ""}</div>
+          <div class="day-chip-dot-row">${unseen ? `<span class="day-chip-dot"></span>` : ""}</div>
+        </button>`;
+    })
+    .join("");
+  chipsEl.querySelectorAll("[data-sdate]").forEach((el) => {
+    el.addEventListener("click", () => loadShareDate(el.dataset.sdate));
+  });
+}
+
+async function loadShareDate(targetDate) {
+  shareDate = targetDate;
+  if (targetDate === date) {
+    shareItems = shareTodayItems;
+    render();
+    return;
+  }
+  try {
+    const snap = await getDocs(collection(db, "shares", targetDate, "items"));
+    shareItems = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    chipCounts[targetDate] = shareItems.length;
+    // Selecting a past date's tab is itself the "I've checked this" action —
+    // clear its dot right away rather than waiting on the markSeen() writes.
+    chipUnseen[targetDate] = false;
+  } catch (e) {
+    shareItems = [];
+  }
+  render();
+}
+
+function loadAllShareChipCounts() {
+  recentDates.forEach((d) => {
+    if (d === date) return; // live count already tracked from onSnapshot
+    getDocs(collection(db, "shares", d, "items"))
+      .then((snap) => {
+        chipCounts[d] = snap.size;
+        chipUnseen[d] = snap.docs.some((doc) => !(doc.data().seenBy || []).includes(account.phone));
+        if (shareDate === d) render();
+        else wireShareDayChipsIfMounted();
+      })
+      .catch(() => {});
+  });
+}
+
+// Refresh just the day-chip row (e.g. after a background chip-count/unseen
+// fetch resolves) without re-rendering the whole board and losing focus/
+// scroll position if the viewer is mid-interaction elsewhere.
+function wireShareDayChipsIfMounted() {
+  if (rootEl && rootEl.querySelector("#shareDayChips")) wireShareDayChips();
+}
+
+async function addShareItem(type, content, photoUrl) {
+  const text = (content || "").trim();
+  if (!text) {
+    toast(type === "soldout" ? "품절된 자재 이름을 입력해주세요" : "내용을 입력해주세요");
+    return;
+  }
+  await addDoc(collection(db, "shares", date, "items"), {
+    type,
+    content: text,
+    photoUrl: photoUrl || "",
+    staffName: account.name,
+    staffPhone: account.phone,
+    seenBy: [account.phone],
+    createdAt: serverTimestamp(),
+  });
+  toast("공유했어요");
+}
+
+// Draft state for the "공유해요" composer — kept outside render() so
+// re-rendering (e.g. from an unrelated reaction elsewhere) doesn't wipe
+// whatever the user is mid-typing or already attached.
+let noteDraftText = "";
+let notePhotoUrl = "";
+
+async function onNotePhotoSelected(file) {
+  if (!file) return;
+  toast("사진 업로드 중...");
+  try {
+    const blob = await resizeImageFile(file);
+    const path = `notePhotos/${date}/share_${account.phone}_${Date.now()}.jpg`;
+    const fileRef = ref(storage, path);
+    await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
+    notePhotoUrl = await getDownloadURL(fileRef);
+    render();
+    toast("사진을 첨부했어요");
+  } catch (e) {
+    console.error(e);
+    toast("사진 업로드에 실패했어요");
+  }
+}
+
+async function deleteShareItem(id) {
+  const it = shareItems.find((x) => x.id === id);
+  if (!it) return;
+  if (!canDeleteShare(it)) {
+    toast("본인이 작성한 내용만 삭제할 수 있어요");
+    return;
+  }
+  if (!confirm("삭제할까요?")) return;
+  await deleteDoc(doc(db, "shares", date, "items", id));
+  toast("삭제했어요");
+}
+
+const badgeListeners = [];
+
+function notifyBadgeListeners() {
+  badgeListeners.forEach((cb) => cb(getTodayUnseenCount(account.phone)));
+}
+
+function ensureStarted() {
+  if (started) return;
+  started = true;
+  onSnapshot(collection(db, "shares", date, "items"), (snap) => {
+    shareTodayItems = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    chipCounts[date] = shareTodayItems.length;
+    chipUnseen[date] = shareTodayItems.some((it) => !(it.seenBy || []).includes(account.phone));
+    if (shareDate === date) shareItems = shareTodayItems;
+
+    render();
+    notifyBadgeListeners();
+  });
+  loadAllShareChipCounts();
+}
+
+export function mountShareBoard(el, acc) {
+  rootEl = el;
+  account = acc;
+  ensureStarted();
+  watchAccounts(render);
+}
+
+// For pages that only want the "공유하기" nav tab's small unread-count badge
+// (오늘 발주 / 자재 관리 nav, or the staff main-screen tile) without mounting
+// the full board — e.g. before ever opening the tab.
+export function watchUnseenCount(acc, onChange) {
+  account = { ...account, ...acc };
+  badgeListeners.push(onChange);
+  ensureStarted();
+  onChange(getTodayUnseenCount(account.phone));
+}
+
+export function getTodayShareCount() {
+  return shareTodayItems.length;
+}
+
+export function getTodayUnseenCount(myPhone) {
+  return shareTodayItems.filter((it) => !(it.seenBy || []).includes(myPhone)).length;
+}
