@@ -6,6 +6,7 @@
 import { db, STORE_NAME, QUICK_ORDER_LINKS, collection, doc, updateDoc, onSnapshot, getDocs, serverTimestamp } from "./firebase-init.js";
 import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, escapeHtml, URGENCY_LABEL, sortMaterials } from "./util.js";
 import { isPushDisabled, disablePushToken, enablePushToken } from "./push.js";
+import { recordSubmitToday } from "./mascot.js";
 
 let myOwnerPhone = "";
 
@@ -127,6 +128,7 @@ async function shareOrderedChecks() {
     }
   }
   toast("체크한 항목을 직원에게 공유했어요");
+  recordSubmitToday();
   render();
 }
 
@@ -283,12 +285,42 @@ async function onShareBtnClick() {
   previewCard.scrollIntoView({ behavior: "smooth" });
 }
 
-async function onCopyBtnClick() {
+// navigator.clipboard.writeText() throws in a bunch of real-world mobile
+// situations (PWA standalone context, a stale/lost document focus, older
+// WebViews) even though copying itself is perfectly possible there — so on
+// any failure, fall back to the old select-a-hidden-textarea + execCommand
+// approach before actually telling the user it failed.
+function legacyCopy(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.top = "-9999px";
+  ta.style.left = "-9999px";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  let ok = false;
   try {
-    await navigator.clipboard.writeText(sharePreview.textContent);
+    ok = document.execCommand("copy");
+  } catch (e) {
+    ok = false;
+  }
+  document.body.removeChild(ta);
+  return ok;
+}
+
+async function onCopyBtnClick() {
+  const text = sharePreview.textContent;
+  try {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("no clipboard api");
+    await navigator.clipboard.writeText(text);
     toast("복사했어요. 카카오톡 등에 붙여넣기 하세요");
   } catch (e) {
-    toast("복사에 실패했어요. 직접 선택해서 복사해주세요");
+    if (legacyCopy(text)) {
+      toast("복사했어요. 카카오톡 등에 붙여넣기 하세요");
+    } else {
+      toast("복사에 실패했어요. 직접 선택해서 복사해주세요");
+    }
   }
 }
 

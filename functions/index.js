@@ -174,6 +174,51 @@ function withEulReul(word) {
   return `${word}${hasBatchim ? "을" : "를"}`;
 }
 
+// KST calendar-day string, matching the client's own todayStr()/date-key logic.
+function kstDateStr(date) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
+// 모리 키우기: 오늘 올라온 발주 요청 전부를 그 당일에 주문완료하면 꿀단지 1개
+// 적립. 하루라도 지나서 완료하면(= 이 트리거가 도는 날짜가 오늘이 아니면)
+// 인정하지 않고, 이미 그 날짜로 적립된 적이 있으면(= earnedDates에 포함) 다시
+// 주지 않는다 — 항목 여러 개를 순서대로 체크할 때마다 이 트리거가 반복
+// 실행되므로 멱등성이 필요하다.
+exports.awardHoneyOnAllOrdered = onDocumentUpdated("checks/{date}/items/{itemId}", async (event) => {
+  const before = event.data.before.data();
+  const after = event.data.after.data();
+  if (before.ordered || !after.ordered) return; // only a fresh false->true completion
+
+  const date = event.params.date;
+  if (date !== kstDateStr(new Date())) return; // only same-day completion counts
+
+  const itemsSnap = await db.collection("checks").doc(date).collection("items").get();
+  if (itemsSnap.empty) return;
+  const allOrdered = itemsSnap.docs.every((d) => d.data().ordered === true);
+  if (!allOrdered) return;
+
+  const mascotRef = db.collection("meta").doc("mascot");
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(mascotRef);
+    const data = snap.exists ? snap.data() : {};
+    const earnedDates = data.earnedDates || [];
+    if (earnedDates.includes(date)) return; // already awarded for this date
+    tx.set(
+      mascotRef,
+      {
+        honeyJars: (data.honeyJars || 0) + 1,
+        earnedDates: [...earnedDates, date].slice(-30),
+      },
+      { merge: true }
+    );
+  });
+});
+
 exports.notifyOnNewReaction = onDocumentUpdated("shares/{date}/items/{itemId}", async (event) => {
   const before = event.data.before.data();
   const after = event.data.after.data();

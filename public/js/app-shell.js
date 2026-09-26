@@ -15,6 +15,7 @@ import { wireAccountHeaderAvatar } from "./avatar.js";
 import { watchUnseenCount } from "./shareboard.js";
 import { registerPushToken, watchForegroundPush, isPushDisabled } from "./push.js";
 import { watchAppBadgeClear } from "./badge.js";
+import { mountMascotWidget } from "./mascot.js";
 
 const VIEWS = {
   "owner.html": { title: "발주 리스트 - MAMORY", load: () => import("./owner.js") },
@@ -130,6 +131,7 @@ requireAccount("owner").then((acc) => {
   watchForegroundPush();
   watchAppBadgeClear();
   if (Notification.permission === "granted" && !isPushDisabled()) registerPushToken(acc.phone);
+  mountMascotWidget();
 
   switchTo(pathOf(location.pathname) || "owner.html", { push: false, isInitial: true });
   forceFixedBarReflow();
