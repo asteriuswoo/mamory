@@ -1,10 +1,6 @@
 import { fetchAccount, registerAccount, getOwnerPin, setOwnerPinDoc, getAccessCode, normalizePhone } from "./auth.js";
 import { getAccount, setAccount, clearAccount, toast } from "./util.js";
 
-document.getElementById("splashScreen").addEventListener("click", function dismissSplash() {
-  this.classList.add("hide");
-}, { once: true });
-
 const phoneStep = document.getElementById("phoneStep");
 const phoneInput = document.getElementById("phoneInput");
 const phoneNext = document.getElementById("phoneNext");
@@ -34,8 +30,12 @@ function goTo(role) {
   location.href = role === "owner" ? "owner.html" : "staff.html";
 }
 
-// If this device already has an account, re-check it's still valid and skip straight in.
-(async () => {
+// If this device already has an account, re-check it's still valid so we can
+// skip straight in — but the redirect itself waits for the splash tap below
+// (see dismissSplash) so returning users still see the splash every time
+// instead of it getting cut off by an instant navigation.
+let autoLoginRole = null;
+const autoLoginCheck = (async () => {
   const cached = getAccount();
   if (!cached || !cached.phone) return;
   lockNote.textContent = "로그인 확인 중...";
@@ -43,7 +43,7 @@ function goTo(role) {
     const fresh = await fetchAccount(cached.phone);
     if (fresh) {
       setAccount(fresh);
-      goTo(fresh.role);
+      autoLoginRole = fresh.role;
       return;
     }
     clearAccount();
@@ -52,6 +52,12 @@ function goTo(role) {
   }
   lockNote.textContent = "전화번호로 등록하면 어떤 기기로 로그인해도 같은 화면이 떠요";
 })();
+
+document.getElementById("splashScreen").addEventListener("click", async function dismissSplash() {
+  this.classList.add("hide");
+  await autoLoginCheck;
+  if (autoLoginRole) goTo(autoLoginRole);
+}, { once: true });
 
 phoneNext.addEventListener("click", async () => {
   const phone = normalizePhone(phoneInput.value);

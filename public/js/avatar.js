@@ -3,7 +3,7 @@
 // shows up everywhere a name is rendered, and centralizes the upload flow so
 // there's exactly one place a user can set their own picture (the header).
 import { db, doc, updateDoc, collection, onSnapshot, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
-import { toast, escapeHtml, resizeImageFile } from "./util.js";
+import { toast, escapeHtml, resizeImageFile, showActionSheet } from "./util.js";
 
 let accountsMap = {};
 const listeners = [];
@@ -70,6 +70,13 @@ export async function uploadAvatar(phone, file) {
   }
 }
 
+// Clears a custom photo, reverting the avatar back to the name-initial
+// fallback (avatarHtml() already treats a falsy avatarUrl as "no photo").
+export async function resetAvatarToDefault(phone) {
+  await updateDoc(doc(db, "accounts", phone), { avatarUrl: "" });
+  toast("기본 이미지로 변경했어요");
+}
+
 // Renders "avatar + (이름님 / 역할 캡션)" inside `el` (the page header's
 // #accountName) and makes the avatar itself the click target for changing
 // the SIGNED-IN account's own photo. This is the one place a user sets
@@ -85,13 +92,28 @@ export function wireAccountHeaderAvatar(el, account, roleLabel) {
         <div class="account-header-name">${escapeHtml(account.name)}님</div>
         ${roleLabel ? `<div class="account-header-role">${escapeHtml(roleLabel)}</div>` : ""}
       </div>
-      <input type="file" accept="image/*" class="header-avatar-input" style="display:none;" />
+      <input type="file" accept="image/*" capture="environment" class="header-avatar-camera-input" style="display:none;" />
+      <input type="file" accept="image/*" class="header-avatar-gallery-input" style="display:none;" />
     `;
     const avatarEl = el.querySelector(".avatar-circle");
-    const input = el.querySelector(".header-avatar-input");
+    const cameraInput = el.querySelector(".header-avatar-camera-input");
+    const galleryInput = el.querySelector(".header-avatar-gallery-input");
     avatarEl.classList.add("account-header-avatar");
     avatarEl.title = "탭해서 프로필 사진 변경";
-    avatarEl.addEventListener("click", () => input.click());
-    input.addEventListener("change", (e) => uploadAvatar(account.phone, e.target.files[0]));
+    avatarEl.addEventListener("click", async () => {
+      // Two explicit options (camera / gallery) rather than handing the user
+      // the browser's generic file picker, which also offers a "Choose File"
+      // (Files app) option we don't want here.
+      const choice = await showActionSheet([
+        { label: "📷 사진 찍기" },
+        { label: "🖼️ 갤러리에서 선택" },
+        { label: "기본 이미지로 변경하기", danger: true },
+      ]);
+      if (choice === 0) cameraInput.click();
+      else if (choice === 1) galleryInput.click();
+      else if (choice === 2) resetAvatarToDefault(account.phone);
+    });
+    cameraInput.addEventListener("change", (e) => uploadAvatar(account.phone, e.target.files[0]));
+    galleryInput.addEventListener("change", (e) => uploadAvatar(account.phone, e.target.files[0]));
   });
 }

@@ -1,5 +1,5 @@
 @import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@latest/dist/web/static/pretendard.css");
-@import url("https://fonts.googleapis.com/css2?family=Archivo:wght@400;800;900&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Archivo:wght@400;800;900&family=Baloo+2:wght@500;600&display=swap");
 
 :root {
   /* Charcoal + cream + a single orange accent — accent color is reserved for
@@ -68,7 +68,9 @@ header.topbar .brandrow {
 header.topbar .header-meta {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 6px;
+  width: 100%;
 }
 
 header.topbar h1 {
@@ -88,18 +90,19 @@ header.topbar .sub {
   font-size: 11.5px;
   font-weight: 400;
   color: var(--muted);
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .app-tagline {
   font-size: 11.5px;
   font-weight: 400;
   color: var(--muted);
-}
-
-header.topbar .header-meta .sub::before {
-  content: "·";
-  margin-right: 6px;
-  color: var(--border);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .logout-btn {
@@ -350,37 +353,103 @@ button {
   pointer-events: none;
 }
 
-.splash-word {
-  font-family: "Archivo", "Pretendard", sans-serif;
-  font-weight: 400;
-  font-size: clamp(40px, 13vw, 76px);
-  line-height: 1.2;
-  white-space: nowrap;
-  width: 100%;
-  text-align: center;
-  opacity: 0;
-  background: linear-gradient(180deg, #d97745 0%, #efd0c0 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: transparent;
-  transform: translateY(14px);
-  animation: splashLetter .6s ease forwards;
-  animation-delay: .2s;
+/* Splash "Kirby slurp" scene: the wordmark appears whole, floating above
+   our mascot's wide-open mouth, then gets slurped in like a drink through
+   a straw — starting from the LAST letter and racing backward through the
+   word in quick succession, each letter stretching/shrinking into the
+   mouth. Cheeks puff up full once the first letter (M) disappears, right
+   before the tap-to-continue hint. */
+.kirby-scene {
+  position: relative;
+  width: 220px;
+  height: 300px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
 }
 
-@keyframes splashLetter {
-  to { opacity: 1; transform: translateY(0); }
+.kirby-face {
+  position: absolute;
+  bottom: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 190px;
+  height: auto;
+  z-index: 1;
+}
+
+.kirby-cheeks-puffed {
+  opacity: 0;
+  animation: kirbyPuff .22s ease forwards;
+  animation-delay: 1.3s;
+}
+
+.kirby-mouth-open {
+  animation: kirbyMouthHide .01s linear forwards;
+  animation-delay: 1.3s;
+}
+
+@keyframes kirbyPuff {
+  0%   { opacity: 0; transform: translateX(-50%) scale(.75); }
+  55%  { opacity: 1; transform: translateX(-50%) scale(1.15); }
+  100% { opacity: 1; transform: translateX(-50%) scale(1); }
+}
+
+@keyframes kirbyMouthHide {
+  to { opacity: 0; }
+}
+
+.kirby-letters {
+  position: absolute;
+  left: 50%;
+  bottom: 240px;
+  width: 0;
+  height: 0;
+  z-index: 2;
+}
+
+.kirby-letters span {
+  position: absolute;
+  left: 0;
+  top: 0;
+  font-family: "Baloo 2", "Pretendard", sans-serif;
+  font-weight: 600;
+  font-size: 44px;
+  color: #fffaf5;
+  -webkit-text-stroke: 1.6px #d97745;
+  paint-order: stroke fill;
+  opacity: 0;
+  transform-origin: center bottom;
+  transform: translate(calc(-50% + var(--dx)), 14px) scale(.8);
+  animation:
+    kirbyWordIn .22s ease-out forwards,
+    kirbySlurp .24s cubic-bezier(.6,-.1,.85,.35) forwards;
+  animation-delay: .08s, calc(.65s + var(--order) * .08s);
+}
+
+/* Phase 1: the whole word fades/settles into place together. */
+@keyframes kirbyWordIn {
+  0%   { opacity: 0; transform: translate(calc(-50% + var(--dx)), 14px) scale(.8); }
+  100% { opacity: 1; transform: translate(calc(-50% + var(--dx)), 0) scale(1); }
+}
+
+/* Phase 2: like a drink through a straw — each letter stretches long and
+   thin toward the mouth, starting from the LAST letter and racing
+   backward through the word in quick succession, then collapses away. */
+@keyframes kirbySlurp {
+  0%   { opacity: 1; transform: translate(calc(-50% + var(--dx)), 0) scale(1, 1); }
+  55%  { opacity: 1; transform: translate(calc(-50% + var(--dx) * .35), 100px) scale(.55, 1.6); }
+  100% { opacity: 0; transform: translate(-50%, 140px) scale(.1, .4); }
 }
 
 .splash-hint {
-  margin-top: 40px;
+  margin-top: 20px;
   font-size: 13px;
   font-weight: 600;
   color: rgba(255,255,255,.55);
   opacity: 0;
   animation: splashHint .6s ease forwards;
-  animation-delay: 1.6s;
+  animation-delay: 1.7s;
 }
 
 @keyframes splashHint {
@@ -1500,3 +1569,104 @@ pre.share-preview {
   background: var(--gold-soft);
   color: var(--ink);
 }
+
+/* ---- bottom action sheet (avatar photo picker) ---- */
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.45);
+  z-index: 200;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.action-sheet {
+  background: var(--card);
+  width: 100%;
+  max-width: 480px;
+  border-radius: 20px 20px 0 0;
+  padding: 10px 16px calc(16px + env(safe-area-inset-bottom));
+  animation: sheetUp .2s ease;
+}
+
+@keyframes sheetUp {
+  from { transform: translateY(30px); opacity: .4; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.action-sheet-btn {
+  display: block;
+  width: 100%;
+  text-align: center;
+  padding: 14px;
+  font-size: 15px;
+  font-weight: 600;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--border);
+  color: var(--text);
+}
+
+.action-sheet-btn:first-child { border-top: none; }
+.action-sheet-btn.danger { color: var(--urgent); }
+
+.action-sheet-cancel {
+  display: block;
+  width: 100%;
+  text-align: center;
+  padding: 14px;
+  margin-top: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  background: var(--cream);
+  border: none;
+  border-radius: 14px;
+  color: var(--text);
+}
+
+/* ---- centered confirm modal (custom-labeled buttons) ---- */
+.confirm-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.45);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.confirm-modal {
+  background: var(--card);
+  border-radius: 18px;
+  padding: 22px 20px;
+  max-width: 340px;
+  width: 100%;
+  text-align: center;
+}
+
+.confirm-modal-msg {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 18px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.confirm-modal-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.confirm-modal-btn {
+  padding: 13px;
+  border-radius: 12px;
+  border: none;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.confirm-modal-btn.primary { background: var(--urgent); color: #fff; }
+.confirm-modal-btn.secondary { background: var(--cream); color: var(--text); }

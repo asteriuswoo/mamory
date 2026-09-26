@@ -115,7 +115,7 @@ export function watchForegroundPush() {
       // Server sends data-only (see functions/index.js) so the browser never
       // auto-displays anything on its own — this toast is the only rendering.
       const { title, body } = payload.data || {};
-      toast(body ? `${title || "MAMMORY"}: ${body}` : title || "새 알림이 있어요");
+      toast(body ? `${title || "MAMORY"}: ${body}` : title || "새 알림이 있어요");
       bumpAppBadge();
     });
   });

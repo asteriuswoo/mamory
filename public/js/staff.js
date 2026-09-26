@@ -1,6 +1,6 @@
 import { db, collection, doc, setDoc, deleteDoc, onSnapshot, getDocs, serverTimestamp, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
 import { requireAccount, logout } from "./auth.js";
-import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, URGENCY_LABEL, URGENCY_HINT, URGENCY_ORDER, sortMaterials, sortByOrder, resizeImageFile } from "./util.js";
+import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, URGENCY_LABEL, URGENCY_HINT, URGENCY_ORDER, sortMaterials, sortByOrder, resizeImageFile, confirmModal } from "./util.js";
 import { mountShareBoard, getTodayUnseenCount, watchUnseenCount } from "./shareboard.js";
 import { registerPushToken, watchForegroundPush, isPushDisabled, disablePushToken, enablePushToken } from "./push.js";
 import { wireAccountHeaderAvatar } from "./avatar.js";
@@ -9,6 +9,13 @@ import { watchAppBadgeClear } from "./badge.js";
 document.getElementById("dateLabel").textContent = formatDateLabel(todayStr());
 document.getElementById("logoutBtn").addEventListener("click", logout);
 document.getElementById("refreshBtn").addEventListener("click", () => window.forceAppRefresh());
+
+document.getElementById("deleteAccountBtn").addEventListener("click", async () => {
+  const ok = await confirmModal("정말 떠나실 건가요?", "네! 이제 퇴사합니다🥲", "아니요! 돌아갈래요😊");
+  if (!ok || !staffPhone) return;
+  await deleteDoc(doc(db, "accounts", staffPhone));
+  logout();
+});
 
 const notifyBtn = document.getElementById("notifyBtn");
 
@@ -23,7 +30,7 @@ function updateNotifyBtn() {
   } else if (Notification.permission === "granted" && !isPushDisabled()) {
     notifyBtn.textContent = "알림 켜짐 ✓ (탭하면 끄기)";
   } else {
-    notifyBtn.textContent = "알림 켜기";
+    notifyBtn.textContent = "알림 설정하려면 선택하세요";
   }
 }
 
@@ -740,6 +747,18 @@ async function main() {
   const isOwnerVisiting = account.role === "owner";
   wireAccountHeaderAvatar(document.getElementById("accountName"), account, isOwnerVisiting ? "사장님 계정 (발주 화면)" : "직원 계정");
   if (isOwnerVisiting) document.getElementById("backToOwnerBtn").style.display = "block";
+
+  // Deep-linked here from a push notification (see functions/index.js's
+  // `link` field) — land straight on the relevant tab instead of always
+  // opening to 자재선택.
+  const linkedView = new URLSearchParams(location.search).get("view");
+  if (linkedView === "cart") {
+    view = "cart";
+    cartDate = date;
+  } else if (linkedView === "share") {
+    view = "share";
+  }
+
   watchForegroundPush();
   watchAppBadgeClear();
   if (Notification.permission === "granted") registerPushToken(staffPhone);

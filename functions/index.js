@@ -39,6 +39,10 @@ async function removeTokens(deadTokens) {
   if (changed) await batch.commit();
 }
 
+// `link` is the page the notification should open when tapped — carried in
+// the data payload (read by sw.js's own notificationclick handler) since
+// this app sends data-only messages and renders notifications itself, so
+// FCM's built-in webpush.fcmOptions.link auto-open never applies here.
 async function sendToTokens(tokens, notification) {
   const validTokens = [...new Set(tokens)].filter(Boolean);
   if (validTokens.length === 0) return;
@@ -50,9 +54,9 @@ async function sendToTokens(tokens, notification) {
       // default banner in ADDITION to whatever our service worker's
       // onBackgroundMessage renders — this was the actual cause of every
       // push showing up twice. With data-only, the SW is the sole renderer.
-      data: { title: notification.title, body: notification.body },
+      data: { title: notification.title, body: notification.body, link: notification.link || "/" },
       webpush: {
-        fcmOptions: { link: "/" },
+        fcmOptions: { link: notification.link || "/" },
       },
     });
     const dead = [];
@@ -73,6 +77,14 @@ async function sendToTokens(tokens, notification) {
   }
 }
 
+// The share board lives at a different URL depending on the viewer's role
+// (owner-side app-shell has a real share.html; staff.html has an in-page
+// "share" view instead) — so a single "공유해요" event's recipients need
+// per-role links, not one link for everybody.
+function shareLinkForRole(role) {
+  return role === "owner" ? "/share.html" : "/staff.html?view=share";
+}
+
 // 새 발주 요청이 제출되면 사장님(들)에게 알림.
 exports.notifyOwnerOnNewRequest = onDocumentCreated("checks/{date}/items/{itemId}", async (event) => {
   const item = event.data.data();
@@ -80,8 +92,9 @@ exports.notifyOwnerOnNewRequest = onDocumentCreated("checks/{date}/items/{itemId
   const tokens = [];
   ownersSnap.forEach((doc) => tokens.push(...tokensOf(doc.data().fcmTokens)));
   await sendToTokens(tokens, {
-    title: "새 발주 요청이 왔어요",
+    title: "자재발주 요청",
     body: `${item.staffName ? item.staffName + "님 · " : ""}${item.materialName || ""}`,
+    link: "/owner.html",
   });
 });
 
@@ -94,25 +107,31 @@ exports.notifyStaffOnOrdered = onDocumentUpdated("checks/{date}/items/{itemId}",
   if (!accSnap.exists) return;
   const tokens = tokensOf(accSnap.data().fcmTokens);
   await sendToTokens(tokens, {
-    title: "사장님이 주문완료 처리했어요",
+    title: "사장님의 주문완료 알림",
     body: after.materialName || "",
+    link: "/staff.html?view=cart",
   });
 });
 
 // 공유하기 > 공유해요에 새 글이 올라오면 작성자를 제외한 모두에게 알림.
+// 받는 사람의 역할(사장/직원)에 따라 열어줄 페이지가 다르므로 토큰을 역할별로
+// 나눠 두 번(필요하면) 보낸다.
 exports.notifyOnNewShareNote = onDocumentCreated("shares/{date}/items/{itemId}", async (event) => {
   const item = event.data.data();
   if (item.type !== "note") return;
   const accSnap = await db.collection("accounts").get();
-  const tokens = [];
+  const tokensByRole = { owner: [], staff: [] };
   accSnap.forEach((doc) => {
     if (doc.id === item.staffPhone) return;
-    tokens.push(...tokensOf(doc.data().fcmTokens));
+    const role = doc.data().role === "owner" ? "owner" : "staff";
+    tokensByRole[role].push(...tokensOf(doc.data().fcmTokens));
   });
-  await sendToTokens(tokens, {
-    title: "새 공유 글이 올라왔어요",
-    body: `${item.staffName ? item.staffName + "님: " : ""}${item.content || ""}`,
-  });
+  const body = `${item.staffName ? item.staffName + "님: " : ""}${item.content || ""}`;
+  await Promise.all(
+    Object.keys(tokensByRole).map((role) =>
+      sendToTokens(tokensByRole[role], { title: "공유해요 알림", body, link: shareLinkForRole(role) })
+    )
+  );
 });
 
 // 대댓글은 새 문서가 아니라 부모 글의 replies 배열에 arrayUnion으로 추가되는
@@ -128,13 +147,62 @@ exports.notifyOnNewReply = onDocumentUpdated("shares/{date}/items/{itemId}", asy
   const newReply = afterReplies[afterReplies.length - 1];
   if (!newReply) return;
   const accSnap = await db.collection("accounts").get();
-  const tokens = [];
+  const tokensByRole = { owner: [], staff: [] };
   accSnap.forEach((doc) => {
     if (doc.id === newReply.staffPhone) return;
-    tokens.push(...tokensOf(doc.data().fcmTokens));
+    const role = doc.data().role === "owner" ? "owner" : "staff";
+    tokensByRole[role].push(...tokensOf(doc.data().fcmTokens));
   });
+  const body = `${newReply.staffName ? newReply.staffName + "님: " : ""}${newReply.content || ""} (댓글)`;
+  await Promise.all(
+    Object.keys(tokensByRole).map((role) =>
+      sendToTokens(tokensByRole[role], { title: "공유해요 알림", body, link: shareLinkForRole(role) })
+    )
+  );
+});
+
+// 이모지 리액션(좋아요 등)이 새로 눌리면 원글 작성자에게 "OO님이 좋아요를
+// 눌렀습니다" 형태로 알림. reactions.{key}는 arrayUnion으로 추가되는 전화번호
+// 배열이라, before/after를 비교해 새로 추가된 번호만 골라낸다.
+const REACTION_LABELS = { heart: "하트", like: "좋아요", sad: "속상해요", awesome: "최고예요" };
+
+// 받침 유무에 따라 을/를 조사를 고른다 (한글 완성형 코드포인트 % 28 === 0 이면 받침 없음).
+function withEulReul(word) {
+  const last = word[word.length - 1];
+  const code = last.charCodeAt(0) - 0xac00;
+  const hasBatchim = code >= 0 && code <= 11171 && code % 28 !== 0;
+  return `${word}${hasBatchim ? "을" : "를"}`;
+}
+
+exports.notifyOnNewReaction = onDocumentUpdated("shares/{date}/items/{itemId}", async (event) => {
+  const before = event.data.before.data();
+  const after = event.data.after.data();
+  const beforeReactions = before.reactions || {};
+  const afterReactions = after.reactions || {};
+
+  let reactorPhone = null;
+  let reactionKey = null;
+  for (const key of Object.keys(afterReactions)) {
+    const beforeList = beforeReactions[key] || [];
+    const afterList = afterReactions[key] || [];
+    const added = afterList.find((p) => !beforeList.includes(p));
+    if (added) {
+      reactorPhone = added;
+      reactionKey = key;
+      break;
+    }
+  }
+  if (!reactorPhone || !after.staffPhone || reactorPhone === after.staffPhone) return;
+
+  const reactorSnap = await db.collection("accounts").doc(reactorPhone).get();
+  const reactorName = reactorSnap.exists ? reactorSnap.data().name : "누군가";
+  const authorAccSnap = await db.collection("accounts").doc(after.staffPhone).get();
+  if (!authorAccSnap.exists) return;
+  const tokens = tokensOf(authorAccSnap.data().fcmTokens);
+  const label = REACTION_LABELS[reactionKey] || "리액션";
   await sendToTokens(tokens, {
-    title: "새 댓글이 달렸어요",
-    body: `${newReply.staffName ? newReply.staffName + "님: " : ""}${newReply.content || ""}`,
+    title: "공유해요 알림",
+    body: `${reactorName}님이 ${withEulReul(label)} 눌렀습니다`,
+    link: shareLinkForRole(authorAccSnap.data().role),
   });
 });

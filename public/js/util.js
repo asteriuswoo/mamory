@@ -76,6 +76,54 @@ export function toast(msg) {
   toastTimer = setTimeout(() => el.classList.remove("show"), 1800);
 }
 
+// Bottom action-sheet with a list of option buttons + a cancel button.
+// Resolves with the clicked option's index, or -1 if dismissed/cancelled.
+export function showActionSheet(options) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement("div");
+    backdrop.className = "sheet-backdrop";
+    backdrop.innerHTML = `
+      <div class="action-sheet">
+        ${options.map((o, i) => `<button class="action-sheet-btn${o.danger ? " danger" : ""}" data-idx="${i}">${escapeHtml(o.label)}</button>`).join("")}
+        <button class="action-sheet-cancel" data-cancel>취소</button>
+      </div>`;
+    document.body.appendChild(backdrop);
+    function close(result) {
+      backdrop.remove();
+      resolve(result);
+    }
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(-1); });
+    backdrop.querySelector("[data-cancel]").addEventListener("click", () => close(-1));
+    backdrop.querySelectorAll("[data-idx]").forEach((btn) => {
+      btn.addEventListener("click", () => close(Number(btn.dataset.idx)));
+    });
+  });
+}
+
+// Centered confirm dialog with custom-labeled buttons (native confirm() can't
+// relabel its buttons). Resolves true if the "yes" button was pressed.
+export function confirmModal(message, yesLabel, noLabel) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement("div");
+    backdrop.className = "confirm-modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="confirm-modal">
+        <div class="confirm-modal-msg">${escapeHtml(message)}</div>
+        <div class="confirm-modal-actions">
+          <button class="confirm-modal-btn primary" data-yes>${escapeHtml(yesLabel)}</button>
+          <button class="confirm-modal-btn secondary" data-no>${escapeHtml(noLabel)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(backdrop);
+    function close(result) {
+      backdrop.remove();
+      resolve(result);
+    }
+    backdrop.querySelector("[data-yes]").addEventListener("click", () => close(true));
+    backdrop.querySelector("[data-no]").addEventListener("click", () => close(false));
+  });
+}
+
 export function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;",

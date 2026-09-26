@@ -20,13 +20,38 @@ messaging.onBackgroundMessage((payload) => {
   // auto-display plus this handler's own showNotification() call was
   // showing every push twice. This is now the single place a notification
   // gets shown.
-  const { title, body } = payload.data || {};
-  self.registration.showNotification(title || "MAMMORY", {
+  const { title, body, link } = payload.data || {};
+  self.registration.showNotification(title || "MAMORY", {
     body: body || "",
     icon: "/icons/icon-192.png",
     tag: payload.messageId || `${title}-${body}`,
+    // Stashed on the Notification itself so notificationclick below can read
+    // it back — FCM's own webpush.fcmOptions.link auto-open only applies to
+    // notifications the browser renders on its own, not ones we render
+    // ourselves via showNotification() like this.
+    data: { link: link || "/" },
   });
   bumpAppBadge();
+});
+
+// Tapping the notification (from the OS notification center / status bar)
+// should land on the specific page the notification is about, not just
+// wherever the app happened to be left open — e.g. a "자재발주 요청" push
+// should open owner.html straight to the order list, not the login screen.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const link = (event.notification.data && event.notification.data.link) || "/";
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((allClients) => {
+      const target = new URL(link, self.location.origin).href;
+      for (const client of allClients) {
+        if (new URL(client.url).origin !== self.location.origin) continue;
+        if ("navigate" in client) client.navigate(target);
+        return client.focus();
+      }
+      return self.clients.openWindow(target);
+    })
+  );
 });
 
 // Mirrors public/js/badge.js's counter, but duplicated here in plain
@@ -69,7 +94,7 @@ async function bumpAppBadge() {
   }
 }
 
-const CACHE_NAME = "cafe-order-v20";
+const CACHE_NAME = "cafe-order-v21";
 const APP_SHELL = [
   "index.html",
   "staff.html",

@@ -17,9 +17,9 @@ import { registerPushToken, watchForegroundPush, isPushDisabled } from "./push.j
 import { watchAppBadgeClear } from "./badge.js";
 
 const VIEWS = {
-  "owner.html": { title: "발주 리스트 - MAMMORY", load: () => import("./owner.js") },
-  "admin.html": { title: "자재 관리 - MAMMORY", load: () => import("./admin.js") },
-  "share.html": { title: "공유하기 - MAMMORY", load: () => import("./share.js") },
+  "owner.html": { title: "발주 리스트 - MAMORY", load: () => import("./owner.js") },
+  "admin.html": { title: "자재 관리 - MAMORY", load: () => import("./admin.js") },
+  "share.html": { title: "공유하기 - MAMORY", load: () => import("./share.js") },
 };
 
 const mainContent = document.getElementById("mainContent");

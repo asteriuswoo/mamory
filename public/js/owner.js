@@ -303,7 +303,7 @@ function updateNotifyBtn() {
   } else if (Notification.permission === "granted" && !isPushDisabled()) {
     notifyBtn.textContent = "알림 켜짐 ✓ (탭하면 끄기)";
   } else {
-    notifyBtn.textContent = "알림 켜기";
+    notifyBtn.textContent = "알림 설정하려면 선택하세요";
   }
 }
 
