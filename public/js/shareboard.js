@@ -29,15 +29,63 @@ const REACTIONS = [
   { key: "awesome", emoji: "👏" },
 ];
 
-function reactionRow(it, deleteBtnHtml) {
+function reactionRow(it, actionsHtml) {
   return `<div class="reaction-row">
     <div class="reaction-row-emojis">${REACTIONS.map((r) => {
       const list = (it.reactions && it.reactions[r.key]) || [];
       const mine = list.includes(account.phone);
       return `<button class="reaction-btn ${mine ? "active" : ""}" data-react-id="${it.id}" data-react-key="${r.key}">${r.emoji}${list.length > 0 ? ` ${list.length}` : ""}</button>`;
     }).join("")}</div>
-    ${deleteBtnHtml || ""}
+    ${actionsHtml || ""}
   </div>`;
+}
+
+// Which top-level posts / replies are currently mid-edit — id (or
+// "itemId:replyIdx" for replies) -> draft text, mirroring openReplyFor's
+// pattern of tracking UI-only state outside render() so it survives re-renders.
+const editingItems = new Map();
+const editingReplies = new Map();
+
+function postActionsHtml(it, isToday) {
+  if (!isToday || !canDeleteShare(it) || editingItems.has(it.id)) return "";
+  return `<div class="post-actions">
+    <button class="post-edit-btn" data-share-edit="${it.id}">수정</button>
+    <button class="post-delete-btn" data-share-remove="${it.id}">삭제</button>
+  </div>`;
+}
+
+function postTopRowHtml(it, isToday) {
+  if (editingItems.has(it.id)) {
+    const val = escapeHtml(editingItems.get(it.id));
+    const field = it.type === "note"
+      ? `<textarea class="edit-textarea" data-edit-input="${it.id}" rows="3">${val}</textarea>`
+      : `<input type="text" class="edit-input" data-edit-input="${it.id}" value="${val}" />`;
+    return `
+      <div class="post-top-row edit-mode">
+        <div class="edit-row">${field}</div>
+        <div class="edit-btn-row">
+          <button class="edit-cancel-btn" data-edit-cancel="${it.id}">취소</button>
+          <button class="edit-save-btn" data-edit-save="${it.id}">저장</button>
+        </div>
+      </div>`;
+  }
+  return `
+    <div class="post-top-row">
+      <div class="name">${isToday && isNewToMe(it) ? `<span class="tag new">N</span>` : ""}${escapeHtml(it.content)}</div>
+      <div class="who">${formatDateLabel(shareDate)}${formatTimeLabel(it.createdAt) ? ` · ${formatTimeLabel(it.createdAt)}` : ""}</div>
+    </div>`;
+}
+
+async function saveShareEdit(id, value) {
+  const text = (value || "").trim();
+  if (!text) {
+    toast("내용을 입력해주세요");
+    return;
+  }
+  await updateDoc(doc(db, "shares", date, "items", id), { content: text });
+  editingItems.delete(id);
+  render(); // saved content can equal what's already cached, in which case onSnapshot never fires
+  toast("수정했어요");
 }
 
 async function toggleReaction(itemId, key) {
@@ -63,15 +111,29 @@ function repliesHtml(it, isToday) {
   let html = "";
   if (replies.length > 0) {
     html += `<div class="reply-list">${replies
-      .map(
-        (r, idx) => `
+      .map((r, idx) => {
+        const key = `${it.id}:${idx}`;
+        const mine = isToday && r.staffPhone === account.phone;
+        if (editingReplies.has(key)) {
+          return `
+          <div class="reply-row">
+            ${avatarHtml(r.staffPhone, r.staffName, 18)}
+            <span class="reply-who">${escapeHtml(r.staffName || "")}님</span>
+            <div class="reply-edit-row">
+              <input type="text" class="reply-edit-input" data-reply-edit-input="${key}" value="${escapeHtml(editingReplies.get(key))}" />
+              <button class="reply-cancel-btn" data-reply-edit-cancel="${key}">취소</button>
+              <button class="reply-save-btn" data-reply-edit-save="${key}">저장</button>
+            </div>
+          </div>`;
+        }
+        return `
         <div class="reply-row">
           ${avatarHtml(r.staffPhone, r.staffName, 18)}
           <span class="reply-who">${escapeHtml(r.staffName || "")}님</span>
           <span class="reply-content">${escapeHtml(r.content)}</span>
-          ${isToday && r.staffPhone === account.phone ? `<button class="reply-delete-btn" data-reply-delete-item="${it.id}" data-reply-delete-idx="${idx}">삭제</button>` : ""}
-        </div>`
-      )
+          ${mine ? `<button class="reply-edit-btn" data-reply-edit="${key}">수정</button><button class="reply-delete-btn" data-reply-delete-item="${it.id}" data-reply-delete-idx="${idx}">삭제</button>` : ""}
+        </div>`;
+      })
       .join("")}</div>`;
   }
   if (isToday) {
@@ -97,6 +159,25 @@ async function addReply(itemId, content) {
   await updateDoc(doc(db, "shares", date, "items", itemId), {
     replies: arrayUnion({ content: text, staffName: account.name, staffPhone: account.phone, createdAt: Date.now() }),
   });
+}
+
+async function saveReplyEdit(key, value) {
+  const [itemId, idxStr] = key.split(":");
+  const idx = Number(idxStr);
+  const it = shareItems.find((x) => x.id === itemId);
+  const reply = it && it.replies && it.replies[idx];
+  if (!reply) return;
+  const text = (value || "").trim();
+  if (!text) {
+    toast("내용을 입력해주세요");
+    return;
+  }
+  const newReplies = [...it.replies];
+  newReplies[idx] = { ...reply, content: text };
+  await updateDoc(doc(db, "shares", date, "items", itemId), { replies: newReplies });
+  editingReplies.delete(key);
+  render(); // saved content can equal what's already cached, in which case onSnapshot never fires
+  toast("수정했어요");
 }
 
 async function deleteReplyAt(itemId, idx) {
@@ -174,11 +255,8 @@ function render() {
               ${avatarHtml(it.staffPhone, it.staffName, 36)}
               <div class="post-author-name">${escapeHtml(it.staffName || "")}</div>
             </div>
-            <div class="post-top-row">
-              <div class="name">${isToday && isNewToMe(it) ? `<span class="tag new">N</span>` : ""}${escapeHtml(it.content)}</div>
-              <div class="who">${formatDateLabel(shareDate)}${formatTimeLabel(it.createdAt) ? ` · ${formatTimeLabel(it.createdAt)}` : ""}</div>
-            </div>
-            ${isToday && canDeleteShare(it) ? `<button class="post-delete-btn" data-share-remove="${it.id}">삭제</button>` : ""}
+            ${postTopRowHtml(it, isToday)}
+            ${postActionsHtml(it, isToday)}
           </div>
         </div>`;
     }
@@ -206,14 +284,11 @@ function render() {
               ${avatarHtml(it.staffPhone, it.staffName, 36)}
               <div class="post-author-name">${escapeHtml(it.staffName || "")}</div>
             </div>
-            <div class="post-top-row">
-              <div class="name">${isToday && isNewToMe(it) ? `<span class="tag new">N</span>` : ""}${escapeHtml(it.content)}</div>
-              <div class="who">${formatDateLabel(shareDate)}${formatTimeLabel(it.createdAt) ? ` · ${formatTimeLabel(it.createdAt)}` : ""}</div>
-            </div>
+            ${postTopRowHtml(it, isToday)}
           </div>
           <div class="post-body">
             ${it.photoUrl ? `<a href="${it.photoUrl}" target="_blank" rel="noopener"><img src="${it.photoUrl}" class="note-photo-thumb" alt="첨부 사진" /></a>` : ""}
-            ${reactionRow(it, isToday && canDeleteShare(it) ? `<button class="post-delete-btn" data-share-remove="${it.id}">삭제</button>` : "")}
+            ${reactionRow(it, postActionsHtml(it, isToday))}
             ${repliesHtml(it, isToday)}
           </div>
         </div>`;
@@ -297,6 +372,63 @@ function render() {
   rootEl.querySelectorAll("[data-reply-delete-item]").forEach((el) => {
     el.addEventListener("click", () => deleteReplyAt(el.dataset.replyDeleteItem, Number(el.dataset.replyDeleteIdx)));
   });
+  rootEl.querySelectorAll("[data-share-edit]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const it = shareItems.find((x) => x.id === el.dataset.shareEdit);
+      if (!it) return;
+      editingItems.set(it.id, it.content);
+      render();
+      const input = rootEl.querySelector(`[data-edit-input="${it.id}"]`);
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    });
+  });
+  rootEl.querySelectorAll("[data-edit-save]").forEach((el) => {
+    const id = el.dataset.editSave;
+    const input = rootEl.querySelector(`[data-edit-input="${id}"]`);
+    el.addEventListener("click", () => saveShareEdit(id, input.value));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing && input.tagName !== "TEXTAREA") saveShareEdit(id, input.value);
+    });
+  });
+  rootEl.querySelectorAll("[data-edit-cancel]").forEach((el) => {
+    el.addEventListener("click", () => {
+      editingItems.delete(el.dataset.editCancel);
+      render();
+    });
+  });
+  rootEl.querySelectorAll("[data-reply-edit]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const key = el.dataset.replyEdit;
+      const [itemId, idxStr] = key.split(":");
+      const it = shareItems.find((x) => x.id === itemId);
+      const reply = it && it.replies && it.replies[Number(idxStr)];
+      if (!reply) return;
+      editingReplies.set(key, reply.content);
+      render();
+      const input = rootEl.querySelector(`[data-reply-edit-input="${key}"]`);
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    });
+  });
+  rootEl.querySelectorAll("[data-reply-edit-save]").forEach((el) => {
+    const key = el.dataset.replyEditSave;
+    const input = rootEl.querySelector(`[data-reply-edit-input="${key}"]`);
+    el.addEventListener("click", () => saveReplyEdit(key, input.value));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) saveReplyEdit(key, input.value);
+    });
+  });
+  rootEl.querySelectorAll("[data-reply-edit-cancel]").forEach((el) => {
+    el.addEventListener("click", () => {
+      editingReplies.delete(el.dataset.replyEditCancel);
+      render();
+    });
+  });
 }
 
 function wireShareDayChips() {
@@ -323,6 +455,8 @@ function wireShareDayChips() {
 
 async function loadShareDate(targetDate) {
   shareDate = targetDate;
+  editingItems.clear();
+  editingReplies.clear();
   if (targetDate === date) {
     shareItems = shareTodayItems;
     render();

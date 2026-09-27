@@ -44,7 +44,7 @@ function renderAccounts(accounts) {
             <div>
               <div style="font-weight:700; font-size:14px;">
                 ${escapeHtml(acc.name)}님
-                <span class="tag ${acc.role === "owner" ? "submitted" : "pending"}" style="margin-left:4px;">${acc.role === "owner" ? "사장님" : "직원"}</span>
+                <span class="tag ${acc.role === "owner" ? "role-owner" : "role-staff"}" style="margin-left:4px;">${acc.role === "owner" ? "사장님" : "직원"}</span>
                 ${acc.phone === myPhone ? `<span style="font-size:11px; color:var(--muted);">(나)</span>` : ""}
               </div>
               <div style="font-size:12px; color:var(--muted); margin-top:2px;">${formatPhone(acc.phone)}</div>

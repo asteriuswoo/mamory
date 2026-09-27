@@ -1,4 +1,4 @@
-import { db, collection, doc, setDoc, deleteDoc, onSnapshot, getDocs, serverTimestamp, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
+import { db, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, getDocs, serverTimestamp, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
 import { requireAccount, logout } from "./auth.js";
 import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, URGENCY_LABEL, URGENCY_HINT, URGENCY_ORDER, sortMaterials, sortByOrder, resizeImageFile, confirmModal } from "./util.js";
 import { mountShareBoard, getTodayUnseenCount, watchUnseenCount } from "./shareboard.js";
@@ -86,6 +86,18 @@ const MAIN_DESC = {
   기본자재: "컵, 뚜껑, 빨대, 감열지, 냅킨, 원두, 기타",
   식자재: "파우더, 시럽/소스, 베이스, 디저트, 냉동, 탄산",
 };
+
+// 품목명 옆에 작게 표시할 정상발주/긴급 판단 기준.
+const MATERIAL_ORDER_CRITERIA = {
+  아이스M컵: { normal: "12줄 이상", urgent: "10줄 미만" },
+  일반돔뚜껑: { normal: "12줄 이상", urgent: "10줄 미만" },
+};
+
+function renderOrderCriteriaHint(materialName) {
+  const c = MATERIAL_ORDER_CRITERIA[materialName];
+  if (!c) return "";
+  return `<div class="order-criteria-hint">정상 발주 ${escapeHtml(c.normal)} · 긴급 ${escapeHtml(c.urgent)}</div>`;
+}
 
 function loadPending() {
   try {
@@ -379,6 +391,7 @@ function renderItems() {
         <div class="item-card ${selected ? "selected" : ""} ${isLocked ? "locked" : ""}">
           ${selected && !isLocked ? `<button class="cart-remove-btn" data-cart-remove="${m.id}">장바구니에서 빼기</button>` : ""}
           <div class="name">${escapeHtml(m.name)}</div>
+          ${renderOrderCriteriaHint(m.name)}
           <div class="urgency-row">
             ${URGENCY_ORDER.map((u) => `
               <button class="urgency-btn ${u} ${state.urgency === u ? "active" : ""}" data-id="${m.id}" data-urgency="${u}" ${isLocked ? "disabled" : ""}>
@@ -479,6 +492,26 @@ function renderCart() {
     return;
   }
 
+  function cartItemRowHtml(it, showSub) {
+    return `
+      <div class="item-row ${it.ordered ? "ordered" : ""}">
+        <div style="flex:1">
+          <div class="name"><span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${showSub && it.subCategory ? `<span class="subcat-inline-tag">${escapeHtml(it.subCategory)}</span>` : ""}${it.qty ? `<span class="qty-pill">${escapeHtml(it.qty)} 남음</span>` : ""}</div>
+          ${it.note ? `<div class="note">${escapeHtml(it.note)}</div>` : ""}
+          ${it.photoUrl ? `<a href="${it.photoUrl}" target="_blank" rel="noopener"><img src="${it.photoUrl}" class="note-photo-thumb" alt="첨부 사진" /></a>` : ""}
+          ${it.staffName ? `<div class="who">${escapeHtml(it.staffName)}님${formatTimeLabel(it.updatedAt) ? ` · ${formatTimeLabel(it.updatedAt)}` : ""}</div>` : ""}
+        </div>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
+          <span class="badge ${it.urgency}">${it.urgency === "urgent" ? "🚨 " : ""}${URGENCY_LABEL[it.urgency] || it.urgency}</span>
+          ${isTodayCart ? `<span class="tag ${it.submitted ? "submitted" : "pending"}">${it.submitted ? "제출됨" : "미제출"}</span>` : ""}
+          ${it.ordered ? `<span class="tag ordered">✓ 주문완료</span>` : ""}
+          ${it.ordered && formatTimestampLabel(it.orderedAt) ? `<span style="font-size:10px; color:var(--muted); text-align:right;">${formatTimestampLabel(it.orderedAt)}</span>` : ""}
+          ${isTodayCart && it.submitted && canDelete(it) ? `<button class="icon-btn" data-remove="${it.id}" style="color:var(--urgent); padding:2px 4px; font-size:11px;">삭제</button>` : ""}
+          ${isTodayCart && !it.submitted ? `<button class="icon-btn" data-cart-cancel="${it.id}" style="color:var(--urgent); padding:2px 4px; font-size:11px;">취소</button>` : ""}
+        </div>
+      </div>`;
+  }
+
   const byMain = {};
   for (const it of cartItems) {
     const m = it.mainCategory || "기본자재";
@@ -490,36 +523,28 @@ function renderCart() {
     if (!byMain[main]) continue;
     html += `<div class="category-title">${escapeHtml(main)}<span class="sub">${byMain[main].length}건</span></div>`;
 
+    // 긴급 항목은 소분류에 상관없이 이 대분류 카드 맨 위에 따로 모아서 보여준다
+    // — 사장님 화면과 동일하게 맞춘다.
+    const urgentItems = byMain[main].filter((it) => it.urgency === "urgent");
+    const restItems = byMain[main].filter((it) => it.urgency !== "urgent");
+
     const bySub = {};
-    for (const it of byMain[main]) {
+    for (const it of restItems) {
       const sub = it.subCategory || "기타";
       if (!bySub[sub]) bySub[sub] = [];
       bySub[sub].push(it);
     }
 
     html += `<div class="card">`;
+    if (urgentItems.length > 0) {
+      html += `<div class="subcat-title" style="margin-top:0; color:var(--urgent);">🚨 긴급 모아보기</div>`;
+      for (const it of urgentItems) html += cartItemRowHtml(it, true);
+    }
     const subs = Object.keys(bySub);
     subs.forEach((sub, idx) => {
-      html += `<div class="subcat-title" style="${idx === 0 ? "margin-top:0" : "margin-top:14px"}">${escapeHtml(sub)}</div>`;
-      for (const it of bySub[sub]) {
-        html += `
-          <div class="item-row ${it.ordered ? "ordered" : ""}">
-            <div style="flex:1">
-              <div class="name"><span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${it.qty ? `<span class="qty-pill">${escapeHtml(it.qty)} 남음</span>` : ""}</div>
-              ${it.note ? `<div class="note">${escapeHtml(it.note)}</div>` : ""}
-              ${it.photoUrl ? `<a href="${it.photoUrl}" target="_blank" rel="noopener"><img src="${it.photoUrl}" class="note-photo-thumb" alt="첨부 사진" /></a>` : ""}
-              ${it.staffName ? `<div class="who">${escapeHtml(it.staffName)}님${formatTimeLabel(it.updatedAt) ? ` · ${formatTimeLabel(it.updatedAt)}` : ""}</div>` : ""}
-            </div>
-            <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
-              <span class="badge ${it.urgency}">${URGENCY_LABEL[it.urgency] || it.urgency}</span>
-              ${isTodayCart ? `<span class="tag ${it.submitted ? "submitted" : "pending"}">${it.submitted ? "제출됨" : "미제출"}</span>` : ""}
-              ${it.ordered ? `<span class="tag ordered">✓ 주문완료</span>` : ""}
-              ${it.ordered && formatTimestampLabel(it.orderedAt) ? `<span style="font-size:10px; color:var(--muted); text-align:right;">${formatTimestampLabel(it.orderedAt)}</span>` : ""}
-              ${isTodayCart && it.submitted && canDelete(it) ? `<button class="icon-btn" data-remove="${it.id}" style="color:var(--urgent); padding:2px 4px; font-size:11px;">삭제</button>` : ""}
-              ${isTodayCart && !it.submitted ? `<button class="icon-btn" data-cart-cancel="${it.id}" style="color:var(--urgent); padding:2px 4px; font-size:11px;">취소</button>` : ""}
-            </div>
-          </div>`;
-      }
+      const isFirst = idx === 0 && urgentItems.length === 0;
+      html += `<div class="subcat-title" style="margin-top:${isFirst ? "0" : "14px"}">${escapeHtml(sub)}</div>`;
+      for (const it of bySub[sub]) html += cartItemRowHtml(it, false);
     });
     html += `</div>`;
 
@@ -709,6 +734,7 @@ async function submitCategory(main) {
     toast("제출할 변경사항이 없어요");
     return;
   }
+  let addedCount = 0;
   for (const [id, p] of entries) {
     const ref = doc(itemsCol, id);
     if (p.action === "delete") {
@@ -727,10 +753,23 @@ async function submitCategory(main) {
         staffPhone,
         updatedAt: serverTimestamp(),
       }, { merge: true });
+      addedCount++;
     }
     delete pending[id];
   }
   savePending();
+  // 사장님 알림은 항목 하나하나가 아니라 이 제출 묶음당 한 번만 가도록,
+  // 개별 자재 문서와는 별도로 "제출 이벤트" 문서 하나를 추가로 남긴다 —
+  // functions/index.js의 notifyOwnerOnNewRequest가 이 문서 생성을 구독한다.
+  if (addedCount > 0) {
+    await addDoc(collection(db, "checks", date, "requestBatches"), {
+      staffName,
+      staffPhone,
+      mainCategory: main,
+      itemCount: addedCount,
+      createdAt: serverTimestamp(),
+    });
+  }
   if (view === "cart") cartItems = buildTodayCartItems();
   render();
   toast(`${main} 발주 요청을 보냈어요`);

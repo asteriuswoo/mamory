@@ -3,7 +3,7 @@
 // unmount() rather than running at module load time, since this module now
 // stays loaded across tab switches instead of being torn down by a full
 // page reload each time.
-import { db, STORE_NAME, QUICK_ORDER_LINKS, collection, doc, updateDoc, onSnapshot, getDocs, serverTimestamp } from "./firebase-init.js";
+import { db, STORE_NAME, QUICK_ORDER_LINKS, collection, doc, addDoc, updateDoc, onSnapshot, getDocs, serverTimestamp } from "./firebase-init.js";
 import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, escapeHtml, URGENCY_LABEL, sortMaterials } from "./util.js";
 import { isPushDisabled, disablePushToken, enablePushToken } from "./push.js";
 import { recordSubmitToday } from "./mascot.js";
@@ -119,13 +119,28 @@ async function shareOrderedChecks() {
     return;
   }
   const ids = [...orderedPending];
+  const byStaff = {}; // staffPhone -> { staffName, count } — one push per staff member per submit, not per item
   for (const id of ids) {
     try {
+      const it = items.find((x) => x.id === id);
       await updateDoc(doc(db, "checks", datePick.value, "items", id), { ordered: true, orderedAt: serverTimestamp() });
       orderedPending.delete(id);
+      if (it && it.staffPhone) {
+        const key = it.staffPhone;
+        if (!byStaff[key]) byStaff[key] = { staffName: it.staffName || "", count: 0 };
+        byStaff[key].count++;
+      }
     } catch (e) {
       toast("일부 항목 업데이트에 실패했어요");
     }
+  }
+  for (const [staffPhone, info] of Object.entries(byStaff)) {
+    await addDoc(collection(db, "checks", datePick.value, "orderBatches"), {
+      staffPhone,
+      staffName: info.staffName,
+      itemCount: info.count,
+      createdAt: serverTimestamp(),
+    });
   }
   toast("체크한 항목을 직원에게 공유했어요");
   recordSubmitToday();
@@ -170,16 +185,49 @@ function render() {
     return order.indexOf(a) - order.indexOf(b);
   });
 
+  function itemRowHtml(it, showSub) {
+    const isChecked = it.ordered || orderedPending.has(it.id);
+    const isLocked = !!it.ordered;
+    return `
+      <div class="item-row ${isChecked ? "ordered" : ""}">
+        <div style="flex:1">
+          <div class="name">${!it.ordered && !orderedPending.has(it.id) ? `<span class="tag new">NEW</span>` : ""}<span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${showSub && it.subCategory ? `<span class="subcat-inline-tag">${escapeHtml(it.subCategory)}</span>` : ""}${it.qty ? `<span class="qty-pill">${escapeHtml(it.qty)} 남음</span>` : ""}</div>
+          ${it.note ? `<div class="note">${escapeHtml(it.note)}</div>` : ""}
+          ${it.photoUrl ? `<a href="${it.photoUrl}" target="_blank" rel="noopener"><img src="${it.photoUrl}" class="note-photo-thumb" alt="첨부 사진" /></a>` : ""}
+          <div class="who">${it.staffName ? escapeHtml(it.staffName) + "님" : ""}${formatTimeLabel(it.updatedAt) ? ` · ${formatTimeLabel(it.updatedAt)}` : ""}</div>
+        </div>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+          <span class="badge ${it.urgency}">${it.urgency === "urgent" ? "🚨 " : ""}${URGENCY_LABEL[it.urgency] || it.urgency}</span>
+          <div class="order-check">
+            <input type="checkbox" id="ordered-${it.id}" data-ordered-id="${it.id}" ${isChecked ? "checked" : ""} ${isLocked ? "disabled" : ""} />
+            <label for="ordered-${it.id}">${isLocked ? "공유됨" : "주문완료"}</label>
+          </div>
+          ${isLocked && formatTimestampLabel(it.orderedAt) ? `<span style="font-size:10px; color:var(--muted); text-align:right;">${formatTimestampLabel(it.orderedAt)}</span>` : ""}
+        </div>
+      </div>`;
+  }
+
   let html = "";
   for (const main of mains) {
+    // 긴급 항목은 소분류에 상관없이 이 대분류 카드 맨 위에 따로 모아서 보여준다
+    // — 나머지는 기존처럼 소분류별로 묶는다.
+    const urgentItems = byMain[main].filter((it) => it.urgency === "urgent");
+    const restItems = byMain[main].filter((it) => it.urgency !== "urgent");
+
     const bySub = {};
-    for (const it of byMain[main]) {
+    for (const it of restItems) {
       const sub = it.subCategory || "기타";
       if (!bySub[sub]) bySub[sub] = [];
       bySub[sub].push(it);
     }
     html += `<div class="category-title">${escapeHtml(main)}<span class="sub">${byMain[main].length}건</span></div>`;
     html += `<div class="card">`;
+
+    if (urgentItems.length > 0) {
+      html += `<div class="subcat-title" style="margin-top:0; color:var(--urgent);">🚨 긴급 모아보기</div>`;
+      for (const it of sortItems(urgentItems)) html += itemRowHtml(it, true);
+    }
+
     // Subcategories with any not-yet-ordered item float above fully-completed
     // ones, so a fresh request never gets buried under an already-handled group.
     // Within that, the owner's explicit 소분류 순서 wins; anything not yet
@@ -198,29 +246,9 @@ function render() {
       return ao - bo;
     });
     subs.forEach((sub, idx) => {
-      if (idx > 0) html += `<div class="subcat-title" style="margin-top:14px">${escapeHtml(sub)}</div>`;
-      else html += `<div class="subcat-title" style="margin-top:0">${escapeHtml(sub)}</div>`;
-      for (const it of sortItems(bySub[sub])) {
-        const isChecked = it.ordered || orderedPending.has(it.id);
-        const isLocked = !!it.ordered;
-        html += `
-          <div class="item-row ${isChecked ? "ordered" : ""}">
-            <div style="flex:1">
-              <div class="name">${!it.ordered && !orderedPending.has(it.id) ? `<span class="tag new">NEW</span>` : ""}<span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${it.qty ? `<span class="qty-pill">${escapeHtml(it.qty)} 남음</span>` : ""}</div>
-              ${it.note ? `<div class="note">${escapeHtml(it.note)}</div>` : ""}
-              ${it.photoUrl ? `<a href="${it.photoUrl}" target="_blank" rel="noopener"><img src="${it.photoUrl}" class="note-photo-thumb" alt="첨부 사진" /></a>` : ""}
-              <div class="who">${it.staffName ? escapeHtml(it.staffName) + "님" : ""}${formatTimeLabel(it.updatedAt) ? ` · ${formatTimeLabel(it.updatedAt)}` : ""}</div>
-            </div>
-            <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
-              <span class="badge ${it.urgency}">${URGENCY_LABEL[it.urgency] || it.urgency}</span>
-              <div class="order-check">
-                <input type="checkbox" id="ordered-${it.id}" data-ordered-id="${it.id}" ${isChecked ? "checked" : ""} ${isLocked ? "disabled" : ""} />
-                <label for="ordered-${it.id}">${isLocked ? "공유됨" : "주문완료"}</label>
-              </div>
-              ${isLocked && formatTimestampLabel(it.orderedAt) ? `<span style="font-size:10px; color:var(--muted); text-align:right;">${formatTimestampLabel(it.orderedAt)}</span>` : ""}
-            </div>
-          </div>`;
-      }
+      const isFirst = idx === 0 && urgentItems.length === 0;
+      html += `<div class="subcat-title" style="margin-top:${isFirst ? "0" : "14px"}">${escapeHtml(sub)}</div>`;
+      for (const it of sortItems(bySub[sub])) html += itemRowHtml(it);
     });
     html += `</div>`;
   }

@@ -1058,9 +1058,11 @@ button {
   letter-spacing: .01em;
 }
 
-.tag.submitted { color: var(--normal); }
+.tag.submitted { color: var(--gold); }
 .tag.pending { color: var(--gold); }
 .tag.ordered { color: var(--gold); }
+.tag.role-owner { color: var(--normal); }
+.tag.role-staff { color: var(--gold); }
 .tag.new {
   display: inline-flex;
   align-items: center;
@@ -1087,12 +1089,21 @@ button {
 }
 
 @keyframes newRequestFlash {
-  0%, 100% { background: var(--gold-soft); border-color: var(--gold-light); }
-  50% { background: var(--urgent-soft); border-color: var(--urgent); }
+  0%, 100% { background: var(--gold-soft); border-color: var(--gold-light); box-shadow: none; }
+  50% { background: var(--urgent); border-color: var(--urgent); box-shadow: 0 0 0 3px var(--urgent-soft); }
+}
+
+@keyframes newRequestFlashText {
+  0%, 100% { color: var(--gold); }
+  50% { color: #fff; }
 }
 
 #newRequestCard.flash {
-  animation: newRequestFlash .45s ease-in-out 4;
+  animation: newRequestFlash .6s ease-in-out 3;
+}
+
+#newRequestCard.flash #newRequestText {
+  animation: newRequestFlashText .6s ease-in-out 3;
 }
 
 .order-check {
@@ -1131,6 +1142,17 @@ button {
   background: var(--gold-soft);
   border-radius: 6px;
   padding: 1px 7px;
+  margin-left: 6px;
+}
+
+.subcat-inline-tag {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--soldout-soft);
+  border-radius: 6px;
+  padding: 1px 6px;
   margin-left: 6px;
 }
 
@@ -1184,6 +1206,12 @@ button {
   align-items: stretch;
   position: relative;
   padding-left: 60px;
+  /* .post-avatar-col below is position:absolute (needed so a long author
+     name never pushes the content column over), so it takes no space in
+     normal flow — without a floor here, a short one-line post's row ends up
+     shorter than the avatar+name block, which then visually spills into the
+     next row underneath it. */
+  min-height: 68px;
 }
 
 .post-head {
@@ -1255,17 +1283,81 @@ button {
   flex-shrink: 0;
 }
 
-/* Soldout posts have no reaction row to share a line with, so the delete
-   button sits alone directly under the date — it needs its own
-   right-alignment there (a <button> keeps its shrink-to-fit width even at
+.post-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+/* Soldout posts have no reaction row to share a line with, so the edit/delete
+   buttons sit alone directly under the date — they need their own
+   right-alignment there (a <div> keeps its shrink-to-fit width even at
    display:block, so width:fit-content + margin-left:auto is what actually
-   pushes it to the right edge). Note posts' delete button skips this: it's
+   pushes it to the right edge). Note posts' actions skip this: they're
    already a flex sibling inside .reaction-row instead. */
-.post-head > .post-delete-btn {
-  display: block;
+.post-head > .post-actions {
   width: fit-content;
   margin-left: auto;
   margin-top: 4px;
+}
+
+.post-edit-btn {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.post-top-row.edit-mode {
+  display: block;
+  width: 100%;
+}
+
+.edit-row {
+  margin-bottom: 6px;
+}
+
+.edit-input,
+.edit-textarea {
+  width: 100%;
+  font-size: 13px;
+  padding: 7px 10px;
+}
+
+.edit-textarea {
+  resize: vertical;
+}
+
+.edit-btn-row {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.edit-save-btn {
+  border: 1px solid var(--gold);
+  background: var(--gold-soft);
+  color: var(--gold);
+  border-radius: 8px;
+  padding: 0 12px;
+  height: 30px;
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.edit-cancel-btn {
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 0 12px;
+  height: 30px;
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .post-avatar-col {
@@ -1410,6 +1502,43 @@ button {
 
 .reply-content {
   color: var(--text);
+}
+
+.reply-edit-btn {
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  margin-left: 6px;
+  padding: 0;
+}
+
+.reply-edit-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+}
+
+.reply-edit-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  padding: 5px 8px;
+}
+
+.reply-save-btn,
+.reply-cancel-btn {
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .reply-toggle-btn {
@@ -1916,4 +2045,12 @@ pre.share-preview {
 #mascotFeedBtn:disabled {
   opacity: .4;
   cursor: default;
+}
+
+/* ---- 품목명 옆에 작게 표시하는 정상발주/긴급 기준 ---- */
+.order-criteria-hint {
+  font-size: 11px;
+  color: var(--toggle-blue);
+  font-weight: 600;
+  margin-top: 2px;
 }

@@ -85,30 +85,37 @@ function shareLinkForRole(role) {
   return role === "owner" ? "/share.html" : "/staff.html?view=share";
 }
 
-// 새 발주 요청이 제출되면 사장님(들)에게 알림.
-exports.notifyOwnerOnNewRequest = onDocumentCreated("checks/{date}/items/{itemId}", async (event) => {
-  const item = event.data.data();
+// 새 발주 요청이 제출되면 사장님(들)에게 알림. 직원이 "발주 요청하기"를 한 번
+//누르면 담아둔 자재 수만큼 checks/{date}/items 문서가 생기는데, 예전에는 이
+// 컬렉션을 직접 구독해서 자재 개수만큼 알림이 우르르 갔다 — 대신 제출 시점에
+// staff.js가 별도로 남기는 requestBatches 문서(제출 묶음 1건당 1개) 를
+// 구독해서, 제출할 때마다 딱 한 번만 알림이 가도록 한다.
+exports.notifyOwnerOnNewRequest = onDocumentCreated("checks/{date}/requestBatches/{batchId}", async (event) => {
+  const batch = event.data.data();
   const ownersSnap = await db.collection("accounts").where("role", "==", "owner").get();
   const tokens = [];
   ownersSnap.forEach((doc) => tokens.push(...tokensOf(doc.data().fcmTokens)));
   await sendToTokens(tokens, {
     title: "자재발주 요청",
-    body: `${item.staffName ? item.staffName + "님 · " : ""}${item.materialName || ""}`,
+    body: `${batch.staffName ? batch.staffName + "님이 " : ""}자재 발주 요청을 보냈습니다`,
     link: "/owner.html",
   });
 });
 
-// 사장님이 주문완료 처리하면(false -> true 전환 시점) 요청한 직원에게 알림.
-exports.notifyStaffOnOrdered = onDocumentUpdated("checks/{date}/items/{itemId}", async (event) => {
-  const before = event.data.before.data();
-  const after = event.data.after.data();
-  if (before.ordered || !after.ordered || !after.staffPhone) return;
-  const accSnap = await db.collection("accounts").doc(after.staffPhone).get();
+// 사장님이 주문완료 체크 후 "제출"을 누르면 요청한 직원에게 알림. 예전에는
+// checks/{date}/items 를 직접 구독해서 항목 개수만큼 알림이 우르르 갔는데,
+// 이제는 제출 시점에 owner.js가 직원별로 남기는 orderBatches 문서(제출
+// 1건당 직원 1명당 1개)를 구독해서, 제출할 때마다 직원당 딱 한 번만 알림이
+// 가도록 한다.
+exports.notifyStaffOnOrdered = onDocumentCreated("checks/{date}/orderBatches/{batchId}", async (event) => {
+  const batch = event.data.data();
+  if (!batch.staffPhone) return;
+  const accSnap = await db.collection("accounts").doc(batch.staffPhone).get();
   if (!accSnap.exists) return;
   const tokens = tokensOf(accSnap.data().fcmTokens);
   await sendToTokens(tokens, {
     title: "사장님의 주문완료 알림",
-    body: after.materialName || "",
+    body: "사장님이 자재 주문을 완료했습니다",
     link: "/staff.html?view=cart",
   });
 });
