@@ -4,7 +4,7 @@
 // stays loaded across tab switches instead of being torn down by a full
 // page reload each time.
 import { db, STORE_NAME, QUICK_ORDER_LINKS, collection, doc, addDoc, updateDoc, onSnapshot, getDocs, serverTimestamp } from "./firebase-init.js";
-import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, escapeHtml, URGENCY_LABEL, sortMaterials } from "./util.js";
+import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, escapeHtml, URGENCY_LABEL, URGENCY_GROUP_CAPTION, sortMaterials } from "./util.js";
 import { isPushDisabled, disablePushToken, enablePushToken } from "./push.js";
 import { recordSubmitToday } from "./mascot.js";
 
@@ -209,10 +209,11 @@ function render() {
 
   let html = "";
   for (const main of mains) {
-    // 긴급 항목은 소분류에 상관없이 이 대분류 카드 맨 위에 따로 모아서 보여준다
-    // — 나머지는 기존처럼 소분류별로 묶는다.
+    // 품절/긴급 항목은 소분류에 상관없이 이 대분류 카드 맨 위에 따로 모아서
+    // 보여준다 — 나머지(정상 발주)는 기존처럼 소분류별로 묶는다.
+    const soldoutItems = byMain[main].filter((it) => it.urgency === "soldout");
     const urgentItems = byMain[main].filter((it) => it.urgency === "urgent");
-    const restItems = byMain[main].filter((it) => it.urgency !== "urgent");
+    const restItems = byMain[main].filter((it) => it.urgency !== "urgent" && it.urgency !== "soldout");
 
     const bySub = {};
     for (const it of restItems) {
@@ -223,33 +224,42 @@ function render() {
     html += `<div class="category-title">${escapeHtml(main)}<span class="sub">${byMain[main].length}건</span></div>`;
     html += `<div class="card">`;
 
+    if (soldoutItems.length > 0) {
+      html += `<div class="subcat-title urgency-caption soldout" style="margin-top:0;"><span class="urgency-caption-label">${URGENCY_LABEL.soldout}</span>${URGENCY_GROUP_CAPTION.soldout}</div>`;
+      for (const it of sortItems(soldoutItems)) html += itemRowHtml(it, true);
+    }
+
     if (urgentItems.length > 0) {
-      html += `<div class="subcat-title" style="margin-top:0; color:var(--urgent);">🚨 긴급 모아보기</div>`;
+      html += `<div class="subcat-title urgency-caption urgent" style="margin-top:${soldoutItems.length > 0 ? "14px" : "0"};"><span class="urgency-caption-label">${URGENCY_LABEL.urgent}</span>${URGENCY_GROUP_CAPTION.urgent}</div>`;
       for (const it of sortItems(urgentItems)) html += itemRowHtml(it, true);
     }
 
-    // Subcategories with any not-yet-ordered item float above fully-completed
-    // ones, so a fresh request never gets buried under an already-handled group.
-    // Within that, the owner's explicit 소분류 순서 wins; anything not yet
-    // arranged there falls back to catalog first-appearance order.
-    const explicitRank = {};
-    (subcategoryOrder[main] || []).forEach((name, i) => { explicitRank[name] = i; });
-    const subs = Object.keys(bySub).sort((subA, subB) => {
-      const aNew = bySub[subA].some((it) => !it.ordered) ? 0 : 1;
-      const bNew = bySub[subB].some((it) => !it.ordered) ? 0 : 1;
-      if (aNew !== bNew) return aNew - bNew;
-      const aExp = explicitRank[subA] ?? 9999;
-      const bExp = explicitRank[subB] ?? 9999;
-      if (aExp !== bExp) return aExp - bExp;
-      const ao = materialFirstAppearanceRank[`${main}::${subA}`] ?? 9999;
-      const bo = materialFirstAppearanceRank[`${main}::${subB}`] ?? 9999;
-      return ao - bo;
-    });
-    subs.forEach((sub, idx) => {
-      const isFirst = idx === 0 && urgentItems.length === 0;
-      html += `<div class="subcat-title" style="margin-top:${isFirst ? "0" : "14px"}">${escapeHtml(sub)}</div>`;
-      for (const it of sortItems(bySub[sub])) html += itemRowHtml(it);
-    });
+    if (restItems.length > 0) {
+      const isFirstGroup = soldoutItems.length === 0 && urgentItems.length === 0;
+      html += `<div class="subcat-title urgency-caption normal" style="margin-top:${isFirstGroup ? "0" : "14px"};"><span class="urgency-caption-label">${URGENCY_LABEL.normal}</span>${URGENCY_GROUP_CAPTION.normal}</div>`;
+
+      // Subcategories with any not-yet-ordered item float above fully-completed
+      // ones, so a fresh request never gets buried under an already-handled group.
+      // Within that, the owner's explicit 소분류 순서 wins; anything not yet
+      // arranged there falls back to catalog first-appearance order.
+      const explicitRank = {};
+      (subcategoryOrder[main] || []).forEach((name, i) => { explicitRank[name] = i; });
+      const subs = Object.keys(bySub).sort((subA, subB) => {
+        const aNew = bySub[subA].some((it) => !it.ordered) ? 0 : 1;
+        const bNew = bySub[subB].some((it) => !it.ordered) ? 0 : 1;
+        if (aNew !== bNew) return aNew - bNew;
+        const aExp = explicitRank[subA] ?? 9999;
+        const bExp = explicitRank[subB] ?? 9999;
+        if (aExp !== bExp) return aExp - bExp;
+        const ao = materialFirstAppearanceRank[`${main}::${subA}`] ?? 9999;
+        const bo = materialFirstAppearanceRank[`${main}::${subB}`] ?? 9999;
+        return ao - bo;
+      });
+      subs.forEach((sub) => {
+        html += `<div class="subcat-title" style="margin-top:14px">${escapeHtml(sub)}</div>`;
+        for (const it of sortItems(bySub[sub])) html += itemRowHtml(it);
+      });
+    }
     html += `</div>`;
   }
 

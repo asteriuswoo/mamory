@@ -24,7 +24,6 @@ function sortByTime(list) {
 
 const REACTIONS = [
   { key: "heart", emoji: "❤️" },
-  { key: "like", emoji: "👍" },
   { key: "sad", emoji: "😢" },
   { key: "awesome", emoji: "👏" },
 ];
@@ -46,8 +45,8 @@ function reactionRow(it, actionsHtml) {
 const editingItems = new Map();
 const editingReplies = new Map();
 
-function postActionsHtml(it, isToday) {
-  if (!isToday || !canDeleteShare(it) || editingItems.has(it.id)) return "";
+function postActionsHtml(it) {
+  if (!canDeleteShare(it) || editingItems.has(it.id)) return "";
   return `<div class="post-actions">
     <button class="post-edit-btn" data-share-edit="${it.id}">수정</button>
     <button class="post-delete-btn" data-share-remove="${it.id}">삭제</button>
@@ -82,20 +81,42 @@ async function saveShareEdit(id, value) {
     toast("내용을 입력해주세요");
     return;
   }
-  await updateDoc(doc(db, "shares", date, "items", id), { content: text });
+  await updateDoc(doc(db, "shares", shareDate, "items", id), { content: text });
+  const it = shareItems.find((x) => x.id === id);
+  if (it) it.content = text; // past dates have no live listener to pick this up otherwise
   editingItems.delete(id);
-  render(); // saved content can equal what's already cached, in which case onSnapshot never fires
+  render();
   toast("수정했어요");
 }
 
+// 좋아요류 반응은 하트/슬픔/최고 중 하나만 고를 수 있다 — 고르면 같은 사람이
+// 이전에 눌러둔 다른 반응은 자동으로 지운다.
 async function toggleReaction(itemId, key) {
   const it = shareItems.find((x) => x.id === itemId);
   if (!it) return;
-  const list = (it.reactions && it.reactions[key]) || [];
-  const mine = list.includes(account.phone);
-  await updateDoc(doc(db, "shares", shareDate, "items", itemId), {
-    [`reactions.${key}`]: mine ? arrayRemove(account.phone) : arrayUnion(account.phone),
-  });
+  const reactions = it.reactions || {};
+  const mine = ((reactions[key] || [])).includes(account.phone);
+  const updates = {};
+  const newReactions = {};
+  for (const r of REACTIONS) {
+    const current = reactions[r.key] || [];
+    if (r.key === key) {
+      updates[`reactions.${key}`] = mine ? arrayRemove(account.phone) : arrayUnion(account.phone);
+      newReactions[r.key] = mine ? current.filter((p) => p !== account.phone) : [...current, account.phone];
+    } else if (current.includes(account.phone)) {
+      updates[`reactions.${r.key}`] = arrayRemove(account.phone);
+      newReactions[r.key] = current.filter((p) => p !== account.phone);
+    } else {
+      newReactions[r.key] = current;
+    }
+  }
+  await updateDoc(doc(db, "shares", shareDate, "items", itemId), updates);
+  // Today's list re-renders itself once the live listener catches this write
+  // — but a browsed past date has no listener (loadShareDate is a one-time
+  // getDocs), so without patching the local copy here, a reaction on an old
+  // post never visibly toggles.
+  it.reactions = newReactions;
+  render();
 }
 
 // Replies live as a plain array on the parent note (not a subcollection) so
@@ -106,46 +127,47 @@ async function toggleReaction(itemId, key) {
 // note; a "댓글달기" button reveals it on demand instead.
 const openReplyFor = new Set();
 
-function repliesHtml(it, isToday) {
+function repliesHtml(it) {
   const replies = it.replies || [];
   let html = "";
   if (replies.length > 0) {
     html += `<div class="reply-list">${replies
       .map((r, idx) => {
         const key = `${it.id}:${idx}`;
-        const mine = isToday && r.staffPhone === account.phone;
+        const mine = r.staffPhone === account.phone;
         if (editingReplies.has(key)) {
           return `
           <div class="reply-row">
             ${avatarHtml(r.staffPhone, r.staffName, 18)}
-            <span class="reply-who">${escapeHtml(r.staffName || "")}님</span>
-            <div class="reply-edit-row">
-              <input type="text" class="reply-edit-input" data-reply-edit-input="${key}" value="${escapeHtml(editingReplies.get(key))}" />
-              <button class="reply-cancel-btn" data-reply-edit-cancel="${key}">취소</button>
-              <button class="reply-save-btn" data-reply-edit-save="${key}">저장</button>
+            <div class="reply-body">
+              <span class="reply-who">${escapeHtml(r.staffName || "")}님</span>
+              <div class="reply-edit-row">
+                <input type="text" class="reply-edit-input" data-reply-edit-input="${key}" value="${escapeHtml(editingReplies.get(key))}" />
+                <button class="reply-cancel-btn" data-reply-edit-cancel="${key}">취소</button>
+                <button class="reply-save-btn" data-reply-edit-save="${key}">저장</button>
+              </div>
             </div>
           </div>`;
         }
         return `
         <div class="reply-row">
           ${avatarHtml(r.staffPhone, r.staffName, 18)}
-          <span class="reply-who">${escapeHtml(r.staffName || "")}님</span>
-          <span class="reply-content">${escapeHtml(r.content)}</span>
-          ${mine ? `<button class="reply-edit-btn" data-reply-edit="${key}">수정</button><button class="reply-delete-btn" data-reply-delete-item="${it.id}" data-reply-delete-idx="${idx}">삭제</button>` : ""}
+          <div class="reply-body">
+            <span class="reply-who">${escapeHtml(r.staffName || "")}님</span><span class="reply-content">${escapeHtml(r.content)}</span>
+            ${mine ? `<div class="reply-actions"><button class="reply-edit-btn" data-reply-edit="${key}">수정</button><button class="reply-delete-btn" data-reply-delete-item="${it.id}" data-reply-delete-idx="${idx}">삭제</button></div>` : ""}
+          </div>
         </div>`;
       })
       .join("")}</div>`;
   }
-  if (isToday) {
-    if (openReplyFor.has(it.id)) {
-      html += `
-        <div class="reply-input-row">
-          <input type="text" class="reply-input" data-reply-for="${it.id}" placeholder="답글 달기" />
-          <button class="reply-send-btn" data-reply-send="${it.id}">등록</button>
-        </div>`;
-    } else {
-      html += `<button class="reply-toggle-btn" data-reply-toggle="${it.id}">댓글달기</button>`;
-    }
+  if (openReplyFor.has(it.id)) {
+    html += `
+      <div class="reply-input-row">
+        <input type="text" class="reply-input" data-reply-for="${it.id}" placeholder="답글 달기" />
+        <button class="reply-send-btn" data-reply-send="${it.id}">등록</button>
+      </div>`;
+  } else {
+    html += `<button class="reply-toggle-btn" data-reply-toggle="${it.id}">댓글달기</button>`;
   }
   return html;
 }
@@ -156,9 +178,13 @@ async function addReply(itemId, content) {
     toast("답글 내용을 입력해주세요");
     return;
   }
-  await updateDoc(doc(db, "shares", date, "items", itemId), {
-    replies: arrayUnion({ content: text, staffName: account.name, staffPhone: account.phone, createdAt: Date.now() }),
+  const reply = { content: text, staffName: account.name, staffPhone: account.phone, createdAt: Date.now() };
+  await updateDoc(doc(db, "shares", shareDate, "items", itemId), {
+    replies: arrayUnion(reply),
   });
+  const it = shareItems.find((x) => x.id === itemId);
+  if (it) it.replies = [...(it.replies || []), reply]; // see toggleReaction's comment — past dates have no live listener
+  render();
 }
 
 async function saveReplyEdit(key, value) {
@@ -174,9 +200,10 @@ async function saveReplyEdit(key, value) {
   }
   const newReplies = [...it.replies];
   newReplies[idx] = { ...reply, content: text };
-  await updateDoc(doc(db, "shares", date, "items", itemId), { replies: newReplies });
+  await updateDoc(doc(db, "shares", shareDate, "items", itemId), { replies: newReplies });
+  it.replies = newReplies; // past dates have no live listener to pick this up otherwise
   editingReplies.delete(key);
-  render(); // saved content can equal what's already cached, in which case onSnapshot never fires
+  render();
   toast("수정했어요");
 }
 
@@ -189,9 +216,11 @@ async function deleteReplyAt(itemId, idx) {
     return;
   }
   if (!confirm("답글을 삭제할까요?")) return;
-  await updateDoc(doc(db, "shares", date, "items", itemId), {
+  await updateDoc(doc(db, "shares", shareDate, "items", itemId), {
     replies: arrayRemove(reply),
   });
+  it.replies = it.replies.filter((_, i) => i !== idx); // past dates have no live listener to pick this up otherwise
+  render();
 }
 
 let rootEl = null;
@@ -203,6 +232,7 @@ let shareItems = [];
 let shareTodayItems = []; // always-live today's items, independent of which day is being browsed
 const chipCounts = {};
 const chipUnseen = {}; // date -> true if that date has any item this viewer hasn't seen yet
+const chipHasSoldout = {}; // date -> true if that date has any 품절 share (drives the "어제 품절 해제" reminder)
 
 function canDeleteShare(it) {
   // Legacy items with no staffPhone stamped can't be attributed — allow
@@ -228,6 +258,7 @@ function markSeen(items, forDate) {
 function render() {
   if (!rootEl) return;
   const isToday = shareDate === date;
+  const yesterdayDateStr = dateStrDaysAgo(1);
   const soldoutList = sortByTime(shareItems.filter((it) => it.type === "soldout"));
   const noteList = sortByTime(shareItems.filter((it) => it.type === "note"));
 
@@ -244,6 +275,10 @@ function render() {
     <div class="category-title">품절 공유<span class="sub">${soldoutList.length}건</span></div>
     <div class="card">`;
 
+  if (isToday && chipHasSoldout[yesterdayDateStr]) {
+    html += `<button class="soldout-reminder-banner" id="soldoutReminderBtn">오늘 물류가 왔다면 탭해서 확인 후 관련 메뉴 품절해제해주세요😊</button>`;
+  }
+
   if (soldoutList.length === 0) {
     html += `<div class="empty">공유된 품절 자재가 없어요.</div>`;
   } else {
@@ -256,7 +291,7 @@ function render() {
               <div class="post-author-name">${escapeHtml(it.staffName || "")}</div>
             </div>
             ${postTopRowHtml(it, isToday)}
-            ${postActionsHtml(it, isToday)}
+            ${postActionsHtml(it)}
           </div>
         </div>`;
     }
@@ -288,8 +323,8 @@ function render() {
           </div>
           <div class="post-body">
             ${it.photoUrl ? `<a href="${it.photoUrl}" target="_blank" rel="noopener"><img src="${it.photoUrl}" class="note-photo-thumb" alt="첨부 사진" /></a>` : ""}
-            ${reactionRow(it, postActionsHtml(it, isToday))}
-            ${repliesHtml(it, isToday)}
+            ${reactionRow(it, postActionsHtml(it))}
+            ${repliesHtml(it)}
           </div>
         </div>`;
     }
@@ -347,6 +382,8 @@ function render() {
       render();
     });
   }
+  const soldoutReminderBtn = rootEl.querySelector("#soldoutReminderBtn");
+  if (soldoutReminderBtn) soldoutReminderBtn.addEventListener("click", () => loadShareDate(yesterdayDateStr));
   rootEl.querySelectorAll("[data-share-remove]").forEach((el) => {
     el.addEventListener("click", () => deleteShareItem(el.dataset.shareRemove));
   });
@@ -482,7 +519,10 @@ function loadAllShareChipCounts() {
       .then((snap) => {
         chipCounts[d] = snap.size;
         chipUnseen[d] = snap.docs.some((doc) => !(doc.data().seenBy || []).includes(account.phone));
-        if (shareDate === d) render();
+        chipHasSoldout[d] = snap.docs.some((doc) => doc.data().type === "soldout");
+        // Today's own render depends on yesterday's chipHasSoldout (the
+        // reminder banner), not just the date currently being browsed.
+        if (shareDate === d || (shareDate === date && d === dateStrDaysAgo(1))) render();
         else wireShareDayChipsIfMounted();
       })
       .catch(() => {});
@@ -545,7 +585,11 @@ async function deleteShareItem(id) {
     return;
   }
   if (!confirm("삭제할까요?")) return;
-  await deleteDoc(doc(db, "shares", date, "items", id));
+  await deleteDoc(doc(db, "shares", shareDate, "items", id));
+  // past dates have no live listener to pick this up otherwise
+  shareItems = shareItems.filter((x) => x.id !== id);
+  if (shareDate === date) shareTodayItems = shareTodayItems.filter((x) => x.id !== id);
+  render();
   toast("삭제했어요");
 }
 

@@ -94,7 +94,7 @@ async function bumpAppBadge() {
   }
 }
 
-const CACHE_NAME = "cafe-order-v21";
+const CACHE_NAME = "cafe-order-v22";
 const APP_SHELL = [
   "index.html",
   "staff.html",
@@ -127,10 +127,12 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return; // let Firebase/CDN requests pass through
 
   event.respondWith(
-    // Bypass the browser's own HTTP cache (not just the Cache API storage
-    // below) so a deploy is picked up immediately instead of waiting out
-    // any Cache-Control max-age on the response.
-    fetch(event.request, { cache: "no-store" })
+    // "no-cache" (not "no-store"): always revalidate with the server before
+    // using anything, so a new deploy is still picked up immediately — but
+    // unlike no-store, an unchanged file gets a cheap 304 back instead of a
+    // full re-download every time, which is what was making cold opens
+    // (e.g. tapping a push notification) feel slower than they need to be.
+    fetch(event.request, { cache: "no-cache" })
       .then((res) => {
         const resClone = res.clone();
         caches.open(CACHE_NAME).then((cache) => cache.put(event.request, resClone));

@@ -60,7 +60,11 @@ export async function uploadAvatar(phone, file) {
     // Fixed path per phone (not timestamped) — a new photo replaces the old
     // one instead of piling up in Storage.
     const fileRef = ref(storage, `avatars/${phone}.jpg`);
-    await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
+    // Without an explicit cacheControl, Storage defaults to barely
+    // cacheable — every avatarHtml() render (share board, admin list, item
+    // rows) was re-downloading the same photo from scratch. An hour is
+    // short enough that changing your photo still shows up promptly.
+    await uploadBytes(fileRef, blob, { contentType: "image/jpeg", cacheControl: "public, max-age=3600" });
     const url = await getDownloadURL(fileRef);
     await updateDoc(doc(db, "accounts", phone), { avatarUrl: url });
     toast("프로필 사진을 설정했어요");

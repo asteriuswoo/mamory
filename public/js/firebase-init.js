@@ -16,6 +16,8 @@ import {
   arrayUnion,
   arrayRemove,
   runTransaction,
+  increment,
+  enableIndexedDbPersistence,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   getAuth,
@@ -31,6 +33,14 @@ export const db = getFirestore(app);
 export const auth = getAuth(app);
 export const storage = getStorage(app);
 export { ref, uploadBytes, getDownloadURL };
+
+// Caches Firestore reads in IndexedDB so a fresh PWA launch (e.g. from
+// tapping a push notification) can paint cached data immediately instead of
+// waiting on the network round-trip, then updates live once the real
+// snapshot arrives — this is the main thing making cold opens feel slow.
+// Fails silently in multi-tab sessions or unsupported browsers, where the
+// app just falls back to network-only like before.
+enableIndexedDbPersistence(db).catch(() => {});
 
 // Web Push isn't available everywhere (notably most of iOS Safari unless the
 // PWA is installed on 16.4+), so callers must await messagingReady before
@@ -68,4 +78,5 @@ export {
   arrayUnion,
   arrayRemove,
   runTransaction,
+  increment,
 };

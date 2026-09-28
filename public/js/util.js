@@ -148,6 +148,14 @@ export const URGENCY_HINT = {
 
 export const URGENCY_ORDER = ["normal", "urgent", "soldout"];
 
+// 오늘 발주/담은 목록의 "모아보기" 섹션 캡션 — URGENCY_HINT보다 감정을 더 담아
+// 사람 말투로 표현한 버전.
+export const URGENCY_GROUP_CAPTION = {
+  normal: "2~3일 뒤면 다 소진돼요😊",
+  urgent: "당장 내일 사용할 분이 없어요😢",
+  soldout: "품절돼서 못나가고 있어요😢",
+};
+
 export function normalizePhone(v) {
   return (v || "").replace(/\D/g, "");
 }

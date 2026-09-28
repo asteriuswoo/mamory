@@ -23,6 +23,10 @@
   --soldout-soft: #e7e7e4;
   --toggle-blue: #3366e6;
   --toggle-blue-soft: #e8edfd;
+  --navy: #2b3a67;
+  --navy-soft: #e7e9f2;
+  --sky: #2aa9d6;
+  --sky-soft: #e3f4fa;
   font-family: "Pretendard", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
 }
 
@@ -711,6 +715,32 @@ button {
   padding-bottom: 4px;
 }
 
+.subcat-title.urgency-caption {
+  border-bottom-color: currentColor;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 12.5px;
+}
+
+.subcat-title.urgency-caption.soldout { color: var(--soldout); }
+.subcat-title.urgency-caption.urgent { color: var(--urgent); }
+.subcat-title.urgency-caption.normal { color: var(--normal); }
+
+.urgency-caption-label {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 800;
+  color: #fff;
+  border-radius: 5px;
+  padding: 2px 6px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.urgency-caption.soldout .urgency-caption-label { background: var(--soldout); }
+.urgency-caption.urgent .urgency-caption-label { background: var(--urgent); }
+.urgency-caption.normal .urgency-caption-label { background: var(--normal); }
+
 .subcat-add-btn {
   border: 1px solid var(--gold);
   background: var(--gold-soft);
@@ -1052,6 +1082,50 @@ button {
 .badge.normal { background: var(--normal); color: #fff; }
 .badge.soldout { background: var(--soldout); color: #fff; }
 
+.badge.tappable {
+  border: none;
+  cursor: pointer;
+}
+
+.status-picker {
+  display: flex;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.status-picker-btn {
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 10.5px;
+  font-weight: 800;
+}
+
+.status-picker-btn.urgent { color: var(--urgent); border-color: var(--urgent); }
+.status-picker-btn.normal { color: var(--normal); border-color: var(--normal); }
+.status-picker-btn.soldout { color: var(--soldout); border-color: var(--soldout); }
+
+.cart-status-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 2px 2px 10px;
+}
+
+.soldout-reminder-banner {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--sky);
+  background: var(--sky-soft);
+  color: var(--sky);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
 .tag {
   font-size: 10.5px;
   font-weight: 800;
@@ -1059,8 +1133,8 @@ button {
 }
 
 .tag.submitted { color: var(--gold); }
-.tag.pending { color: var(--gold); }
-.tag.ordered { color: var(--gold); }
+.tag.pending { color: var(--navy); }
+.tag.ordered { color: var(--sky); }
 .tag.role-owner { color: var(--normal); }
 .tag.role-staff { color: var(--gold); }
 .tag.new {
@@ -1474,14 +1548,44 @@ button {
 
 .reply-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   font-size: 12.5px;
-  line-height: 1.4;
+  line-height: 1.5;
 }
 
 .reply-row .avatar-circle {
   flex-shrink: 0;
+  margin-top: 1px;
+}
+
+/* Fixed-width column so every reply wraps against the same available width
+   regardless of whether that row also has edit/delete buttons — otherwise
+   rows with buttons had less room for text than rows without, and the name
+   label (a flex item with no explicit width) could shrink narrow enough for
+   "진우님" to break mid-word onto its own line. */
+.reply-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.reply-who {
+  font-weight: 700;
+  color: var(--text);
+  margin-right: 4px;
+  white-space: nowrap;
+}
+
+.reply-content {
+  color: var(--text);
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+.reply-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 3px;
 }
 
 .reply-delete-btn {
@@ -1490,18 +1594,7 @@ button {
   color: var(--urgent);
   font-size: 11px;
   font-weight: 700;
-  margin-left: 6px;
   padding: 0;
-}
-
-.reply-who {
-  font-weight: 700;
-  color: var(--text);
-  margin-right: 4px;
-}
-
-.reply-content {
-  color: var(--text);
 }
 
 .reply-edit-btn {
@@ -1510,7 +1603,6 @@ button {
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
-  margin-left: 6px;
   padding: 0;
 }
 
@@ -1518,8 +1610,7 @@ button {
   display: flex;
   gap: 6px;
   align-items: center;
-  flex: 1;
-  min-width: 0;
+  margin-top: 4px;
 }
 
 .reply-edit-input {
@@ -1595,10 +1686,10 @@ button {
 
 .note-photo-thumb {
   display: block;
-  width: 56px;
-  height: 56px;
+  width: 160px;
+  height: 160px;
   object-fit: cover;
-  border-radius: 6px;
+  border-radius: 10px;
   border: 1px solid var(--border);
   margin-top: 4px;
 }
@@ -2023,6 +2114,72 @@ pre.share-preview {
 .mascot-panel-jars strong {
   color: var(--gold);
   font-size: 16px;
+}
+
+.mascot-panel-level {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--ink);
+  margin-bottom: 8px;
+}
+
+.mascot-panel-level .lv-num { color: var(--gold); }
+
+.mascot-gauge-row { margin-bottom: 12px; }
+
+.mascot-gauge {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--gold-soft);
+  overflow: hidden;
+}
+
+.mascot-gauge-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--gold-light), var(--gold));
+  border-radius: 999px;
+  transition: width .4s ease;
+}
+
+.mascot-gauge.full .mascot-gauge-fill {
+  background: linear-gradient(90deg, #f0c419, var(--gold));
+}
+
+.mascot-gauge-label {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.mascot-food-list {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.mascot-food-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  font-size: 10.5px;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.mascot-food-item img {
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+}
+
+.mascot-food-empty {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 12px;
 }
 
 .mascot-panel-hint {

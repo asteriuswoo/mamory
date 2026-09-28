@@ -1,10 +1,11 @@
-import { db, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, getDocs, serverTimestamp, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
+import { db, collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, getDocs, serverTimestamp, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
 import { requireAccount, logout } from "./auth.js";
-import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, URGENCY_LABEL, URGENCY_HINT, URGENCY_ORDER, sortMaterials, sortByOrder, resizeImageFile, confirmModal } from "./util.js";
+import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, URGENCY_LABEL, URGENCY_HINT, URGENCY_ORDER, URGENCY_GROUP_CAPTION, sortMaterials, sortByOrder, resizeImageFile, confirmModal } from "./util.js";
 import { mountShareBoard, getTodayUnseenCount, watchUnseenCount } from "./shareboard.js";
 import { registerPushToken, watchForegroundPush, isPushDisabled, disablePushToken, enablePushToken } from "./push.js";
 import { wireAccountHeaderAvatar } from "./avatar.js";
 import { watchAppBadgeClear } from "./badge.js";
+import { mountMascotWidget, earnFood } from "./mascot.js";
 
 document.getElementById("dateLabel").textContent = formatDateLabel(todayStr());
 document.getElementById("logoutBtn").addEventListener("click", logout);
@@ -62,6 +63,9 @@ let yesterdayItems = {}; // materialId -> yesterday's checks/items doc data, for
 let subcategoryOrder = {}; // { 기본자재: string[], 식자재: string[] } from config/subcategoryOrder
 let synced = {}; // materialId -> data actually submitted to Firestore today
 let pending = {}; // materialId -> {action:'set', ...fields} | {action:'delete', mainCategory}
+// 2일마다 자동으로 담기는 고정 자재(functions/index.js: autoRequestFixedMaterials)
+// — 아직 아무도 제출 안 한, 장바구니에만 걸쳐 있는 상태. materialId -> data.
+let autoPending = {};
 // Uncommitted picks made while browsing the current items screen. Nothing
 // here is persisted or counted anywhere until "장바구니 담기" is pressed —
 // pressing the back button instead just throws it away.
@@ -80,6 +84,8 @@ const recentDates = Array.from({ length: 7 }, (_, i) => dateStrDaysAgo(i));
 const chipCounts = {};
 let cartDate = date;
 let cartItems = [];
+// Cart item ids currently showing the inline "다른 상태로 바꾸기" picker.
+const statusPickerFor = new Set();
 
 const MAIN_CATS = ["기본자재", "식자재"];
 const MAIN_DESC = {
@@ -202,10 +208,18 @@ function dowLabel(dateStr) {
 
 function buildTodayCartItems() {
   const list = [];
+  const seen = new Set();
   allKnownIds().forEach((id) => {
     const eff = effectiveState(id);
     if (!eff) return;
     list.push({ id, ...eff, submitted: !pending[id] });
+    seen.add(id);
+  });
+  // 2일마다 자동으로 담긴 고정 자재 — 누군가 이미 같은 자재를 직접
+  // 골랐거나 제출했으면(위에서 이미 목록에 들어갔으면) 중복 표시하지 않는다.
+  Object.keys(autoPending).forEach((id) => {
+    if (seen.has(id)) return;
+    list.push({ id, ...autoPending[id], submitted: false, autoAdded: true });
   });
   return list;
 }
@@ -256,7 +270,7 @@ function yesterdayStatusLabel(materialId) {
     const when = formatTimestampLabel(y.orderedAt);
     return `어제 요청 · 주문완료됨${when ? ` (${when})` : ""}`;
   }
-  return "어제 요청 · 주문되지 않음";
+  return "어제 요청드렸지만 주문되지 않음";
 }
 
 function selectedCountInMain(main) {
@@ -276,7 +290,9 @@ function selectedCountInSub(main, sub) {
   return n;
 }
 function pendingCountInMain(main) {
-  return Object.values(pending).filter((p) => p.mainCategory === main).length;
+  const own = Object.values(pending).filter((p) => p.mainCategory === main).length;
+  const auto = Object.values(autoPending).filter((p) => p.mainCategory === main).length;
+  return own + auto;
 }
 
 function updateCartNavBadge() {
@@ -493,16 +509,23 @@ function renderCart() {
   }
 
   function cartItemRowHtml(it, showSub) {
+    const canChangeStatus = isTodayCart && !it.ordered;
+    const pickerOpen = statusPickerFor.has(it.id);
+    const otherUrgencies = URGENCY_ORDER.filter((u) => u !== it.urgency);
     return `
       <div class="item-row ${it.ordered ? "ordered" : ""}">
         <div style="flex:1">
-          <div class="name"><span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${showSub && it.subCategory ? `<span class="subcat-inline-tag">${escapeHtml(it.subCategory)}</span>` : ""}${it.qty ? `<span class="qty-pill">${escapeHtml(it.qty)} 남음</span>` : ""}</div>
+          <div class="name"><span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${showSub && it.subCategory ? `<span class="subcat-inline-tag">${escapeHtml(it.subCategory)}</span>` : ""}${it.autoAdded ? `<span class="subcat-inline-tag">2일마다 자동</span>` : ""}${it.qty ? `<span class="qty-pill">${escapeHtml(it.qty)} 남음</span>` : ""}</div>
           ${it.note ? `<div class="note">${escapeHtml(it.note)}</div>` : ""}
           ${it.photoUrl ? `<a href="${it.photoUrl}" target="_blank" rel="noopener"><img src="${it.photoUrl}" class="note-photo-thumb" alt="첨부 사진" /></a>` : ""}
           ${it.staffName ? `<div class="who">${escapeHtml(it.staffName)}님${formatTimeLabel(it.updatedAt) ? ` · ${formatTimeLabel(it.updatedAt)}` : ""}</div>` : ""}
         </div>
         <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
-          <span class="badge ${it.urgency}">${it.urgency === "urgent" ? "🚨 " : ""}${URGENCY_LABEL[it.urgency] || it.urgency}</span>
+          <span class="badge ${it.urgency} ${canChangeStatus ? "tappable" : ""}" ${canChangeStatus ? `data-status-toggle="${it.id}"` : ""}>${it.urgency === "urgent" ? "🚨 " : ""}${URGENCY_LABEL[it.urgency] || it.urgency}</span>
+          ${pickerOpen ? `
+            <div class="status-picker">
+              ${otherUrgencies.map((u) => `<button class="status-picker-btn ${u}" data-status-pick="${it.id}" data-status-value="${u}">${URGENCY_LABEL[u]}</button>`).join("")}
+            </div>` : ""}
           ${isTodayCart ? `<span class="tag ${it.submitted ? "submitted" : "pending"}">${it.submitted ? "제출됨" : "미제출"}</span>` : ""}
           ${it.ordered ? `<span class="tag ordered">✓ 주문완료</span>` : ""}
           ${it.ordered && formatTimestampLabel(it.orderedAt) ? `<span style="font-size:10px; color:var(--muted); text-align:right;">${formatTimestampLabel(it.orderedAt)}</span>` : ""}
@@ -519,33 +542,46 @@ function renderCart() {
     byMain[m].push(it);
   }
 
+  if (isTodayCart) {
+    html += `<div class="cart-status-hint">탭하면 상태변경할 수 있어요</div>`;
+  }
+
   for (const main of MAIN_CATS) {
     if (!byMain[main]) continue;
     html += `<div class="category-title">${escapeHtml(main)}<span class="sub">${byMain[main].length}건</span></div>`;
 
-    // 긴급 항목은 소분류에 상관없이 이 대분류 카드 맨 위에 따로 모아서 보여준다
-    // — 사장님 화면과 동일하게 맞춘다.
+    // 품절/긴급 항목은 소분류에 상관없이 이 대분류 카드 맨 위에 따로 모아서
+    // 보여준다 — 사장님 화면과 동일하게 맞춘다. 정상 발주 항목만 기존처럼
+    // 소분류별로 묶는다.
+    const soldoutItems = byMain[main].filter((it) => it.urgency === "soldout");
     const urgentItems = byMain[main].filter((it) => it.urgency === "urgent");
-    const restItems = byMain[main].filter((it) => it.urgency !== "urgent");
+    const normalItems = byMain[main].filter((it) => it.urgency !== "urgent" && it.urgency !== "soldout");
 
     const bySub = {};
-    for (const it of restItems) {
+    for (const it of normalItems) {
       const sub = it.subCategory || "기타";
       if (!bySub[sub]) bySub[sub] = [];
       bySub[sub].push(it);
     }
 
     html += `<div class="card">`;
+    if (soldoutItems.length > 0) {
+      html += `<div class="subcat-title urgency-caption soldout" style="margin-top:0;"><span class="urgency-caption-label">${URGENCY_LABEL.soldout}</span>${URGENCY_GROUP_CAPTION.soldout}</div>`;
+      for (const it of soldoutItems) html += cartItemRowHtml(it, true);
+    }
     if (urgentItems.length > 0) {
-      html += `<div class="subcat-title" style="margin-top:0; color:var(--urgent);">🚨 긴급 모아보기</div>`;
+      html += `<div class="subcat-title urgency-caption urgent" style="margin-top:${soldoutItems.length > 0 ? "14px" : "0"};"><span class="urgency-caption-label">${URGENCY_LABEL.urgent}</span>${URGENCY_GROUP_CAPTION.urgent}</div>`;
       for (const it of urgentItems) html += cartItemRowHtml(it, true);
     }
-    const subs = Object.keys(bySub);
-    subs.forEach((sub, idx) => {
-      const isFirst = idx === 0 && urgentItems.length === 0;
-      html += `<div class="subcat-title" style="margin-top:${isFirst ? "0" : "14px"}">${escapeHtml(sub)}</div>`;
-      for (const it of bySub[sub]) html += cartItemRowHtml(it, false);
-    });
+    if (normalItems.length > 0) {
+      const isFirstGroup = soldoutItems.length === 0 && urgentItems.length === 0;
+      html += `<div class="subcat-title urgency-caption normal" style="margin-top:${isFirstGroup ? "0" : "14px"};"><span class="urgency-caption-label">${URGENCY_LABEL.normal}</span>${URGENCY_GROUP_CAPTION.normal}</div>`;
+      const subs = Object.keys(bySub);
+      subs.forEach((sub) => {
+        html += `<div class="subcat-title" style="margin-top:14px">${escapeHtml(sub)}</div>`;
+        for (const it of bySub[sub]) html += cartItemRowHtml(it, false);
+      });
+    }
     html += `</div>`;
 
     if (isTodayCart) {
@@ -559,6 +595,20 @@ function renderCart() {
 
   screenEl.innerHTML = html;
   wireCartNav();
+}
+
+async function changeCartItemUrgency(id, newUrgency) {
+  const it = cartItems.find((x) => x.id === id);
+  if (!it || it.ordered) return;
+  if (it.submitted) {
+    await updateDoc(doc(itemsCol, id), { urgency: newUrgency });
+  } else if (pending[id]) {
+    pending[id] = { ...pending[id], urgency: newUrgency };
+    savePending();
+    cartItems = buildTodayCartItems();
+  }
+  statusPickerFor.delete(id);
+  render();
 }
 
 function renderShare() {
@@ -607,20 +657,40 @@ function wireCartNav() {
   screenEl.querySelectorAll("[data-cart-cancel]").forEach((el) => {
     el.addEventListener("click", () => cancelPendingCartItem(el.dataset.cartCancel));
   });
+  screenEl.querySelectorAll("[data-status-toggle]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const id = el.dataset.statusToggle;
+      if (statusPickerFor.has(id)) statusPickerFor.delete(id);
+      else statusPickerFor.add(id);
+      render();
+    });
+  });
+  screenEl.querySelectorAll("[data-status-pick]").forEach((el) => {
+    el.addEventListener("click", () => changeCartItemUrgency(el.dataset.statusPick, el.dataset.statusValue));
+  });
 }
 
-function cancelPendingCartItem(id) {
+async function cancelPendingCartItem(id) {
   const p = pending[id];
-  if (!p) return;
-  if (!confirm(`'${p.materialName}'을(를) 장바구니에서 뺄까요?`)) return;
-  delete pending[id];
-  savePending();
-  cartItems = buildTodayCartItems();
-  render();
+  if (p) {
+    if (!confirm(`'${p.materialName}'을(를) 장바구니에서 뺄까요?`)) return;
+    delete pending[id];
+    savePending();
+    cartItems = buildTodayCartItems();
+    render();
+    return;
+  }
+  const a = autoPending[id];
+  if (!a) return;
+  if (!confirm(`'${a.materialName}'을(를) 장바구니에서 뺄까요?`)) return;
+  await deleteDoc(doc(db, "checks", date, "autoPending", id));
 }
 
 function canDelete(m) {
-  return m.staffPhone === staffPhone;
+  // Auto-requested items (2일마다 자동 요청되는 고정 자재) carry no staffPhone —
+  // nobody personally owns them, so any staff member can remove one that's not
+  // actually needed that day, same as shareboard.js treats unattributed posts.
+  return (!m.staffPhone || m.staffPhone === staffPhone) && !m.ordered;
 }
 
 // Quick one-click removal from the item-selection screen itself, for a
@@ -642,6 +712,10 @@ function removeSelectedItem(id) {
 async function deleteSubmittedItem(id) {
   const m = synced[id];
   if (!m) return;
+  if (m.ordered) {
+    toast("이미 주문완료된 자재는 삭제할 수 없어요");
+    return;
+  }
   if (!canDelete(m)) {
     toast("본인이 요청한 자재만 삭제할 수 있어요");
     return;
@@ -730,7 +804,8 @@ function onQty(id, qty) {
 
 async function submitCategory(main) {
   const entries = Object.entries(pending).filter(([, p]) => p.mainCategory === main);
-  if (entries.length === 0) {
+  const autoEntries = Object.entries(autoPending).filter(([, p]) => p.mainCategory === main);
+  if (entries.length === 0 && autoEntries.length === 0) {
     toast("제출할 변경사항이 없어요");
     return;
   }
@@ -757,6 +832,25 @@ async function submitCategory(main) {
     }
     delete pending[id];
   }
+  // 2일마다 자동으로 담긴 것도 이 제출에 같이 실어 보낸다 — 지금 제출하는
+  // 사람이 확인하고 보내는 거니 그 사람 이름으로 나간다.
+  for (const [id, a] of autoEntries) {
+    await setDoc(doc(itemsCol, id), {
+      materialName: a.materialName,
+      mainCategory: a.mainCategory,
+      subCategory: a.subCategory,
+      urgency: a.urgency,
+      note: a.note || "",
+      qty: a.qty || "",
+      photoUrl: a.photoUrl || "",
+      ordered: false,
+      staffName,
+      staffPhone,
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+    await deleteDoc(doc(db, "checks", date, "autoPending", id));
+    addedCount++;
+  }
   savePending();
   // 사장님 알림은 항목 하나하나가 아니라 이 제출 묶음당 한 번만 가도록,
   // 개별 자재 문서와는 별도로 "제출 이벤트" 문서 하나를 추가로 남긴다 —
@@ -769,6 +863,7 @@ async function submitCategory(main) {
       itemCount: addedCount,
       createdAt: serverTimestamp(),
     });
+    earnFood(main === "기본자재" ? "checkberry" : "onigiri");
   }
   if (view === "cart") cartItems = buildTodayCartItems();
   render();
@@ -800,6 +895,7 @@ async function main() {
 
   watchForegroundPush();
   watchAppBadgeClear();
+  mountMascotWidget();
   if (Notification.permission === "granted") registerPushToken(staffPhone);
 
   loadPending();
@@ -831,6 +927,15 @@ async function main() {
     if (pendingChanged) savePending();
 
     chipCounts[date] = snap.size;
+    if (view === "cart" && cartDate === date) {
+      cartItems = buildTodayCartItems();
+    }
+    render();
+  });
+
+  onSnapshot(collection(db, "checks", date, "autoPending"), (snap) => {
+    autoPending = {};
+    snap.docs.forEach((d) => { autoPending[d.id] = d.data(); });
     if (view === "cart" && cartDate === date) {
       cartItems = buildTodayCartItems();
     }

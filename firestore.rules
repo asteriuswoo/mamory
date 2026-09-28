@@ -17,6 +17,9 @@ service cloud.firestore {
       match /orderBatches/{batchId} {
         allow read, write: if request.auth != null;
       }
+      match /autoPending/{materialId} {
+        allow read, write: if request.auth != null;
+      }
     }
     match /shares/{dateId} {
       allow read, write: if request.auth != null;
