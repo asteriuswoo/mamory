@@ -144,6 +144,63 @@ exports.notifyOnNewShareNote = onDocumentCreated("shares/{date}/items/{itemId}",
   );
 });
 
+// 등록해요 > 시재 등록에 새 기록이 쌓이면 등록한 사람을 제외한 모두에게
+// 알림 — 선결제 충전 등록(topups)은 알림 대상이 아니라 시재 entries만 구독.
+function registerLinkForRole(role) {
+  return role === "owner" ? "/register.html" : "/staff.html?view=register";
+}
+
+exports.notifyOnNewCashEntry = onDocumentCreated("cashRegister/{date}/entries/{entryId}", async (event) => {
+  const entry = event.data.data();
+  const accSnap = await db.collection("accounts").get();
+  const tokensByRole = { owner: [], staff: [] };
+  accSnap.forEach((doc) => {
+    if (doc.id === entry.staffPhone) return;
+    const role = doc.data().role === "owner" ? "owner" : "staff";
+    tokensByRole[role].push(...tokensOf(doc.data().fcmTokens));
+  });
+  const body = `${entry.staffName ? entry.staffName + "님이 " : ""}시재 ${(entry.total || 0).toLocaleString()}원을 등록했습니다`;
+  await Promise.all(
+    Object.keys(tokensByRole).map((role) =>
+      sendToTokens(tokensByRole[role], { title: "시재 등록 알림", body, link: registerLinkForRole(role) })
+    )
+  );
+});
+
+// 출근기록 > 급여대장에서 직원이 월급 제출하면 사장님에게만 알림 — 다른
+// 직원들은 서로의 급여 정보를 알 필요가 없으므로 owner 역할 계정에만 보낸다.
+exports.notifyOwnerOnPayrollRequest = onDocumentCreated("payrollRequests/{requestId}", async (event) => {
+  const req = event.data.data();
+  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").get();
+  const tokens = [];
+  ownersSnap.forEach((doc) => tokens.push(...tokensOf(doc.data().fcmTokens)));
+  await sendToTokens(tokens, {
+    title: "급여 제출 알림",
+    body: `${req.staffName ? req.staffName + "님이 " : ""}${req.cycleLabel || ""} 급여를 제출했습니다`,
+    link: "/staff.html?view=payroll",
+  });
+});
+
+// 출퇴근 도장은 급여 계산과 무관한 별도 출근 확인용 — 직원이 도장을 찍을
+// 때마다 사장님에게만 알림 (도장 찍은 본인이 사장님이면 자기 자신에게는
+// 안 보낸다).
+exports.notifyOwnerOnAttendanceStamp = onDocumentCreated("accounts/{phone}/attendance/{stampId}", async (event) => {
+  const stamp = event.data.data();
+  const phone = event.params.phone;
+  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").get();
+  const tokens = [];
+  ownersSnap.forEach((doc) => {
+    if (doc.id === phone) return;
+    tokens.push(...tokensOf(doc.data().fcmTokens));
+  });
+  const label = stamp.type === "in" ? "출근" : "퇴근";
+  await sendToTokens(tokens, {
+    title: "출퇴근 알림",
+    body: `${stamp.staffName ? stamp.staffName + "님이 " : ""}${stamp.time || ""} ${label} 도장을 찍었습니다`,
+    link: "/staff.html?view=payroll",
+  });
+});
+
 // 대댓글은 새 문서가 아니라 부모 글의 replies 배열에 arrayUnion으로 추가되는
 // 업데이트라서, 위 onDocumentCreated는 이 경우를 못 잡는다 — 그래서 댓글을
 // 달아도 알림이 전혀 가지 않았던 것. replies 배열이 늘어난 업데이트만 골라
@@ -247,6 +304,84 @@ exports.notifyOnNewReaction = onDocumentUpdated("shares/{date}/items/{itemId}", 
     body: `${reactorName}님이 ${withEulReul(label)} 눌렀습니다`,
     link: shareLinkForRole(authorAccSnap.data().role),
   });
+});
+
+// ---- 월급날 알림 (매일 오전 9시) ----
+// payroll.js의 cycleBounds() 로직을 그대로 옮겨온 것 — 클라이언트는 브라우저의
+// 로컬(=한국) 시간으로 년/월/일을 계산하는데, 서버의 new Date()는 UTC라서
+// 그대로 쓰면 날짜가 어긋난다. kstDateStr로 한국 날짜를 문자열로 구한 뒤
+// 그 값으로 "가짜 로컬" Date를 만들면, 이후의 getFullYear/getMonth/getDate
+// 계산이 클라이언트와 동일하게 맞아떨어진다.
+function kstTodayAsLocalDate() {
+  const [y, m, d] = kstDateStr(new Date()).split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function addMonths(d, n) {
+  const r = new Date(d);
+  r.setMonth(r.getMonth() + n);
+  return r;
+}
+
+function addDays(d, n) {
+  const r = new Date(d);
+  r.setDate(r.getDate() + n);
+  return r;
+}
+
+function ymdLocal(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function cycleEnd(payCycleStartDay, today) {
+  let anchor = new Date(today.getFullYear(), today.getMonth(), payCycleStartDay);
+  if (anchor > today) anchor = addMonths(anchor, -1);
+  const nextAnchor = addMonths(anchor, 1);
+  return addDays(nextAnchor, -1);
+}
+
+// 직원별 정산 주기 마지막 날(=월급날)에만: 그 직원 본인에게 "월급날이에요"
+// 알림을, 사장님에게는 "OO님 급여 지급날입니다" 알림을 보낸다. 급여 제출
+// 여부와 무관하게 날짜만으로 판단 — 제출 알림(notifyOwnerOnPayrollRequest)과는
+// 별개다.
+exports.notifyPayday = onSchedule({ schedule: "0 9 * * *", timeZone: "Asia/Seoul" }, async () => {
+  const today = kstTodayAsLocalDate();
+  const accSnap = await db.collection("accounts").get();
+
+  const owners = [];
+  const staffOnPayday = [];
+  accSnap.forEach((docSnap) => {
+    const data = docSnap.data();
+    if (data.role === "owner") {
+      owners.push(data);
+      return;
+    }
+    const end = cycleEnd(data.payCycleStartDay || 1, today);
+    if (ymdLocal(end) === ymdLocal(today)) {
+      staffOnPayday.push({ phone: docSnap.id, name: data.name, fcmTokens: data.fcmTokens });
+    }
+  });
+  if (staffOnPayday.length === 0) return;
+
+  const ownerTokens = [];
+  owners.forEach((o) => ownerTokens.push(...tokensOf(o.fcmTokens)));
+
+  await Promise.all([
+    ...staffOnPayday.map((s) =>
+      sendToTokens(tokensOf(s.fcmTokens), {
+        title: "월급날 알림",
+        body: "오늘은 월급날이에요! 사장님께 급여내역을 제출해보세요",
+        link: "/staff.html?view=payroll",
+      })
+    ),
+    ...staffOnPayday.map((s) =>
+      sendToTokens(ownerTokens, {
+        title: "급여 지급일 알림",
+        body: `${s.name || "직원"}님 급여 지급날입니다!`,
+        link: "/staff.html?view=payroll",
+      })
+    ),
+  ]);
 });
 
 // 직원이 매번 조사해서 담지 않아도, 이틀에 한 번씩 자동으로 정상발주 상태로

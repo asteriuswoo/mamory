@@ -25,6 +25,29 @@ export function dateStrDaysAgo(n) {
   return kstParts(shifted);
 }
 
+// 날짜 고정 공휴일만 — 설날/추석처럼 음력 기준으로 매년 날짜가 바뀌는
+// 공휴일은 해마다 손으로 갱신해야 해서 목록에 없다. "MM-DD" 형식.
+const KR_FIXED_HOLIDAYS = new Set([
+  "01-01", // 신정
+  "03-01", // 삼일절
+  "05-05", // 어린이날
+  "06-06", // 현충일
+  "08-15", // 광복절
+  "10-03", // 개천절
+  "10-09", // 한글날
+  "12-25", // 성탄절
+]);
+
+// 날짜 탭에 요일별 색을 입히기 위한 분류 — 평일은 "weekday", 주말·공휴일은
+// "weekend"로 묶어서 같은 빨간 표시를 쓴다.
+export function dayAccentClass(dateStr) {
+  const [, m, d] = dateStr.split("-");
+  const dow = new Date(dateStr + "T00:00:00").getDay(); // 0=일 ~ 6=토
+  const isWeekend = dow === 0 || dow === 6;
+  const isHoliday = KR_FIXED_HOLIDAYS.has(`${m}-${d}`);
+  return isWeekend || isHoliday ? "weekend" : "weekday";
+}
+
 export function formatDateLabel(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
   const dt = new Date(y, m - 1, d);
@@ -39,6 +62,15 @@ function tsToDate(ts) {
   if (typeof ts === "number") return new Date(ts);
   if (typeof ts.toDate === "function") return ts.toDate();
   return new Date(ts.seconds * 1000);
+}
+
+// "YYYY-MM-DD" (store timezone) for whichever calendar day a timestamp falls
+// on — used to bucket a flat, non-date-scoped collection (e.g. topups) by
+// day for day-chip browsing. A still-pending optimistic write (ts is falsy)
+// is assumed to be "today", since it was just created locally.
+export function dateStrOf(ts) {
+  if (!ts) return todayStr();
+  return kstParts(tsToDate(ts));
 }
 
 // createdAt is a Firestore Timestamp once the server has confirmed the write;
@@ -124,6 +156,23 @@ export function confirmModal(message, yesLabel, noLabel) {
   });
 }
 
+// In-page enlarged photo viewer — used for avatars, share-board post photos,
+// etc. wherever a photo would otherwise open in a new tab. One overlay at a
+// time; tapping the backdrop or the ✕ closes it.
+export function openImageLightbox(src, alt) {
+  const overlay = document.createElement("div");
+  overlay.className = "img-lightbox-overlay";
+  overlay.innerHTML = `
+    <button class="img-lightbox-close" aria-label="닫기">✕</button>
+    <img src="${src}" alt="${escapeHtml(alt || "")}" class="img-lightbox-img" />
+  `;
+  const close = () => overlay.remove();
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay || e.target.closest(".img-lightbox-close")) close();
+  });
+  document.body.appendChild(overlay);
+}
+
 export function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;",
@@ -133,6 +182,30 @@ export function escapeHtml(str) {
     "'": "&#39;",
   }[c]));
 }
+
+// 시스템 기본 🔔/🔕 이모지 대신, 앱의 골드/크림 톤과 둥근 느낌에 맞춘
+// 손으로 그린 종 아이콘 — 알림 켜기 버튼(staff.js/owner.js)에서 innerHTML로
+// 그대로 꽂아 쓴다.
+export const NOTIFY_BELL_ON = `
+<svg viewBox="0 0 24 24" width="17" height="17" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="notifyBellGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffd9a0"/>
+      <stop offset="100%" stop-color="#f0a479"/>
+    </linearGradient>
+  </defs>
+  <path d="M12 2.6c-1 0-1.7.8-1.7 1.7v.5C7.7 5.5 6 8 6 10.9v2.9c0 .8-.3 1.6-.9 2.1l-.7.7c-.7.6-.2 1.8.7 1.8h15.6c.9 0 1.4-1.1.7-1.8l-.7-.7c-.6-.5-.9-1.3-.9-2.1v-2.9c0-2.9-1.7-5.4-4.3-6.1v-.5c0-.9-.8-1.7-1.7-1.7z" fill="url(#notifyBellGrad)" stroke="#c97b4a" stroke-width="0.7" stroke-linejoin="round"/>
+  <path d="M9.1 19.3a2.9 2.9 0 0 0 5.8 0z" fill="#c97b4a"/>
+  <ellipse cx="9.3" cy="8.6" rx="1.5" ry="2.1" fill="#fff3df" opacity=".75" transform="rotate(-18 9.3 8.6)"/>
+</svg>`;
+
+export const NOTIFY_BELL_OFF = `
+<svg viewBox="0 0 24 24" width="17" height="17" xmlns="http://www.w3.org/2000/svg">
+  <path d="M12 2.6c-1 0-1.7.8-1.7 1.7v.5C7.7 5.5 6 8 6 10.9v2.9c0 .8-.3 1.6-.9 2.1l-.7.7c-.7.6-.2 1.8.7 1.8h15.6c.9 0 1.4-1.1.7-1.8l-.7-.7c-.6-.5-.9-1.3-.9-2.1v-2.9c0-2.9-1.7-5.4-4.3-6.1v-.5c0-.9-.8-1.7-1.7-1.7z" fill="#e4dfd4" stroke="#b8b3a8" stroke-width="0.7" stroke-linejoin="round"/>
+  <path d="M9.1 19.3a2.9 2.9 0 0 0 5.8 0z" fill="#b8b3a8"/>
+  <line x1="3.8" y1="20.2" x2="20.2" y2="3.8" stroke="#e2635a" stroke-width="2.1" stroke-linecap="round"/>
+  <line x1="3.8" y1="20.2" x2="20.2" y2="3.8" stroke="#fff" stroke-width="0.7" stroke-linecap="round"/>
+</svg>`;
 
 export const URGENCY_LABEL = {
   normal: "정상 발주",

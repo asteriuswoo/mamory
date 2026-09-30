@@ -120,6 +120,25 @@ header.topbar .sub {
   flex-shrink: 0;
 }
 
+.notify-icon-btn {
+  font-size: 15px;
+  line-height: 1;
+  background: none;
+  border: 1px solid rgba(240,164,121,.4);
+  border-radius: 999px;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.notify-icon-btn:disabled {
+  opacity: .4;
+}
+
 .corner-badge {
   display: inline-flex;
   align-items: center;
@@ -267,7 +286,7 @@ main {
   letter-spacing: .04em;
 }
 
-input[type="text"], input[type="date"], select, textarea {
+input[type="text"], input[type="date"], input[type="number"], input[type="time"], select, textarea {
   width: 100%;
   padding: 11px 13px;
   border: 1px solid var(--border);
@@ -287,6 +306,9 @@ input:focus, select:focus, textarea:focus {
 button {
   font-family: inherit;
   cursor: pointer;
+  /* 버튼을 빠르게 연타하면 모바일 브라우저가 더블탭으로 오인해 화면을
+     확대해버리는 문제 방지 — 핀치 줌 등 다른 제스처는 그대로 유지된다. */
+  touch-action: manipulation;
 }
 
 .btn {
@@ -325,6 +347,18 @@ button {
   background: linear-gradient(180deg, #e2895c 0%, var(--gold) 100%);
   color: #fff;
   box-shadow: 0 2px 6px rgba(217,119,69,.35);
+}
+
+.btn.urgent {
+  background: linear-gradient(180deg, #e2605c 0%, var(--urgent) 100%);
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(214,69,69,.35);
+}
+
+.btn.normal {
+  background: linear-gradient(180deg, #45b586 0%, var(--normal) 100%);
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(46,156,110,.35);
 }
 
 .btn.soft {
@@ -639,6 +673,17 @@ button {
   color: var(--text);
   margin-top: 2px;
 }
+
+/* 평일=파란 밑줄, 주말·공휴일=빨간 밑줄 — 달력처럼 한눈에 구분되도록. */
+.day-chip-underline {
+  width: 14px;
+  height: 2.5px;
+  border-radius: 2px;
+  margin: 3px auto 0;
+}
+
+.day-chip-underline.weekday { background: var(--toggle-blue); }
+.day-chip-underline.weekend { background: var(--urgent); }
 
 .day-chip .dcount {
   font-size: 10px;
@@ -1126,6 +1171,48 @@ button {
   margin-bottom: 12px;
 }
 
+.soldout-resolve-box {
+  border: 1px solid var(--normal);
+  background: var(--normal-soft);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.soldout-resolve-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--normal);
+  margin-bottom: 8px;
+}
+
+.soldout-resolve-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 13.5px;
+  color: var(--text);
+}
+
+.soldout-resolve-item input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--normal);
+  flex-shrink: 0;
+}
+
+.soldout-resolve-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: 13px;
+  background: #fffdfa;
+  color: var(--text);
+}
+
 .tag {
   font-size: 10.5px;
   font-weight: 800;
@@ -1134,7 +1221,7 @@ button {
 
 .tag.submitted { color: var(--gold); }
 .tag.pending { color: var(--navy); }
-.tag.ordered { color: var(--sky); }
+.tag.ordered { color: var(--normal); }
 .tag.role-owner { color: var(--normal); }
 .tag.role-staff { color: var(--gold); }
 .tag.new {
@@ -1219,6 +1306,50 @@ button {
   margin-left: 6px;
 }
 
+.order-qty-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.order-qty-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.order-qty-stepper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.order-qty-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: none;
+  background: var(--gold-soft);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.order-qty-btn:disabled {
+  opacity: 0.4;
+}
+
+.order-qty-value {
+  font-size: 13px;
+  font-weight: 800;
+  min-width: 28px;
+  text-align: center;
+}
+
 .subcat-inline-tag {
   display: inline-block;
   font-size: 10.5px;
@@ -1265,6 +1396,16 @@ button {
   font-weight: 700;
   margin-left: 7px;
 }
+
+/* 한 화면에 여러 섹션(시재/품절공유/공유해요)이 이어 붙어 있어도 한눈에
+   구분되도록, 섹션마다 카드 왼쪽에 색 띠를 두고 제목에도 같은 색을 쓴다. */
+.section-title-cash { color: var(--normal); }
+.section-title-soldout { color: var(--urgent); }
+.section-title-note { color: var(--gold); }
+
+.card.section-cash { border-left: 4px solid var(--normal); }
+.card.section-soldout { border-left: 4px solid var(--urgent); }
+.card.section-note { border-left: 4px solid var(--gold); }
 
 .item-row {
   display: flex;
@@ -1449,6 +1590,52 @@ button {
   border-radius: 50%;
   object-fit: cover;
   background: var(--gold-soft);
+}
+
+img.avatar-circle {
+  cursor: pointer;
+}
+
+.img-lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.82);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  padding: 24px;
+  animation: avatarLightboxIn 0.15s ease-out;
+}
+
+@keyframes avatarLightboxIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.img-lightbox-img {
+  max-width: min(90vw, 480px);
+  max-height: 80vh;
+  border-radius: 16px;
+  object-fit: contain;
+  background: var(--gold-soft);
+}
+
+.img-lightbox-close {
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  right: 16px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
 }
 
 .avatar-fallback {
@@ -1694,6 +1881,10 @@ button {
   margin-top: 4px;
 }
 
+.share-photo-trigger {
+  cursor: pointer;
+}
+
 .reply-input-row {
   display: flex;
   gap: 6px;
@@ -1895,7 +2086,9 @@ pre.share-preview {
 .mascot-fab {
   position: fixed;
   right: 16px;
-  bottom: calc(126px + env(safe-area-inset-bottom));
+  /* 하단 탭바 바로 위 경계선에 붙여서 — 예전 위치는 페이지 콘텐츠(선결제
+     충전 로그의 삭제 버튼 등) 위로 떠 있어서 손가락이 자꾸 걸렸다. */
+  bottom: calc(112px + env(safe-area-inset-bottom));
   z-index: 45;
   width: 58px;
   height: 58px;
@@ -2176,10 +2369,412 @@ pre.share-preview {
   object-fit: contain;
 }
 
+.mascot-food-emoji {
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  line-height: 1;
+}
+
 .mascot-food-empty {
   font-size: 12px;
   color: var(--muted);
   margin-bottom: 12px;
+}
+
+/* ---- 오늘의 시재 등록 ---- */
+.cash-summary {
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 10px;
+}
+
+.cash-summary strong { color: var(--gold); }
+.cash-summary.empty { color: var(--muted); }
+
+.cash-bill-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.cash-bill-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.cash-bill-add {
+  display: block;
+  width: 100%;
+  padding: 8px 2px;
+  background: var(--normal);
+  color: #fff;
+  font-weight: 800;
+  font-size: 11px;
+  border: none;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.cash-bill-count {
+  font-size: 11.5px;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.cash-bill-minus {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--cream);
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 0;
+}
+
+.cash-total-row {
+  text-align: center;
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 10px;
+}
+
+.cash-total-row strong {
+  color: var(--gold);
+  font-size: 17px;
+}
+
+.cash-bill-minus:disabled {
+  opacity: 0.35;
+}
+
+.cash-log-list {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cash-log-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cash-log-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.cash-log-who {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.cash-log-detail {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.cash-log-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+.cash-log-amount {
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.cash-log-amount.plus { color: var(--normal); }
+.cash-log-amount.minus { color: var(--urgent); }
+
+.cash-log-diff {
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.cash-log-diff.down { color: var(--urgent); }
+.cash-log-diff.up { color: var(--sky); }
+
+.cash-log-time {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.cash-log-delete-btn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+/* ---- 현금 지출 내역 ---- */
+.section-title-expense { color: var(--urgent); }
+.card.section-expense { border-left: 4px solid var(--urgent); }
+
+.expense-hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
+.expense-form {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.expense-form input[type="text"] {
+  flex: 1.3;
+}
+
+.expense-form input[type="number"] {
+  flex: 1;
+}
+
+.expense-form input[type="number"]::-webkit-outer-spin-button,
+.expense-form input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.expense-form input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+.expense-total-row {
+  font-size: 12.5px;
+  color: var(--text);
+  margin: 12px 0 8px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.expense-total-row strong {
+  color: var(--urgent);
+}
+
+.expense-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.expense-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.expense-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.expense-desc {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.expense-meta {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.expense-amount {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--urgent);
+  white-space: nowrap;
+}
+
+.expense-receipt-thumb {
+  width: 34px;
+  height: 34px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.expense-receipt-preview-img {
+  cursor: pointer;
+}
+
+.expense-delete-btn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+/* ---- 선결제 충전 등록 ---- */
+.section-title-topup { color: var(--sky); }
+.card.section-topup { border-left: 4px solid var(--sky); }
+
+.topup-accrual-hint {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--sky);
+  background: var(--sky-soft);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+}
+
+.topup-form {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.topup-form input[type="text"] {
+  flex: 1.3;
+}
+
+.topup-form input[type="number"] {
+  flex: 1;
+}
+
+.topup-form input[type="number"]::-webkit-outer-spin-button,
+.topup-form input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.topup-form input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+.topup-name-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.topup-name-chip {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--gold-soft);
+  border: none;
+  border-radius: 999px;
+  padding: 5px 12px;
+}
+
+.topup-group {
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.topup-group:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.topup-group-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+
+.topup-group-name {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.topup-group-total {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--sky);
+}
+
+.topup-entry-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.topup-entry-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.topup-entry-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.topup-entry-amount {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--normal);
+}
+
+.topup-entry-meta {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.topup-entry-delete-btn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
 }
 
 .mascot-panel-hint {
@@ -2210,4 +2805,521 @@ pre.share-preview {
   color: var(--toggle-blue);
   font-weight: 600;
   margin-top: 2px;
+}
+
+/* ---- 출근기록 · 급여대장 ---- */
+.payroll-summary-card {
+  text-align: center;
+  background: linear-gradient(160deg, #2c2c2c 0%, var(--ink) 100%);
+  color: #fff;
+  border: none;
+}
+
+.payroll-store-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  opacity: .85;
+  text-transform: uppercase;
+}
+
+.payroll-total-amount {
+  font-size: 30px;
+  font-weight: 800;
+  margin-top: 4px;
+}
+
+.payroll-settings-btn {
+  border: 1px solid rgba(255,255,255,.5);
+  background: rgba(255,255,255,.15);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+.payroll-cycle-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  margin: 14px 0 10px;
+}
+
+.payroll-cycle-arrow {
+  background: none;
+  border: none;
+  font-size: 20px;
+  color: var(--muted);
+  padding: 4px 8px;
+  line-height: 1;
+}
+
+.payroll-cycle-label {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.payroll-view-tabs {
+  margin-bottom: 14px;
+}
+
+.payroll-shift-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.payroll-shift-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.payroll-shift-row:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.payroll-shift-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.payroll-shift-date {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.payroll-shift-time {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.payroll-shift-pay {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--gold);
+  white-space: nowrap;
+}
+
+.payroll-shift-delete-btn {
+  flex-shrink: 0;
+  border: none;
+  background: var(--urgent-soft);
+  color: var(--urgent);
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.payroll-form-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.45);
+  z-index: 210;
+  display: flex;
+  align-items: flex-end;
+}
+
+.payroll-form-sheet {
+  width: 100%;
+  max-height: 88vh;
+  overflow-y: auto;
+  background: var(--card);
+  border-radius: 20px 20px 0 0;
+  padding: 20px 18px calc(20px + env(safe-area-inset-bottom));
+}
+
+.payroll-date-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+}
+
+.payroll-date-chip {
+  aspect-ratio: 1;
+  border: 1px solid var(--border);
+  background: #fffdfa;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.payroll-date-chip.active {
+  background: var(--gold);
+  border-color: var(--gold);
+  color: #fff;
+}
+
+.payroll-time-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.payroll-time-row input {
+  flex: 1;
+}
+
+.payroll-allowance-row {
+  display: flex;
+  gap: 8px;
+}
+
+.payroll-payslip-hero {
+  text-align: center;
+}
+
+.payroll-payslip-store {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.payroll-payslip-net {
+  font-size: 26px;
+  font-weight: 800;
+  margin: 6px 0;
+}
+
+.payroll-payslip-payday {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.payroll-payslip-line {
+  margin-top: 8px;
+  font-size: 13.5px;
+}
+
+.payroll-payslip-sub {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.payroll-form-close-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: var(--cream);
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.payroll-inline-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.payroll-inline-field label {
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.payroll-inline-field input {
+  flex: 1;
+  max-width: 160px;
+  text-align: right;
+}
+
+.payroll-date-summary-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  border: 1px solid var(--border);
+  background: #fffdfa;
+  border-radius: 10px;
+  padding: 11px 13px;
+  font-size: 14px;
+  color: var(--text);
+  text-align: left;
+}
+
+.payroll-date-summary-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.payroll-date-summary-chev {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.payroll-calendar {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  background: #fffdfa;
+}
+
+.payroll-calendar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.payroll-calendar-weekdays {
+  display: grid;
+  /* plain 1fr has an implicit min-width:auto floor, so columns refuse to
+     shrink below their content size on narrow phones and the grid silently
+     overflows — minmax(0, 1fr) is the standard fix so all 7 columns always
+     actually fit. */
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.payroll-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.payroll-calendar-cell {
+  position: relative;
+  aspect-ratio: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.payroll-calendar-dot {
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--normal);
+}
+
+.payroll-calendar-cell.muted {
+  pointer-events: none;
+  color: var(--muted);
+  opacity: .45;
+}
+
+.payroll-calendar-cell.today {
+  border: 2px solid var(--gold);
+  border-radius: 50%;
+  font-weight: 800;
+  color: var(--gold);
+}
+
+.payroll-calendar-cell.active {
+  background: var(--gold);
+  color: #fff;
+  font-weight: 800;
+  border-radius: 50%;
+}
+
+.payroll-shift-row-editable {
+  cursor: pointer;
+}
+
+.sum-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 900;
+  color: #fff;
+  margin-right: 6px;
+  vertical-align: -3px;
+}
+
+.sum-icon-plus {
+  background: var(--toggle-blue);
+}
+
+.sum-icon-minus {
+  background: var(--urgent);
+}
+
+/* 출퇴근기록 탭 전용 — 캘린더/목록을 따로 두지 않고 해당 요일 칸 안에
+   그날의 출퇴근 도장을 바로 얹기 때문에 셀 높이가 정사각형보다 커야 한다. */
+.payroll-attendance-grid {
+  gap: 3px;
+}
+
+.payroll-attendance-cell {
+  min-width: 0;
+  min-height: 58px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 1px;
+  border-radius: 10px;
+}
+
+.payroll-attendance-cell.today {
+  background: var(--gold-soft);
+}
+
+.payroll-attendance-daynum {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--ink-2);
+}
+
+.payroll-attendance-stamps {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+}
+
+.payroll-attendance-chip {
+  font-size: 9px;
+  font-weight: 800;
+  padding: 1px 3px;
+  border-radius: 6px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.payroll-attendance-chip.chip-in {
+  background: var(--normal-soft);
+  color: var(--normal);
+}
+
+.payroll-attendance-chip.chip-out {
+  background: var(--urgent-soft);
+  color: var(--urgent);
+}
+
+.payroll-time-select {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.payroll-wheel-select {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 6px;
+  font-size: 13.5px;
+  background: #fffdfa;
+  color: var(--text);
+}
+
+.payroll-admin-group-head {
+  border: none;
+  background: none;
+  padding: 0;
+  width: 100%;
+  text-align: left;
+}
+
+.payroll-admin-request {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+
+.payroll-admin-detail {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.clock-widget {
+  margin-top: 10px;
+}
+
+.clock-widget-status {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--normal);
+  margin-bottom: 8px;
+}
+
+.payroll-payday-banner {
+  background: var(--toggle-blue-soft);
+  border: 1px solid var(--toggle-blue);
+  color: var(--toggle-blue);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+  margin: 10px 0;
+}
+
+.payroll-submitted-card {
+  text-align: center;
+}
+
+.payroll-submitted-status {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--normal);
+}
+
+.stamp-check {
+  font-weight: 800;
+  color: var(--ink);
+}
+
+.stamp-check-in { color: var(--normal); }
+.stamp-check-out { color: var(--urgent); }
+
+.payroll-admin-shift-header {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  margin-top: 10px;
+  margin-bottom: 4px;
+}
+
+.payroll-admin-shift-line {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
 }

@@ -21,6 +21,8 @@ const VIEWS = {
   "owner.html": { title: "발주 리스트 - MAMORY", load: () => import("./owner.js") },
   "admin.html": { title: "자재 관리 - MAMORY", load: () => import("./admin.js") },
   "share.html": { title: "공유하기 - MAMORY", load: () => import("./share.js") },
+  "register.html": { title: "등록해요 - MAMORY", load: () => import("./register.js") },
+  "payroll.html": { title: "급여관리 - MAMORY", load: () => import("./payrollpage.js") },
 };
 
 const mainContent = document.getElementById("mainContent");

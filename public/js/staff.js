@@ -1,7 +1,9 @@
 import { db, collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, getDocs, serverTimestamp, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
 import { requireAccount, logout } from "./auth.js";
-import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, URGENCY_LABEL, URGENCY_HINT, URGENCY_ORDER, URGENCY_GROUP_CAPTION, sortMaterials, sortByOrder, resizeImageFile, confirmModal } from "./util.js";
+import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, URGENCY_LABEL, URGENCY_HINT, URGENCY_ORDER, URGENCY_GROUP_CAPTION, sortMaterials, sortByOrder, resizeImageFile, confirmModal, dayAccentClass, NOTIFY_BELL_ON, NOTIFY_BELL_OFF } from "./util.js";
 import { mountShareBoard, getTodayUnseenCount, watchUnseenCount } from "./shareboard.js";
+import { mountRegisterBoard } from "./registerboard.js";
+import { mountPayrollBoard, mountClockWidget } from "./payroll.js";
 import { registerPushToken, watchForegroundPush, isPushDisabled, disablePushToken, enablePushToken } from "./push.js";
 import { wireAccountHeaderAvatar } from "./avatar.js";
 import { watchAppBadgeClear } from "./badge.js";
@@ -22,16 +24,20 @@ const notifyBtn = document.getElementById("notifyBtn");
 
 function updateNotifyBtn() {
   if (!("Notification" in window)) {
-    notifyBtn.textContent = "알림 미지원 기기";
+    notifyBtn.innerHTML = NOTIFY_BELL_OFF;
+    notifyBtn.title = "알림 미지원 기기";
     notifyBtn.disabled = true;
     return;
   }
   if (Notification.permission === "denied") {
-    notifyBtn.textContent = "알림 차단됨 (기기 설정에서 허용 필요)";
+    notifyBtn.innerHTML = NOTIFY_BELL_OFF;
+    notifyBtn.title = "알림 차단됨 (기기 설정에서 허용 필요)";
   } else if (Notification.permission === "granted" && !isPushDisabled()) {
-    notifyBtn.textContent = "알림 켜짐 ✓ (탭하면 끄기)";
+    notifyBtn.innerHTML = NOTIFY_BELL_ON;
+    notifyBtn.title = "알림 켜짐 (탭하면 끄기)";
   } else {
-    notifyBtn.textContent = "알림 설정하려면 선택하세요";
+    notifyBtn.innerHTML = NOTIFY_BELL_OFF;
+    notifyBtn.title = "알림 설정하려면 탭하세요";
   }
 }
 
@@ -73,6 +79,7 @@ let draft = {}; // materialId -> {action:'set', ...fields} | {removed:true}
 let itemsCol;
 let staffName = "";
 let staffPhone = "";
+let staffRole = "staff";
 
 // nav state
 let view = "main"; // main | sub | items | cart | share
@@ -181,7 +188,7 @@ function goToCart() {
 }
 
 function updateBottomTabActive() {
-  const activeKey = { main: "main", sub: "main", items: "main", cart: "cart", share: "share" }[view] || "main";
+  const activeKey = { main: "main", sub: "main", items: "main", cart: "cart", share: "share", register: "register", payroll: "payroll" }[view] || "main";
   document.querySelectorAll(".bottom-tab[data-nav]").forEach((el) => {
     el.classList.toggle("active", el.dataset.nav === activeKey);
   });
@@ -310,6 +317,8 @@ function render() {
   if (view === "items") return renderItems();
   if (view === "cart") return renderCart();
   if (view === "share") return renderShare();
+  if (view === "register") return renderRegister();
+  if (view === "payroll") return renderPayroll();
 }
 
 function renderMain() {
@@ -425,6 +434,14 @@ function renderItems() {
               <input type="text" placeholder="남은수량 (예: 2개)" data-id="${m.id}" class="qty-input" value="${escapeHtml(state.qty || "")}" ${isLocked ? "readonly" : ""} style="flex:1;" />
               <input type="text" placeholder="메모" data-id="${m.id}" class="note-input" value="${escapeHtml(state.note || "")}" ${isLocked ? "readonly" : ""} style="flex:1;" />
             </div>
+            <div class="order-qty-row">
+              <span class="order-qty-label">요청 수량</span>
+              <div class="order-qty-stepper">
+                <button class="order-qty-btn" data-id="${m.id}" data-qty-delta="-1" ${isLocked ? "disabled" : ""}>−</button>
+                <span class="order-qty-value">${state.orderQty || 1}개</span>
+                <button class="order-qty-btn" data-id="${m.id}" data-qty-delta="1" ${isLocked ? "disabled" : ""}>+</button>
+              </div>
+            </div>
             <div class="photo-attach-row">
               <input type="file" accept="image/*" data-photo-input="${m.id}" style="display:none;" />
               ${state.photoUrl ? `
@@ -466,6 +483,9 @@ function renderItems() {
   });
   screenEl.querySelectorAll(".qty-input").forEach((el) => {
     el.addEventListener("input", (e) => onQty(e.target.dataset.id, e.target.value));
+  });
+  screenEl.querySelectorAll("[data-qty-delta]").forEach((el) => {
+    el.addEventListener("click", () => onOrderQtyDelta(el.dataset.id, parseInt(el.dataset.qtyDelta, 10)));
   });
   screenEl.querySelectorAll("[data-remove]").forEach((el) => {
     el.addEventListener("click", () => deleteSubmittedItem(el.dataset.remove));
@@ -515,10 +535,19 @@ function renderCart() {
     return `
       <div class="item-row ${it.ordered ? "ordered" : ""}">
         <div style="flex:1">
-          <div class="name"><span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${showSub && it.subCategory ? `<span class="subcat-inline-tag">${escapeHtml(it.subCategory)}</span>` : ""}${it.autoAdded ? `<span class="subcat-inline-tag">2일마다 자동</span>` : ""}${it.qty ? `<span class="qty-pill">${escapeHtml(it.qty)} 남음</span>` : ""}</div>
+          <div class="name"><span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${showSub && it.subCategory ? `<span class="subcat-inline-tag">${escapeHtml(it.subCategory)}</span>` : ""}${it.autoAdded ? `<span class="subcat-inline-tag">2일마다 자동</span>` : ""}${it.qty ? `<span class="qty-pill">${escapeHtml(it.qty)} 남음</span>` : ""}${it.orderQty && it.orderQty > 1 ? `<span class="qty-pill">요청 ${it.orderQty}개</span>` : ""}</div>
           ${it.note ? `<div class="note">${escapeHtml(it.note)}</div>` : ""}
           ${it.photoUrl ? `<a href="${it.photoUrl}" target="_blank" rel="noopener"><img src="${it.photoUrl}" class="note-photo-thumb" alt="첨부 사진" /></a>` : ""}
           ${it.staffName ? `<div class="who">${escapeHtml(it.staffName)}님${formatTimeLabel(it.updatedAt) ? ` · ${formatTimeLabel(it.updatedAt)}` : ""}</div>` : ""}
+          ${isTodayCart && !it.submitted ? `
+            <div class="order-qty-row" style="margin-top:6px;">
+              <span class="order-qty-label">요청 수량</span>
+              <div class="order-qty-stepper">
+                <button class="order-qty-btn" data-cart-id="${it.id}" data-cart-auto="${it.autoAdded ? "1" : ""}" data-cart-qty-delta="-1">−</button>
+                <span class="order-qty-value">${it.orderQty || 1}개</span>
+                <button class="order-qty-btn" data-cart-id="${it.id}" data-cart-auto="${it.autoAdded ? "1" : ""}" data-cart-qty-delta="1">+</button>
+              </div>
+            </div>` : ""}
         </div>
         <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
           <span class="badge ${it.urgency} ${canChangeStatus ? "tappable" : ""}" ${canChangeStatus ? `data-status-toggle="${it.id}"` : ""}>${it.urgency === "urgent" ? "🚨 " : ""}${URGENCY_LABEL[it.urgency] || it.urgency}</span>
@@ -543,7 +572,7 @@ function renderCart() {
   }
 
   if (isTodayCart) {
-    html += `<div class="cart-status-hint">탭하면 상태변경할 수 있어요</div>`;
+    html += `<div class="cart-status-hint">탭하면 상태를 변경할 수 있어요</div>`;
   }
 
   for (const main of MAIN_CATS) {
@@ -622,6 +651,28 @@ function renderShare() {
   mountShareBoard(document.getElementById("shareBoardRoot"), { name: staffName, phone: staffPhone });
 }
 
+function renderRegister() {
+  screenEl.innerHTML = `
+    <div class="breadcrumb">
+      <button class="back-btn" id="backHomeRegister">‹ 처음으로</button>
+      <span class="step-label">등록해요</span>
+    </div>
+    <div id="registerBoardRoot"></div>`;
+  document.getElementById("backHomeRegister").addEventListener("click", () => { view = "main"; render(); });
+  mountRegisterBoard(document.getElementById("registerBoardRoot"), { name: staffName, phone: staffPhone, role: staffRole });
+}
+
+function renderPayroll() {
+  screenEl.innerHTML = `
+    <div class="breadcrumb">
+      <button class="back-btn" id="backHomePayroll">‹ 처음으로</button>
+      <span class="step-label">${staffRole === "owner" ? "직원 급여 제출함" : "출근기록"}</span>
+    </div>
+    <div id="payrollBoardRoot"></div>`;
+  document.getElementById("backHomePayroll").addEventListener("click", () => { view = "main"; render(); });
+  mountPayrollBoard(document.getElementById("payrollBoardRoot"), { name: staffName, phone: staffPhone, role: staffRole });
+}
+
 function wireCartNav() {
   document.getElementById("backHome2").addEventListener("click", () => { view = "main"; render(); });
   const addMoreBtn = document.getElementById("addMoreBtn");
@@ -637,6 +688,7 @@ function wireCartNav() {
         <button class="day-chip ${active ? "active" : ""}" data-date="${d}">
           <div class="dow">${d === date ? "오늘" : dow}</div>
           <div class="dnum">${dnum}</div>
+          <div class="day-chip-underline ${dayAccentClass(d)}"></div>
           <div class="dcount">${count > 0 ? count + "건" : ""}</div>
         </button>`;
     })
@@ -668,6 +720,33 @@ function wireCartNav() {
   screenEl.querySelectorAll("[data-status-pick]").forEach((el) => {
     el.addEventListener("click", () => changeCartItemUrgency(el.dataset.statusPick, el.dataset.statusValue));
   });
+  screenEl.querySelectorAll("[data-cart-qty-delta]").forEach((el) => {
+    el.addEventListener("click", () => onCartOrderQtyDelta(el.dataset.cartId, !!el.dataset.cartAuto, parseInt(el.dataset.cartQtyDelta, 10)));
+  });
+}
+
+// Same "요청 수량" stepper as the item-selection screen, but for items that
+// are already sitting in the cart (committed to `pending`, or shared
+// `autoPending` for the 2-day auto-recurring materials) and not yet
+// submitted to the owner — lets staff adjust it without going back to browse.
+async function onCartOrderQtyDelta(id, isAuto, delta) {
+  if (isAuto) {
+    const a = autoPending[id];
+    if (!a) return;
+    const next = Math.max(1, (a.orderQty || 1) + delta);
+    autoPending[id] = { ...a, orderQty: next };
+    cartItems = buildTodayCartItems();
+    render();
+    await updateDoc(doc(db, "checks", date, "autoPending", id), { orderQty: next });
+    return;
+  }
+  const p = pending[id];
+  if (!p) return;
+  const next = Math.max(1, (p.orderQty || 1) + delta);
+  pending[id] = { ...p, orderQty: next };
+  savePending();
+  cartItems = buildTodayCartItems();
+  render();
 }
 
 async function cancelPendingCartItem(id) {
@@ -737,6 +816,7 @@ function upsertDraft(id, overrides) {
     urgency: current.urgency,
     note: current.note || "",
     qty: current.qty || "",
+    orderQty: current.orderQty || 1,
     photoUrl: current.photoUrl || "",
     staffName,
     ...overrides,
@@ -802,6 +882,15 @@ function onQty(id, qty) {
   upsertDraft(id, { qty });
 }
 
+function onOrderQtyDelta(id, delta) {
+  if (synced[id]) return; // locked, ignore
+  const current = effectiveState(id);
+  if (!current) return;
+  const next = Math.max(1, (current.orderQty || 1) + delta);
+  upsertDraft(id, { orderQty: next });
+  render();
+}
+
 async function submitCategory(main) {
   const entries = Object.entries(pending).filter(([, p]) => p.mainCategory === main);
   const autoEntries = Object.entries(autoPending).filter(([, p]) => p.mainCategory === main);
@@ -822,6 +911,7 @@ async function submitCategory(main) {
         urgency: p.urgency,
         note: p.note || "",
         qty: p.qty || "",
+        orderQty: p.orderQty || 1,
         photoUrl: p.photoUrl || "",
         ordered: false,
         staffName,
@@ -842,6 +932,7 @@ async function submitCategory(main) {
       urgency: a.urgency,
       note: a.note || "",
       qty: a.qty || "",
+      orderQty: a.orderQty || 1,
       photoUrl: a.photoUrl || "",
       ordered: false,
       staffName,
@@ -875,6 +966,7 @@ async function main() {
   if (!account) return;
   staffName = account.name;
   staffPhone = account.phone;
+  staffRole = account.role;
   // Owner accounts can land here too (self-ordering on a solo shift) — auth.js
   // lets that through as a special case, so surface a way back and label the
   // account caption accurately instead of always saying "직원 계정".
@@ -891,11 +983,16 @@ async function main() {
     cartDate = date;
   } else if (linkedView === "share") {
     view = "share";
+  } else if (linkedView === "register") {
+    view = "register";
+  } else if (linkedView === "payroll") {
+    view = "payroll";
   }
 
   watchForegroundPush();
   watchAppBadgeClear();
   mountMascotWidget();
+  if (!isOwnerVisiting) mountClockWidget(document.getElementById("clockWidgetRoot"), { name: staffName, phone: staffPhone });
   if (Notification.permission === "granted") registerPushToken(staffPhone);
 
   loadPending();

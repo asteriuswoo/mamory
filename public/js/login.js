@@ -1,4 +1,4 @@
-import { fetchAccount, registerAccount, getOwnerPin, setOwnerPinDoc, getAccessCode, normalizePhone } from "./auth.js";
+import { fetchAccount, registerAccount, setStaffPin, getOwnerPin, setOwnerPinDoc, getAccessCode, normalizePhone } from "./auth.js";
 import { getAccount, setAccount, clearAccount, toast } from "./util.js";
 
 const phoneStep = document.getElementById("phoneStep");
@@ -9,6 +9,12 @@ const ownerLoginBox = document.getElementById("ownerLoginBox");
 const ownerLoginLabel = document.getElementById("ownerLoginLabel");
 const ownerLoginPin = document.getElementById("ownerLoginPin");
 const ownerLoginConfirm = document.getElementById("ownerLoginConfirm");
+
+const staffLoginBox = document.getElementById("staffLoginBox");
+const staffLoginLabel = document.getElementById("staffLoginLabel");
+const staffLoginPin = document.getElementById("staffLoginPin");
+const staffLoginPinConfirm = document.getElementById("staffLoginPinConfirm");
+const staffLoginConfirm = document.getElementById("staffLoginConfirm");
 
 const registerStep = document.getElementById("registerStep");
 const nameInput = document.getElementById("nameInput");
@@ -23,8 +29,11 @@ const pinConfirm = document.getElementById("pinConfirm");
 const lockNote = document.getElementById("lockNote");
 
 let pendingPhone = null;
+let pendingRole = null; // "owner" | "staff" — which role is being registered in the pinBox step
 let pendingOwnerAccount = null;
-let isCreatingPin = false;
+let pendingStaffAccount = null;
+let isCreatingPin = false; // owner registration: reusing the shared owner PIN vs creating it
+let isCreatingStaffLoginPin = false; // existing staff account logging in but has no personal PIN yet
 
 function goTo(role) {
   location.href = role === "owner" ? "owner.html" : "staff.html";
@@ -41,7 +50,9 @@ const autoLoginCheck = (async () => {
   lockNote.textContent = "로그인 확인 중...";
   try {
     const fresh = await fetchAccount(cached.phone);
-    if (fresh) {
+    // 직원 계정인데 PIN이 없으면(캐시가 아직 이전 세션 기준) 자동 로그인시키지
+    // 않고 아래 수동 로그인 흐름으로 넘겨서 PIN 등록을 거치게 한다.
+    if (fresh && (fresh.role === "owner" || fresh.pin)) {
       setAccount(fresh);
       autoLoginRole = fresh.role;
       return;
@@ -80,8 +91,22 @@ phoneNext.addEventListener("click", async () => {
         ownerLoginBox.classList.add("show");
         ownerLoginPin.focus();
       } else {
-        setAccount(existing);
-        goTo("staff");
+        pendingStaffAccount = existing;
+        isCreatingStaffLoginPin = !existing.pin;
+        if (isCreatingStaffLoginPin) {
+          staffLoginLabel.textContent = "보안을 위해 본인만의 PIN을 새로 등록해주세요 (숫자 4자리 이상)";
+          staffLoginPinConfirm.style.display = "block";
+          staffLoginPin.placeholder = "새 PIN";
+          staffLoginConfirm.textContent = "PIN 만들고 로그인";
+        } else {
+          staffLoginLabel.textContent = "PIN을 입력하세요";
+          staffLoginPinConfirm.style.display = "none";
+          staffLoginPin.placeholder = "PIN";
+          staffLoginConfirm.textContent = "로그인";
+        }
+        phoneStep.classList.remove("show");
+        staffLoginBox.classList.add("show");
+        staffLoginPin.focus();
       }
     } else {
       pendingPhone = phone;
@@ -125,6 +150,39 @@ ownerLoginConfirm.addEventListener("click", async () => {
   }
 });
 
+staffLoginConfirm.addEventListener("click", async () => {
+  const pin = staffLoginPin.value.trim();
+  if (pin.length < 4) {
+    toast("PIN은 숫자 4자리 이상으로 입력해주세요");
+    return;
+  }
+  staffLoginConfirm.disabled = true;
+  try {
+    if (isCreatingStaffLoginPin) {
+      const confirmPin = staffLoginPinConfirm.value.trim();
+      if (pin !== confirmPin) {
+        toast("PIN이 서로 달라요. 다시 입력해주세요");
+        staffLoginPin.value = "";
+        staffLoginPinConfirm.value = "";
+        return;
+      }
+      await setStaffPin(pendingStaffAccount.phone, pin);
+      setAccount({ ...pendingStaffAccount, pin });
+      goTo("staff");
+      return;
+    }
+    if (pin === pendingStaffAccount.pin) {
+      setAccount(pendingStaffAccount);
+      goTo("staff");
+      return;
+    }
+    toast("PIN이 올바르지 않아요");
+    staffLoginPin.value = "";
+  } finally {
+    staffLoginConfirm.disabled = false;
+  }
+});
+
 async function verifyAccessCode() {
   const entered = accessCodeInput.value.trim();
   const realCode = await getAccessCode();
@@ -149,9 +207,17 @@ pickStaff.addEventListener("click", async () => {
   const ok = await verifyAccessCode();
   pickStaff.disabled = false;
   if (!ok) return;
-  const account = await registerAccount({ phone: pendingPhone, name, role: "staff" });
-  setAccount(account);
-  goTo("staff");
+
+  // 직원은 (공유되는 사장님 PIN과 달리) 본인만의 PIN을 새로 만든다.
+  pendingRole = "staff";
+  isCreatingPin = true;
+  pinBoxLabel.textContent = "본인만의 PIN을 만들어주세요 (숫자 4자리 이상)";
+  pinConfirmInput.style.display = "block";
+  pinInput.placeholder = "새 PIN";
+  pinConfirm.textContent = "PIN 만들고 시작하기";
+  pinBox.classList.add("show");
+  pinInput.focus();
+  pinBox.scrollIntoView({ behavior: "smooth", block: "center" });
 });
 
 pickOwner.addEventListener("click", async () => {
@@ -168,6 +234,7 @@ pickOwner.addEventListener("click", async () => {
   }
   const existingPin = await getOwnerPin();
   pickOwner.disabled = false;
+  pendingRole = "owner";
   isCreatingPin = !existingPin;
 
   if (isCreatingPin) {
@@ -187,12 +254,27 @@ pickOwner.addEventListener("click", async () => {
   pinBox.scrollIntoView({ behavior: "smooth", block: "center" });
 });
 
-async function confirmRegisterOwnerPin() {
+async function confirmRegisterPin() {
   const name = nameInput.value.trim();
   const pin = pinInput.value.trim();
 
   if (pin.length < 4) {
     toast("PIN은 숫자 4자리 이상으로 입력해주세요");
+    return;
+  }
+
+  if (pendingRole === "staff") {
+    // 항상 새로 만드는 개인 PIN이라 확인 입력과 일치하는지만 본다.
+    const confirmPin = pinConfirmInput.value.trim();
+    if (pin !== confirmPin) {
+      toast("PIN이 서로 달라요. 다시 입력해주세요");
+      pinInput.value = "";
+      pinConfirmInput.value = "";
+      return;
+    }
+    const account = await registerAccount({ phone: pendingPhone, name, role: "staff", pin });
+    setAccount(account);
+    goTo("staff");
     return;
   }
 
@@ -219,8 +301,10 @@ async function confirmRegisterOwnerPin() {
   goTo("owner");
 }
 
-pinConfirm.addEventListener("click", confirmRegisterOwnerPin);
-pinInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && pinConfirmInput.style.display === "none") confirmRegisterOwnerPin(); });
-pinConfirmInput.addEventListener("keydown", (e) => { if (e.key === "Enter") confirmRegisterOwnerPin(); });
+pinConfirm.addEventListener("click", confirmRegisterPin);
+pinInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && pinConfirmInput.style.display === "none") confirmRegisterPin(); });
+pinConfirmInput.addEventListener("keydown", (e) => { if (e.key === "Enter") confirmRegisterPin(); });
 ownerLoginPin.addEventListener("keydown", (e) => { if (e.key === "Enter") ownerLoginConfirm.click(); });
+staffLoginPin.addEventListener("keydown", (e) => { if (e.key === "Enter" && staffLoginPinConfirm.style.display === "none") staffLoginConfirm.click(); });
+staffLoginPinConfirm.addEventListener("keydown", (e) => { if (e.key === "Enter") staffLoginConfirm.click(); });
 phoneInput.addEventListener("keydown", (e) => { if (e.key === "Enter") phoneNext.click(); });

@@ -16,7 +16,7 @@
 import { db, doc, setDoc, onSnapshot, runTransaction } from "./firebase-init.js";
 import { todayStr } from "./util.js";
 
-// 성장단계별 그림 — 아직 아기모리 그림만 있고 나머지 단계는 없어서, 없는
+// 성장단계별 그림 — 아직 아기 모리 그림만 있고 나머지 단계는 없어서, 없는
 // 단계는 전부 지금의 모리 이미지로 대체한다. 나중에 꼬마모리·마스터모리
 // 그림이 생기면 STAGE_MASCOT_IMG에 그 단계 키만 추가하면 된다.
 const DEFAULT_MASCOT_IMG = {
@@ -27,7 +27,7 @@ const DEFAULT_MASCOT_IMG = {
 };
 
 const STAGE_MASCOT_IMG = {
-  아기모리: {
+  "아기 모리": {
     happy: "img/mascot/mascot-baby-happy.png",
     hungry: "img/mascot/mascot-baby-hungry.png",
     loving: "img/mascot/mascot-baby-loving.png",
@@ -48,24 +48,26 @@ function mascotImgFor(level, mood) {
   return set[mood] || DEFAULT_MASCOT_IMG[mood];
 }
 
-// 성장단계가 바뀌는 레벨업 순간(아기모리 -> 꼬마모리 등)에만 쓰는 축하 그림 —
+// 성장단계가 바뀌는 레벨업 순간(아기 모리 -> 꼬마모리 등)에만 쓰는 축하 그림 —
 // 같은 단계 안에서의 레벨업은 이 그림 없이 텍스트만 뜬다. 없는 전환은 그냥
 // 텍스트만 나온다.
 const STAGE_LEVELUP_IMG = {
   꼬마모리: "img/mascot/mascot-stageup-baby-to-kid.png",
 };
 
+// emoji는 img 파일이 없거나 로드에 실패했을 때만 쓰는 대체용 — 아이콘
+// 이미지가 준비되면 img가 정상 표시되고 이 emoji는 조용히 무시된다.
 const FOOD_META = {
-  honey: { label: "꿀단지", img: "img/mascot/honey-jar.png" },
-  checkberry: { label: "체크베리", img: "img/mascot/food-checkberry.png" },
-  onigiri: { label: "주먹밥", img: "img/mascot/food-onigiri.png" },
+  honey: { label: "꿀단지", img: "img/mascot/honey-jar.png", emoji: "🍯" },
+  checkberry: { label: "체크베리", img: "img/mascot/food-checkberry.png", emoji: "🍓" },
+  onigiri: { label: "주먹밥", img: "img/mascot/food-onigiri.png", emoji: "🍙" },
 };
 
 const HUNGRY_CAPTION = "모리에게<br/>밥을 주세요!";
 const MAX_LEVEL = 20;
 
 const STAGES = [
-  { min: 1, max: 4, name: "아기모리" },
+  { min: 1, max: 4, name: "아기 모리" },
   { min: 5, max: 9, name: "꼬마모리" },
   { min: 10, max: 19, name: "지금의 모리" },
   { min: 20, max: 20, name: "마스터모리" },
@@ -79,7 +81,7 @@ function stageName(level) {
 // 사장이 함께 키우는 마스코트라, 1~5 / 6~9 / 10~20 세 구간 모두 각각 몇
 // 달에서 몇 년씩 걸리도록 넉넉하게 늘렸다 (인덱스 0 = 레벨1->2, ...).
 const XP_TO_NEXT = [
-  200, 220, 240, 290, // 1->2, 2->3, 3->4, 4->5 (아기모리 구간)
+  200, 220, 240, 290, // 1->2, 2->3, 3->4, 4->5 (아기 모리 구간)
   150, 160, 170, 180, // 5->6, 6->7, 7->8, 8->9 (꼬마모리 구간)
   100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, // 9->10 ... 19->20
 ];
@@ -156,7 +158,7 @@ function pendingFoodListHtml() {
     .map(
       (r) => `
       <div class="mascot-food-item">
-        <img src="${FOOD_META[r.key].img}" alt="${FOOD_META[r.key].label}" />
+        <img src="${FOOD_META[r.key].img}" alt="${FOOD_META[r.key].label}" data-emoji="${FOOD_META[r.key].emoji}" />
         <span>${FOOD_META[r.key].label} ${r.n}개</span>
       </div>`
     )
@@ -208,6 +210,16 @@ function render() {
     `Lv.<span class="lv-num">${state.level}</span> ${stageName(state.level)}`;
   document.getElementById("mascotPanelGauge").innerHTML = gaugeHtml();
   document.getElementById("mascotPanelFood").innerHTML = pendingFoodListHtml();
+  // 아직 준비 안 된 먹이 아이콘(예: 주먹밥)은 깨진 이미지 아이콘 대신
+  // 이모지로 대체 — 이미지 파일이 나중에 채워지면 자연히 정상 표시된다.
+  document.querySelectorAll("#mascotPanelFood img").forEach((img) => {
+    img.addEventListener("error", () => {
+      const span = document.createElement("span");
+      span.className = "mascot-food-emoji";
+      span.textContent = img.dataset.emoji || "🍽️";
+      img.replaceWith(span);
+    }, { once: true });
+  });
 
   const feedBtn = document.getElementById("mascotFeedBtn");
   const feedHint = document.getElementById("mascotFeedHint");
@@ -301,7 +313,7 @@ const WIDGET_HTML = `
     <div class="mascot-panel">
       <button class="mascot-panel-close" id="mascotPanelClose" aria-label="닫기">✕</button>
       <img class="mascot-panel-img" id="mascotPanelImg" src="img/mascot/mascot-baby-happy.png" alt="모리" />
-      <div class="mascot-panel-level" id="mascotPanelLevel">Lv.1 아기모리</div>
+      <div class="mascot-panel-level" id="mascotPanelLevel">Lv.1 아기 모리</div>
       <div id="mascotPanelGauge"></div>
       <div id="mascotPanelFood"></div>
       <div class="mascot-panel-hint" id="mascotFeedHint"></div>

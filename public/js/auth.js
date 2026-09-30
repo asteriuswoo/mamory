@@ -1,4 +1,4 @@
-import { db, readyAuth, doc, getDoc, setDoc, serverTimestamp } from "./firebase-init.js";
+import { db, readyAuth, doc, getDoc, setDoc, updateDoc, serverTimestamp } from "./firebase-init.js";
 import { getAccount, setAccount, clearAccount, normalizePhone } from "./util.js";
 
 export async function fetchAccount(phone) {
@@ -7,11 +7,21 @@ export async function fetchAccount(phone) {
   return snap.exists() ? snap.data() : null;
 }
 
-export async function registerAccount({ phone, name, role }) {
+export async function registerAccount({ phone, name, role, pin }) {
   await readyAuth;
   const account = { phone, name, role, createdAt: serverTimestamp() };
+  if (pin) account.pin = pin;
   await setDoc(doc(db, "accounts", phone), account);
-  return { phone, name, role };
+  return { phone, name, role, ...(pin ? { pin } : {}) };
+}
+
+// 직원 계정 전용 개인 PIN — 사장님 PIN(config/ownerPin, 전체 공유)과 달리
+// 계정마다 따로 저장돼서, 번호만 알면 남의 계정에 그대로 들어가던 문제를
+// 막는다. 아직 PIN이 없는(=이 기능 이전에 가입한) 계정은 로그인 시
+// login.js가 자동으로 등록을 요구한다.
+export async function setStaffPin(phone, pin) {
+  await readyAuth;
+  await updateDoc(doc(db, "accounts", phone), { pin, pinUpdatedAt: serverTimestamp() });
 }
 
 // The owner PIN is not hardcoded anywhere in the app. Whoever registers as
@@ -62,6 +72,16 @@ export async function requireAccount(expectedRole) {
   }
 
   if (!fresh) {
+    clearAccount();
+    location.replace("index.html");
+    return null;
+  }
+
+  // 이 기능 배포 전부터 로그인돼 있던 직원 기기는 PIN이 없으므로, 캐시된
+  // 세션을 지우고 index.html로 돌려보내 번호+PIN 등록을 다시 거치게 한다.
+  // (사장님 계정은 PIN이 accounts 문서가 아니라 config/ownerPin에 따로
+  // 있으므로 이 검사에서 제외.)
+  if (fresh.role === "staff" && !fresh.pin) {
     clearAccount();
     location.replace("index.html");
     return null;

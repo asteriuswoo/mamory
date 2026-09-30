@@ -1,11 +1,26 @@
 // 공유하기 (품절 공유 / 공유해요) — 직원 화면(staff.js)과 사장님 화면(share.js)에서
 // 공통으로 쓰는 렌더링/데이터 모듈. mountShareBoard(el, account)로 붙여 쓴다.
 import { db, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, getDocs, serverTimestamp, arrayUnion, arrayRemove, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
-import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, toast, escapeHtml, resizeImageFile } from "./util.js";
+import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, toast, escapeHtml, resizeImageFile, dayAccentClass, openImageLightbox } from "./util.js";
 import { avatarHtml, watchAccounts } from "./avatar.js";
 
 const date = todayStr();
 const recentDates = Array.from({ length: 7 }, (_, i) => dateStrDaysAgo(i));
+const soldoutSuggestDates = Array.from({ length: 3 }, (_, i) => dateStrDaysAgo(i));
+
+// 첨부 사진을 새 탭으로 열지 않고 그 자리에서 확대해서 보여준다 — 게시글에
+// 붙은 사진, 작성 중인 미리보기 사진 둘 다 대상.
+let photoLightboxWired = false;
+function ensurePhotoLightboxWired() {
+  if (photoLightboxWired) return;
+  photoLightboxWired = true;
+  document.addEventListener("click", (e) => {
+    const img = e.target.closest("img.share-photo-trigger");
+    if (!img) return;
+    openImageLightbox(img.src, img.alt);
+  });
+}
+ensurePhotoLightboxWired();
 
 function dowLabel(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
@@ -82,8 +97,13 @@ async function saveShareEdit(id, value) {
     return;
   }
   await updateDoc(doc(db, "shares", shareDate, "items", id), { content: text });
-  const it = shareItems.find((x) => x.id === id);
-  if (it) it.content = text; // past dates have no live listener to pick this up otherwise
+  // Today has a live listener that already reflects this write — patching
+  // the local copy too would just be redundant. Past dates have no
+  // listener, so they still need the manual patch.
+  if (shareDate !== date) {
+    const it = shareItems.find((x) => x.id === id);
+    if (it) it.content = text;
+  }
   editingItems.delete(id);
   render();
   toast("수정했어요");
@@ -115,7 +135,7 @@ async function toggleReaction(itemId, key) {
   // — but a browsed past date has no listener (loadShareDate is a one-time
   // getDocs), so without patching the local copy here, a reaction on an old
   // post never visibly toggles.
-  it.reactions = newReactions;
+  if (shareDate !== date) it.reactions = newReactions;
   render();
 }
 
@@ -182,8 +202,14 @@ async function addReply(itemId, content) {
   await updateDoc(doc(db, "shares", shareDate, "items", itemId), {
     replies: arrayUnion(reply),
   });
-  const it = shareItems.find((x) => x.id === itemId);
-  if (it) it.replies = [...(it.replies || []), reply]; // see toggleReaction's comment — past dates have no live listener
+  // Today's live listener already picks this write up on its own — patching
+  // the local copy too (unconditionally, as this used to) double-added it,
+  // showing the same reply twice until the next reload corrected it. Only
+  // past dates (no listener) still need the manual patch.
+  if (shareDate !== date) {
+    const it = shareItems.find((x) => x.id === itemId);
+    if (it) it.replies = [...(it.replies || []), reply];
+  }
   render();
 }
 
@@ -201,7 +227,7 @@ async function saveReplyEdit(key, value) {
   const newReplies = [...it.replies];
   newReplies[idx] = { ...reply, content: text };
   await updateDoc(doc(db, "shares", shareDate, "items", itemId), { replies: newReplies });
-  it.replies = newReplies; // past dates have no live listener to pick this up otherwise
+  if (shareDate !== date) it.replies = newReplies; // past dates have no live listener to pick this up otherwise
   editingReplies.delete(key);
   render();
   toast("수정했어요");
@@ -219,7 +245,7 @@ async function deleteReplyAt(itemId, idx) {
   await updateDoc(doc(db, "shares", shareDate, "items", itemId), {
     replies: arrayRemove(reply),
   });
-  it.replies = it.replies.filter((_, i) => i !== idx); // past dates have no live listener to pick this up otherwise
+  if (shareDate !== date) it.replies = it.replies.filter((_, i) => i !== idx); // past dates have no live listener to pick this up otherwise
   render();
 }
 
@@ -232,7 +258,23 @@ let shareItems = [];
 let shareTodayItems = []; // always-live today's items, independent of which day is being browsed
 const chipCounts = {};
 const chipUnseen = {}; // date -> true if that date has any item this viewer hasn't seen yet
-const chipHasSoldout = {}; // date -> true if that date has any 품절 share (drives the "어제 품절 해제" reminder)
+const chipSoldoutItems = {}; // date -> [{id, date, content, resolved}] for that date's 품절 posts
+
+// 아직 해제 처리 안 된(=resolved 아닌) 지난 날짜들의 품절 게시물을 전부 모은다
+// — "어제" 하루만 보던 것과 달리, 며칠째 그대로여도 해제될 때까지 계속
+// 오늘 체크리스트에 이월된다. 오늘 새로 올라온 품절은 아직 대상이 아니다.
+function unresolvedCarryoverItems() {
+  const out = [];
+  recentDates.forEach((d) => {
+    if (d === date) return;
+    (chipSoldoutItems[d] || []).forEach((it) => {
+      if (!it.resolved) out.push(it);
+    });
+  });
+  return out;
+}
+const soldoutResolveChecked = new Set(); // item ids checked in today's "품절 해제" checklist, cleared after 제출
+const soldoutResolveTextDraft = new Map(); // item id -> edited text (a bundled post like "A, B, C" often only has some items actually back)
 
 function canDeleteShare(it) {
   // Legacy items with no staffPhone stamped can't be attributed — allow
@@ -258,7 +300,6 @@ function markSeen(items, forDate) {
 function render() {
   if (!rootEl) return;
   const isToday = shareDate === date;
-  const yesterdayDateStr = dateStrDaysAgo(1);
   const soldoutList = sortByTime(shareItems.filter((it) => it.type === "soldout"));
   const noteList = sortByTime(shareItems.filter((it) => it.type === "note"));
 
@@ -271,12 +312,23 @@ function render() {
         <div class="day-chip-row" id="shareDayChips"></div>
       </div>
     </div>
+`;
+  html += `
+    <div class="category-title section-title-soldout">📦 품절 공유<span class="sub">${soldoutList.length}건</span></div>
+    <div class="card section-soldout">`;
 
-    <div class="category-title">품절 공유<span class="sub">${soldoutList.length}건</span></div>
-    <div class="card">`;
-
-  if (isToday && chipHasSoldout[yesterdayDateStr]) {
-    html += `<button class="soldout-reminder-banner" id="soldoutReminderBtn">오늘 물류가 왔다면 탭해서 확인 후 관련 메뉴 품절해제해주세요😊</button>`;
+  const carryoverItems = isToday ? unresolvedCarryoverItems() : [];
+  if (carryoverItems.length > 0) {
+    html += `
+      <div class="soldout-resolve-box">
+        <div class="soldout-resolve-label">물류가 왔다면 확인 후 해당 메뉴를 체크하고(게시글이 여러 자재를 묶어 올린 거면 실제로 들어온 것만 남기게 문구를 고쳐도 돼요) 제출해주세요😊</div>
+        ${carryoverItems.map((it) => `
+          <div class="soldout-resolve-item">
+            <input type="checkbox" data-soldout-resolve-check="${it.id}" ${soldoutResolveChecked.has(it.id) ? "checked" : ""} />
+            <input type="text" class="soldout-resolve-input" data-soldout-resolve-text="${it.id}" value="${escapeHtml(soldoutResolveTextDraft.has(it.id) ? soldoutResolveTextDraft.get(it.id) : it.content)}" />
+          </div>`).join("")}
+        <button class="btn gold block" id="soldoutResolveSubmitBtn" style="margin-top:8px;">제출</button>
+      </div>`;
   }
 
   if (soldoutList.length === 0) {
@@ -299,15 +351,16 @@ function render() {
   if (isToday) {
     html += `
       <div style="display:flex; gap:8px; margin-top:12px;">
-        <input type="text" id="soldoutInput" placeholder="품절된 자재 이름" style="flex:1;" />
+        <input type="text" id="soldoutInput" list="soldoutMaterialList" placeholder="품절된 자재 이름" style="flex:1;" />
+        <datalist id="soldoutMaterialList">${recentMaterialNames.map((n) => `<option value="${escapeHtml(n)}"></option>`).join("")}</datalist>
         <button class="btn gold" id="soldoutAddBtn" style="white-space:nowrap;">공유</button>
       </div>`;
   }
   html += `</div>`;
 
   html += `
-    <div class="category-title">공유해요<span class="sub">${noteList.length}건</span></div>
-    <div class="card">`;
+    <div class="category-title section-title-note">💬 공유해요<span class="sub">${noteList.length}건</span></div>
+    <div class="card section-note">`;
   if (noteList.length === 0) {
     html += `<div class="empty">공유된 특이사항이 없어요.</div>`;
   } else {
@@ -322,7 +375,7 @@ function render() {
             ${postTopRowHtml(it, isToday)}
           </div>
           <div class="post-body">
-            ${it.photoUrl ? `<a href="${it.photoUrl}" target="_blank" rel="noopener"><img src="${it.photoUrl}" class="note-photo-thumb" alt="첨부 사진" /></a>` : ""}
+            ${it.photoUrl ? `<img src="${it.photoUrl}" class="note-photo-thumb share-photo-trigger" alt="첨부 사진" />` : ""}
             ${reactionRow(it, postActionsHtml(it))}
             ${repliesHtml(it)}
           </div>
@@ -337,7 +390,7 @@ function render() {
           <input type="file" accept="image/*" id="noteImageInput" style="display:none;" />
           ${notePhotoUrl ? `
             <div class="photo-preview">
-              <a href="${notePhotoUrl}" target="_blank" rel="noopener"><img src="${notePhotoUrl}" alt="첨부 사진" /></a>
+              <img src="${notePhotoUrl}" alt="첨부 사진" class="share-photo-trigger" />
               <button class="photo-remove-btn" id="noteImageRemoveBtn">✕</button>
             </div>` : `<button class="photo-add-btn" id="noteImageAddBtn">📷 사진 첨부</button>`}
         </div>
@@ -382,8 +435,47 @@ function render() {
       render();
     });
   }
-  const soldoutReminderBtn = rootEl.querySelector("#soldoutReminderBtn");
-  if (soldoutReminderBtn) soldoutReminderBtn.addEventListener("click", () => loadShareDate(yesterdayDateStr));
+  rootEl.querySelectorAll("[data-soldout-resolve-check]").forEach((el) => {
+    el.addEventListener("change", () => {
+      const id = el.dataset.soldoutResolveCheck;
+      if (el.checked) soldoutResolveChecked.add(id);
+      else soldoutResolveChecked.delete(id);
+    });
+  });
+  rootEl.querySelectorAll("[data-soldout-resolve-text]").forEach((el) => {
+    el.addEventListener("input", () => {
+      soldoutResolveTextDraft.set(el.dataset.soldoutResolveText, el.value);
+    });
+  });
+  const soldoutResolveSubmitBtn = rootEl.querySelector("#soldoutResolveSubmitBtn");
+  if (soldoutResolveSubmitBtn) {
+    soldoutResolveSubmitBtn.addEventListener("click", async () => {
+      const checkedItems = unresolvedCarryoverItems().filter((it) => soldoutResolveChecked.has(it.id));
+      if (checkedItems.length === 0) {
+        toast("품절 해제한 메뉴를 체크해주세요");
+        return;
+      }
+      const names = checkedItems
+        .map((it) => (soldoutResolveTextDraft.has(it.id) ? soldoutResolveTextDraft.get(it.id) : it.content).trim())
+        .filter(Boolean)
+        .join(", ");
+      if (!names) {
+        toast("문구를 입력해주세요");
+        return;
+      }
+      await Promise.all(checkedItems.map((it) => updateDoc(doc(db, "shares", it.date, "items", it.id), { resolved: true })));
+      await addShareItem("note", `${names} 품절 해제했습니다😊`);
+      // 로그를 다시 fetch하지 않아도 체크리스트에서 바로 사라지도록 캐시된
+      // 항목 자체를 patch — chipSoldoutItems[it.date] 안의 같은 객체를
+      // 참조하고 있어서 이렇게만 해도 다음 render()에 반영된다.
+      checkedItems.forEach((it) => {
+        it.resolved = true;
+        soldoutResolveChecked.delete(it.id);
+        soldoutResolveTextDraft.delete(it.id);
+      });
+      render();
+    });
+  }
   rootEl.querySelectorAll("[data-share-remove]").forEach((el) => {
     el.addEventListener("click", () => deleteShareItem(el.dataset.shareRemove));
   });
@@ -480,6 +572,7 @@ function wireShareDayChips() {
         <button class="day-chip ${active ? "active" : ""}" data-sdate="${d}">
           <div class="dow">${d === date ? "오늘" : dow}</div>
           <div class="dnum">${dnum}</div>
+          <div class="day-chip-underline ${dayAccentClass(d)}"></div>
           <div class="dcount">${count > 0 ? count + "건" : ""}</div>
           <div class="day-chip-dot-row">${unseen ? `<span class="day-chip-dot"></span>` : ""}</div>
         </button>`;
@@ -519,10 +612,12 @@ function loadAllShareChipCounts() {
       .then((snap) => {
         chipCounts[d] = snap.size;
         chipUnseen[d] = snap.docs.some((doc) => !(doc.data().seenBy || []).includes(account.phone));
-        chipHasSoldout[d] = snap.docs.some((doc) => doc.data().type === "soldout");
-        // Today's own render depends on yesterday's chipHasSoldout (the
-        // reminder banner), not just the date currently being browsed.
-        if (shareDate === d || (shareDate === date && d === dateStrDaysAgo(1))) render();
+        const soldoutDocs = snap.docs.filter((doc) => doc.data().type === "soldout");
+        chipSoldoutItems[d] = soldoutDocs.map((doc) => ({ id: doc.id, date: d, content: doc.data().content, resolved: !!doc.data().resolved }));
+        // Today's own render depends on every past day's chipSoldoutItems
+        // (the carry-forward 품절 해제 checklist), not just the date
+        // currently being browsed.
+        if (shareDate === d || shareDate === date) render();
         else wireShareDayChipsIfMounted();
       })
       .catch(() => {});
@@ -593,6 +688,29 @@ async function deleteShareItem(id) {
   toast("삭제했어요");
 }
 
+// 품절 공유 입력창 자동완성용 — 아무 자재나 다 띄우면 너무 많으니, 최근
+// 3일 안에 발주 요청된(=지금도 실제로 쓰는) 자재 이름만 후보로 끌어온다.
+let recentMaterialNames = [];
+
+async function loadRecentMaterialNames() {
+  const names = new Set();
+  await Promise.all(
+    soldoutSuggestDates.map(async (d) => {
+      try {
+        const snap = await getDocs(collection(db, "checks", d, "items"));
+        snap.forEach((doc) => {
+          const n = doc.data().materialName;
+          if (n) names.add(n);
+        });
+      } catch (e) {
+        // 그 날짜에 발주 기록이 없으면 건너뛴다.
+      }
+    })
+  );
+  recentMaterialNames = [...names].sort();
+  render();
+}
+
 const badgeListeners = [];
 
 function notifyBadgeListeners() {
@@ -602,6 +720,7 @@ function notifyBadgeListeners() {
 function ensureStarted() {
   if (started) return;
   started = true;
+  loadRecentMaterialNames();
   onSnapshot(collection(db, "shares", date, "items"), (snap) => {
     shareTodayItems = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     chipCounts[date] = shareTodayItems.length;

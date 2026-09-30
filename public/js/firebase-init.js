@@ -2,6 +2,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/fireba
 import {
   getFirestore,
   collection,
+  collectionGroup,
   doc,
   getDoc,
   getDocs,
@@ -13,6 +14,7 @@ import {
   serverTimestamp,
   query,
   orderBy,
+  where,
   arrayUnion,
   arrayRemove,
   runTransaction,
@@ -64,6 +66,7 @@ export const readyAuth = new Promise((resolve, reject) => {
 
 export {
   collection,
+  collectionGroup,
   doc,
   getDoc,
   getDocs,
@@ -75,6 +78,7 @@ export {
   serverTimestamp,
   query,
   orderBy,
+  where,
   arrayUnion,
   arrayRemove,
   runTransaction,

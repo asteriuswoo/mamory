@@ -3,7 +3,7 @@
 // shows up everywhere a name is rendered, and centralizes the upload flow so
 // there's exactly one place a user can set their own picture (the header).
 import { db, doc, updateDoc, collection, onSnapshot, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
-import { toast, escapeHtml, resizeImageFile, showActionSheet } from "./util.js";
+import { toast, escapeHtml, resizeImageFile, showActionSheet, openImageLightbox } from "./util.js";
 
 let accountsMap = {};
 const listeners = [];
@@ -39,6 +39,23 @@ export function watchAccounts(cb) {
 function initialOf(name) {
   return (name || "?").trim().charAt(0) || "?";
 }
+
+// Tapping any *other* rendered avatar photo (share board posts, item rows,
+// admin lists, etc.) opens an in-page enlarged view. The signed-in user's own
+// header avatar is excluded — it already opens the change-photo action sheet
+// via wireAccountHeaderAvatar below, and stacking a second click behavior on
+// top of it would just be confusing.
+let lightboxWired = false;
+function ensureLightboxWired() {
+  if (lightboxWired) return;
+  lightboxWired = true;
+  document.addEventListener("click", (e) => {
+    const img = e.target.closest("img.avatar-circle");
+    if (!img || img.closest(".account-header-avatar")) return;
+    openImageLightbox(img.src, img.alt);
+  });
+}
+ensureLightboxWired();
 
 export function avatarHtml(phone, fallbackName, size) {
   ensureAccountsWatched();

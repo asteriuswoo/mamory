@@ -4,7 +4,7 @@
 // stays loaded across tab switches instead of being torn down by a full
 // page reload each time.
 import { db, STORE_NAME, QUICK_ORDER_LINKS, collection, doc, addDoc, updateDoc, onSnapshot, getDocs, serverTimestamp } from "./firebase-init.js";
-import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, escapeHtml, URGENCY_LABEL, URGENCY_GROUP_CAPTION, sortMaterials } from "./util.js";
+import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, escapeHtml, URGENCY_LABEL, URGENCY_GROUP_CAPTION, sortMaterials, dayAccentClass, NOTIFY_BELL_ON, NOTIFY_BELL_OFF } from "./util.js";
 import { isPushDisabled, disablePushToken, enablePushToken } from "./push.js";
 import { recordSubmitToday } from "./mascot.js";
 
@@ -60,6 +60,7 @@ function renderChips() {
         <button class="day-chip ${active ? "active" : ""}" data-date="${date}">
           <div class="dow">${date === todayStr() ? "오늘" : dow}</div>
           <div class="dnum">${dnum}</div>
+          <div class="day-chip-underline ${dayAccentClass(date)}"></div>
           <div class="dcount">${count > 0 ? count + "건" : ""}</div>
           <div class="day-chip-dot-row">${unordered ? `<span class="day-chip-dot"></span>` : ""}</div>
         </button>`;
@@ -191,7 +192,7 @@ function render() {
     return `
       <div class="item-row ${isChecked ? "ordered" : ""}">
         <div style="flex:1">
-          <div class="name">${!it.ordered && !orderedPending.has(it.id) ? `<span class="tag new">NEW</span>` : ""}<span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${showSub && it.subCategory ? `<span class="subcat-inline-tag">${escapeHtml(it.subCategory)}</span>` : ""}${it.qty ? `<span class="qty-pill">${escapeHtml(it.qty)} 남음</span>` : ""}</div>
+          <div class="name">${!it.ordered && !orderedPending.has(it.id) ? `<span class="tag new">NEW</span>` : ""}<span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${showSub && it.subCategory ? `<span class="subcat-inline-tag">${escapeHtml(it.subCategory)}</span>` : ""}${it.qty ? `<span class="qty-pill">${escapeHtml(it.qty)} 남음</span>` : ""}${it.orderQty && it.orderQty > 1 ? `<span class="qty-pill">요청 ${it.orderQty}개</span>` : ""}</div>
           ${it.note ? `<div class="note">${escapeHtml(it.note)}</div>` : ""}
           ${it.photoUrl ? `<a href="${it.photoUrl}" target="_blank" rel="noopener"><img src="${it.photoUrl}" class="note-photo-thumb" alt="첨부 사진" /></a>` : ""}
           <div class="who">${it.staffName ? escapeHtml(it.staffName) + "님" : ""}${formatTimeLabel(it.updatedAt) ? ` · ${formatTimeLabel(it.updatedAt)}` : ""}</div>
@@ -301,7 +302,8 @@ function buildShareText() {
     for (const it of sortItems(byMain[main])) {
       const tag = it.urgency === "urgent" ? "[긴급] " : it.urgency === "soldout" ? "[품절] " : "";
       const qtyText = it.qty ? ` (${it.qty} 남음)` : "";
-      text += `- ${tag}${it.materialName}${qtyText}${it.note ? ` : ${it.note}` : ""}\n`;
+      const orderQtyText = it.orderQty && it.orderQty > 1 ? ` [요청 ${it.orderQty}개]` : "";
+      text += `- ${tag}${it.materialName}${qtyText}${orderQtyText}${it.note ? ` : ${it.note}` : ""}\n`;
     }
   }
   text += `\n총 ${items.length}건 (긴급/품절 ${items.filter((i) => i.urgency === "urgent" || i.urgency === "soldout").length}건)`;
@@ -364,16 +366,20 @@ async function onCopyBtnClick() {
 
 function updateNotifyBtn() {
   if (!("Notification" in window)) {
-    notifyBtn.textContent = "알림 미지원 기기";
+    notifyBtn.innerHTML = NOTIFY_BELL_OFF;
+    notifyBtn.title = "알림 미지원 기기";
     notifyBtn.disabled = true;
     return;
   }
   if (Notification.permission === "denied") {
-    notifyBtn.textContent = "알림 차단됨 (기기 설정에서 허용 필요)";
+    notifyBtn.innerHTML = NOTIFY_BELL_OFF;
+    notifyBtn.title = "알림 차단됨 (기기 설정에서 허용 필요)";
   } else if (Notification.permission === "granted" && !isPushDisabled()) {
-    notifyBtn.textContent = "알림 켜짐 ✓ (탭하면 끄기)";
+    notifyBtn.innerHTML = NOTIFY_BELL_ON;
+    notifyBtn.title = "알림 켜짐 (탭하면 끄기)";
   } else {
-    notifyBtn.textContent = "알림 설정하려면 선택하세요";
+    notifyBtn.innerHTML = NOTIFY_BELL_OFF;
+    notifyBtn.title = "알림 설정하려면 탭하세요";
   }
 }
 

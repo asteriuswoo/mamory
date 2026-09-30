@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="icons/icon-192.png?v=4" />
 <link rel="icon" href="icons/icon-192.png?v=4" />
 <title>MAMORY</title>
-<link rel="stylesheet" href="css/style.css?v=30" />
+<link rel="stylesheet" href="css/style.css?v=56" />
 <style>body{padding-bottom:0}</style>
 </head>
 <body>
@@ -49,6 +49,14 @@
       <div class="desc" id="ownerLoginLabel" style="margin-bottom:10px; color:var(--muted)">사장님 계정이에요. PIN을 입력하세요</div>
       <input type="tel" inputmode="numeric" id="ownerLoginPin" maxlength="8" placeholder="PIN" />
       <button class="btn gold block" id="ownerLoginConfirm" style="margin-top:10px">로그인</button>
+    </div>
+
+    <!-- Step 2a-2: existing staff account enters (or, first time, creates) their own PIN -->
+    <div class="pin-box" id="staffLoginBox" style="text-align:left;">
+      <div class="desc" id="staffLoginLabel" style="margin-bottom:10px; color:var(--muted)">PIN을 입력하세요</div>
+      <input type="tel" inputmode="numeric" id="staffLoginPin" maxlength="8" placeholder="PIN" />
+      <input type="tel" inputmode="numeric" id="staffLoginPinConfirm" maxlength="8" placeholder="PIN 확인 (다시 입력)" style="margin-top:8px; display:none;" />
+      <button class="btn gold block" id="staffLoginConfirm" style="margin-top:10px">로그인</button>
     </div>
 
     <!-- Step 2b: new number -> register -->
