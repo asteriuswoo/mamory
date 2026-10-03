@@ -36,3 +36,126 @@ window.forceAppRefresh = function () {
   }
   location.reload();
 };
+
+// 홈화면에 추가한(standalone) PWA는 브라우저 주소창이 없어서 크롬/사파리의
+// 기본 "당겨서 새로고침" 제스처도 같이 사라진다 — 그래서 화면 맨 위에서
+// 아래로 당기면 새로고침되는 동작을 직접 만든다. 페이지 맨 위(scrollTop
+// 0)에서 시작한 드래그만 인정해서 평소 스크롤과 안 겹치게 한다.
+//
+// 발주 트렌드·근무 등록 같은 바텀시트(.payroll-form-sheet)는 X 버튼과는
+// 별개로 아래로 스와이프해도 닫히게 해달라는 요청이 있어서, 같은 터치
+// 제스처를 여기서 함께 처리한다 — 터치가 시작된 지점이 열려있는 시트
+// 안인지 페이지 맨 위인지를 touchstart에서 한 번만 판정해 "sheet" 모드와
+// "refresh" 모드로 나누면, 손 하나의 제스처가 둘 다를 동시에 건드리는
+// 충돌 없이 깔끔하게 갈린다.
+(function setupTouchGestures() {
+  const REFRESH_DISTANCE = 100; // 이만큼 당기면 손을 떼는 순간 새로고침
+  const REFRESH_INDICATOR_HEIGHT = 84; // 텍스트만 있을 때보다 더 여유 있게 — 로딩 그림이 들어갈 공간
+  const SHEET_DISMISS_DISTANCE = 80; // 이만큼 시트를 내리면 손을 떼는 순간 닫힘
+
+  let mode = null; // "refresh" | "sheet" | null
+  let startY = null;
+  let thresholdCrossed = false; // 새로고침 기준선을 넘는 "그 순간"에만 한 번 진동하기 위한 플래그
+  let sheetEl = null;
+
+  // iOS Safari는 Vibration API 자체를 지원하지 않아(홈화면에 추가해도 동일)
+  // 이 기기에서는 조용히 아무 일도 안 일어난다 — 안드로이드에서만 느껴진다.
+  function vibrateOnce(ms) {
+    if (navigator.vibrate) navigator.vibrate(ms);
+  }
+
+  const indicator = document.createElement("div");
+  indicator.id = "pullRefreshIndicator";
+  indicator.innerHTML = `<div class="pull-refresh-spinner"></div><div class="pull-refresh-text">아래로 당겨서 새로고침</div>`;
+  document.body.appendChild(indicator);
+  const spinner = indicator.querySelector(".pull-refresh-spinner");
+  const text = indicator.querySelector(".pull-refresh-text");
+
+  function pageScrollTop() {
+    return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+  }
+
+  document.addEventListener("touchstart", (e) => {
+    const sheet = e.target.closest(".payroll-form-sheet");
+    if (sheet && (sheet.scrollTop || 0) === 0) {
+      mode = "sheet";
+      sheetEl = sheet;
+      sheetEl.style.transition = "none"; // 드래그 중엔 손가락을 바로 따라가야 자연스럽다
+    } else if (pageScrollTop() === 0) {
+      mode = "refresh";
+      indicator.style.transition = "none";
+      spinner.classList.remove("spinning");
+    } else {
+      mode = null;
+      sheetEl = null;
+    }
+    startY = e.touches[0].clientY;
+    thresholdCrossed = false;
+  }, { passive: true });
+
+  document.addEventListener("touchmove", (e) => {
+    if (!mode || startY === null) return;
+    const dy = e.touches[0].clientY - startY;
+
+    if (mode === "sheet") {
+      sheetEl.style.transform = dy > 0 ? `translateY(${dy}px)` : "";
+      return;
+    }
+
+    if (dy <= 0) {
+      indicator.style.transform = `translateY(-${REFRESH_INDICATOR_HEIGHT}px)`;
+      thresholdCrossed = false;
+      return;
+    }
+    const progress = Math.min(dy / REFRESH_DISTANCE, 1);
+    indicator.style.transform = `translateY(${(progress - 1) * REFRESH_INDICATOR_HEIGHT}px)`;
+    spinner.style.transform = `rotate(${progress * 360}deg)`;
+    if (progress >= 1) {
+      text.textContent = "놓으면 새로고침";
+      if (!thresholdCrossed) {
+        thresholdCrossed = true; // 당기는 도중 기준선을 막 넘은 순간에만 한 번 울린다
+        vibrateOnce(12);
+      }
+    } else {
+      text.textContent = "아래로 당겨서 새로고침";
+      thresholdCrossed = false; // 다시 기준선 아래로 내려가면, 또 넘을 때 다시 울릴 수 있게 리셋
+    }
+  }, { passive: true });
+
+  document.addEventListener("touchend", (e) => {
+    if (!mode || startY === null) return;
+    const dy = e.changedTouches[0].clientY - startY;
+
+    if (mode === "sheet") {
+      sheetEl.style.transition = "transform .15s ease";
+      if (dy >= SHEET_DISMISS_DISTANCE) {
+        sheetEl.style.transform = "";
+        const closeBtn = sheetEl.querySelector(".payroll-form-close-btn");
+        if (closeBtn) closeBtn.click();
+        else {
+          const overlay = sheetEl.closest(".payroll-form-overlay");
+          if (overlay) overlay.click();
+        }
+      } else {
+        sheetEl.style.transform = "";
+      }
+      mode = null;
+      sheetEl = null;
+      startY = null;
+      return;
+    }
+
+    indicator.style.transition = "transform .12s ease"; // 손 뗀 뒤 스냅 애니메이션 복원
+    if (dy >= REFRESH_DISTANCE) {
+      text.textContent = "새로고침 중...";
+      indicator.style.transform = "translateY(0)";
+      spinner.style.transform = "";
+      spinner.classList.add("spinning");
+      window.forceAppRefresh();
+    } else {
+      indicator.style.transform = `translateY(-${REFRESH_INDICATOR_HEIGHT}px)`;
+    }
+    mode = null;
+    startY = null;
+  }, { passive: true });
+})();

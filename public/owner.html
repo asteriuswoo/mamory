@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="icons/icon-192.png?v=4" />
 <link rel="icon" href="icons/icon-192.png?v=4" />
 <title>발주 리스트 - MAMORY</title>
-<link rel="stylesheet" href="css/style.css?v=56" />
+<link rel="stylesheet" href="css/style.css?v=80" />
 </head>
 <body class="has-bottom-tabs">
 <header class="topbar">
@@ -27,6 +27,8 @@
 </header>
 
 <main id="mainContent">
+  <div id="monthEndBanner" class="payroll-payday-banner" style="display:none;">📅 다음달 근무등록을 스케줄탭에 해주세요!</div>
+
   <div class="card">
     <div class="row-between">
       <div>
@@ -39,7 +41,10 @@
       </div>
     </div>
     <a href="staff.html" class="btn soft block" style="margin-top:10px;">내가 직접 발주 요청하기</a>
+    <button type="button" class="btn block humanity-trigger-btn" id="humanityBtn" style="margin-top:10px;">😠 직원들의 인류애 챙기기</button>
   </div>
+
+  <div id="humanityOverlayRoot"></div>
 
   <div class="card">
     <div class="field" style="margin-bottom:10px">
@@ -61,6 +66,11 @@
       <div style="font-size:12px; color:var(--muted)">긴급 <strong id="urgentCount" style="color:var(--urgent)">0</strong></div>
     </div>
   </div>
+
+  <div class="card" id="receiptCard"></div>
+
+  <div class="sticky-share-bar" id="stickyShareBar"></div>
+  <div id="myReceiptsOverlayRoot"></div>
 
   <div id="orderList"></div>
 

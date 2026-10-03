@@ -1,5 +1,6 @@
 const { onDocumentCreated, onDocumentUpdated } = require("firebase-functions/v2/firestore");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
+const { onRequest } = require("firebase-functions/v2/https");
 const { setGlobalOptions } = require("firebase-functions/v2");
 const admin = require("firebase-admin");
 
@@ -122,26 +123,52 @@ exports.notifyStaffOnOrdered = onDocumentCreated("checks/{date}/orderBatches/{ba
 });
 
 // 공유하기 > 공유해요 또는 품절공유에 새 글이 올라오면 작성자를 제외한
-// 모두에게 알림. 받는 사람의 역할(사장/직원)에 따라 열어줄 페이지가
-// 다르므로 토큰을 역할별로 나눠 두 번(필요하면) 보낸다.
+// 모두에게 알림. 받는 사람의 역할(사장/직원)에 따라 열어줄 페이지가 다르고,
+// @멘션된 사람에게는 "이미 모두에게 가는 일반 알림"을 중복으로 또 보내는
+// 대신 제목만 "~님이 회원님을 언급했어요"로 바꿔서 구분되게 보낸다.
 exports.notifyOnNewShareNote = onDocumentCreated("shares/{date}/items/{itemId}", async (event) => {
   const item = event.data.data();
   if (item.type !== "note" && item.type !== "soldout") return;
   const accSnap = await db.collection("accounts").get();
-  const tokensByRole = { owner: [], staff: [] };
-  accSnap.forEach((doc) => {
-    if (doc.id === item.staffPhone) return;
-    const role = doc.data().role === "owner" ? "owner" : "staff";
-    tokensByRole[role].push(...tokensOf(doc.data().fcmTokens));
-  });
   const isSoldout = item.type === "soldout";
-  const title = isSoldout ? "품절 공유 알림" : "공유해요 알림";
+  const defaultTitle = isSoldout ? "품절 공유 알림" : "공유해요 알림";
   const body = `${item.staffName ? item.staffName + "님: " : ""}${item.content || ""}${isSoldout ? " 품절됐어요" : ""}`;
-  await Promise.all(
-    Object.keys(tokensByRole).map((role) =>
-      sendToTokens(tokensByRole[role], { title, body, link: shareLinkForRole(role) })
-    )
-  );
+  const mentionedPhones = new Set(item.mentions || []);
+  const sends = [];
+  accSnap.forEach((docSnap) => {
+    if (docSnap.id === item.staffPhone) return;
+    const data = docSnap.data();
+    const tokens = tokensOf(data.fcmTokens);
+    if (tokens.length === 0) return;
+    const role = data.role === "owner" ? "owner" : "staff";
+    const mentioned = !isSoldout && (item.mentionsAll || mentionedPhones.has(docSnap.id));
+    sends.push(sendToTokens(tokens, {
+      title: mentioned ? `${item.staffName ? item.staffName + "님이 " : ""}회원님을 언급했어요` : defaultTitle,
+      body,
+      link: shareLinkForRole(role),
+    }));
+  });
+  await Promise.all(sends);
+});
+
+// 공유하기 > 레시피(레시피변경/단종)에 새 글이 올라오면 작성자를 제외한
+// 모두에게 알림 — 공유해요/품절공유와 같은 패턴. 단종 소식은 제목만
+// 다르게 보내서 구분되게 한다.
+exports.notifyOnNewRecipe = onDocumentCreated("recipes/{recipeId}", async (event) => {
+  const recipe = event.data.data();
+  const isDisco = recipe.status === "discontinued";
+  const title = isDisco ? "🔴 메뉴 단종 알림" : "📖 레시피 등록 알림";
+  const body = `${recipe.staffName ? recipe.staffName + "님: " : ""}${recipe.menuName || ""}${isDisco ? " 단종됐어요" : " 레시피가 등록됐어요"}`;
+  const accSnap = await db.collection("accounts").get();
+  const sends = [];
+  accSnap.forEach((docSnap) => {
+    if (docSnap.id === recipe.staffPhone) return;
+    const tokens = tokensOf(docSnap.data().fcmTokens);
+    if (tokens.length === 0) return;
+    const role = docSnap.data().role === "owner" ? "owner" : "staff";
+    sends.push(sendToTokens(tokens, { title, body, link: shareLinkForRole(role) }));
+  });
+  await Promise.all(sends);
 });
 
 // 등록해요 > 시재 등록에 새 기록이 쌓이면 등록한 사람을 제외한 모두에게
@@ -206,6 +233,10 @@ exports.notifyOwnerOnAttendanceStamp = onDocumentCreated("accounts/{phone}/atten
 // 달아도 알림이 전혀 가지 않았던 것. replies 배열이 늘어난 업데이트만 골라
 // 마지막으로 추가된 댓글을, 원글 작성자 본인에게만(자기 글에 자기가 달면 제외)
 // 알림 — 스레드의 다른 참여자에게는 가지 않는다.
+// 댓글(답글)은 멘션 여부로 수신 범위가 갈린다 — @이름으로 특정 인원을
+// 콕 집어 멘션했으면 그 사람(들)에게만 "언급했어요" 알림이 가고, 멘션 없이
+// 쓴 일반 댓글은 작성자를 뺀 전원에게 알림이 간다(원글 작성자만 받던
+// 예전 방식에서 확장됨).
 exports.notifyOnNewReply = onDocumentUpdated("shares/{date}/items/{itemId}", async (event) => {
   const before = event.data.before.data();
   const after = event.data.after.data();
@@ -213,17 +244,29 @@ exports.notifyOnNewReply = onDocumentUpdated("shares/{date}/items/{itemId}", asy
   const afterReplies = after.replies || [];
   if (afterReplies.length <= beforeReplies.length) return;
   const newReply = afterReplies[afterReplies.length - 1];
-  if (!newReply || !after.staffPhone || newReply.staffPhone === after.staffPhone) return;
+  if (!newReply || !newReply.staffPhone) return;
 
-  const authorAccSnap = await db.collection("accounts").doc(after.staffPhone).get();
-  if (!authorAccSnap.exists) return;
-  const tokens = tokensOf(authorAccSnap.data().fcmTokens);
   const body = `${newReply.staffName ? newReply.staffName + "님: " : ""}${newReply.content || ""} (댓글)`;
-  await sendToTokens(tokens, {
-    title: "공유해요 알림",
-    body,
-    link: shareLinkForRole(authorAccSnap.data().role),
+  const mentionedPhones = new Set(newReply.mentions || []);
+  const hasMention = newReply.mentionsAll || mentionedPhones.size > 0;
+
+  const accSnap = await db.collection("accounts").get();
+  const sends = [];
+  accSnap.forEach((docSnap) => {
+    if (docSnap.id === newReply.staffPhone) return;
+    const mentioned = newReply.mentionsAll || mentionedPhones.has(docSnap.id);
+    if (hasMention && !mentioned) return;
+    const data = docSnap.data();
+    const tokens = tokensOf(data.fcmTokens);
+    if (tokens.length === 0) return;
+    const role = data.role === "owner" ? "owner" : "staff";
+    sends.push(sendToTokens(tokens, {
+      title: mentioned ? `${newReply.staffName ? newReply.staffName + "님이 " : ""}회원님을 언급했어요` : "공유해요 알림",
+      body,
+      link: shareLinkForRole(role),
+    }));
   });
+  await Promise.all(sends);
 });
 
 // 이모지 리액션(좋아요 등)이 새로 눌리면 원글 작성자에게 "OO님이 좋아요를
@@ -255,22 +298,30 @@ function kstDateStr(date) {
 // 위함). 다만 하루라도 지나서 처리한 배치는(= 이 트리거가 도는 날짜가
 // 오늘이 아니면) 아예 인정하지 않는다 — 과거 날짜 발주를 뒤늦게 몰아서
 // 처리해도 꿀단지가 쌓이지 않도록.
+// 꿀단지는 "사장님"이 주문완료했다는 걸로 버는 먹이라, 이제는 공용
+// meta/mascot 문서가 아니라 오너 역할 계정들의 accounts 문서에 개인적으로
+// 쌓는다 — 그래야 이 가게의 먹이 알림이 사장님 화면에만 뜨고 직원들
+// 화면엔 안 뜬다(레벨/경험치는 여전히 meta/mascot에 공유로 남는다).
 exports.awardHoneyOnOrderBatch = onDocumentCreated("checks/{date}/orderBatches/{batchId}", async (event) => {
   const date = event.params.date;
   if (date !== kstDateStr(new Date())) return; // only same-day completion counts
 
-  const mascotRef = db.collection("meta").doc("mascot");
-  await db.runTransaction(async (tx) => {
-    const snap = await tx.get(mascotRef);
-    const data = snap.exists ? snap.data() : {};
-    const count = data.honeyCountDate === date ? data.honeyCount || 0 : 0;
-    if (count >= 2) return; // 오늘 이미 2번 받았음
-    tx.set(
-      mascotRef,
-      { honeyJars: (data.honeyJars || 0) + 1, honeyCount: count + 1, honeyCountDate: date },
-      { merge: true }
-    );
-  });
+  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").get();
+  await Promise.all(
+    ownersSnap.docs.map((ownerDoc) =>
+      db.runTransaction(async (tx) => {
+        const snap = await tx.get(ownerDoc.ref);
+        const data = snap.exists ? snap.data() : {};
+        const count = data.honeyCountDate === date ? data.honeyCount || 0 : 0;
+        if (count >= 2) return; // 오늘 이미 2번 받았음
+        tx.set(
+          ownerDoc.ref,
+          { pendingHoney: (data.pendingHoney || 0) + 1, honeyCount: count + 1, honeyCountDate: date },
+          { merge: true }
+        );
+      })
+    )
+  );
 });
 
 exports.notifyOnNewReaction = onDocumentUpdated("shares/{date}/items/{itemId}", async (event) => {
@@ -307,45 +358,22 @@ exports.notifyOnNewReaction = onDocumentUpdated("shares/{date}/items/{itemId}", 
 });
 
 // ---- 월급날 알림 (매일 오전 9시) ----
-// payroll.js의 cycleBounds() 로직을 그대로 옮겨온 것 — 클라이언트는 브라우저의
-// 로컬(=한국) 시간으로 년/월/일을 계산하는데, 서버의 new Date()는 UTC라서
-// 그대로 쓰면 날짜가 어긋난다. kstDateStr로 한국 날짜를 문자열로 구한 뒤
-// 그 값으로 "가짜 로컬" Date를 만들면, 이후의 getFullYear/getMonth/getDate
-// 계산이 클라이언트와 동일하게 맞아떨어진다.
-function kstTodayAsLocalDate() {
-  const [y, m, d] = kstDateStr(new Date()).split("-").map(Number);
-  return new Date(y, m - 1, d);
+// 정산 시작일(급여 계산 기간)과 실제 월급 지급일은 별개다 — 직원마다 정산
+// 종료일 바로 다음날 받기도 하고, 정산 기간과 무관한 고정 날짜(예: 매달
+// 15일)에 받기도 한다. 그래서 여기서는 cycleBounds 계산을 흉내내지 않고,
+// 각 직원이 payroll.js에서 직접 등록한 paydayOfMonth(1~28)와 오늘의 날짜만
+// 비교한다 — 한국 기준 "오늘 며칠인지"만 필요하므로 kstDateStr 문자열에서
+// day 부분만 뽑아 쓰면 충분하다.
+function kstDayOfMonth() {
+  return Number(kstDateStr(new Date()).split("-")[2]);
 }
 
-function addMonths(d, n) {
-  const r = new Date(d);
-  r.setMonth(r.getMonth() + n);
-  return r;
-}
-
-function addDays(d, n) {
-  const r = new Date(d);
-  r.setDate(r.getDate() + n);
-  return r;
-}
-
-function ymdLocal(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-function cycleEnd(payCycleStartDay, today) {
-  let anchor = new Date(today.getFullYear(), today.getMonth(), payCycleStartDay);
-  if (anchor > today) anchor = addMonths(anchor, -1);
-  const nextAnchor = addMonths(anchor, 1);
-  return addDays(nextAnchor, -1);
-}
-
-// 직원별 정산 주기 마지막 날(=월급날)에만: 그 직원 본인에게 "월급날이에요"
-// 알림을, 사장님에게는 "OO님 급여 지급날입니다" 알림을 보낸다. 급여 제출
-// 여부와 무관하게 날짜만으로 판단 — 제출 알림(notifyOwnerOnPayrollRequest)과는
-// 별개다.
+// 직원이 등록한 월급날에만: 그 직원 본인에게 "월급날이에요" 알림을,
+// 사장님에게는 "OO님 급여 지급날입니다" 알림을 보낸다. 급여 제출 여부와
+// 무관하게 날짜만으로 판단 — 제출 알림(notifyOwnerOnPayrollRequest)과는
+// 별개다. 월급날을 아직 등록하지 않은 계정은 대상에서 제외된다.
 exports.notifyPayday = onSchedule({ schedule: "0 9 * * *", timeZone: "Asia/Seoul" }, async () => {
-  const today = kstTodayAsLocalDate();
+  const todayDay = kstDayOfMonth();
   const accSnap = await db.collection("accounts").get();
 
   const owners = [];
@@ -356,8 +384,7 @@ exports.notifyPayday = onSchedule({ schedule: "0 9 * * *", timeZone: "Asia/Seoul
       owners.push(data);
       return;
     }
-    const end = cycleEnd(data.payCycleStartDay || 1, today);
-    if (ymdLocal(end) === ymdLocal(today)) {
+    if (data.paydayOfMonth && data.paydayOfMonth === todayDay) {
       staffOnPayday.push({ phone: docSnap.id, name: data.name, fcmTokens: data.fcmTokens });
     }
   });
@@ -430,3 +457,106 @@ exports.autoRequestFixedMaterials = onSchedule(
     }
   }
 );
+
+// ---- 시재등록 정기 알림 (평일 11시/14시/18시) ----
+// 그 시각에 근무표(schedules)상 근무 중인 직원에게만 "시재 등록해주세요"
+// 알림을 보낸다 — 매장에 아무도 없는데 알림이 가는 일이 없도록, 전체
+// 직원이 아니라 근무표 기준으로 그 시간을 포함하는 근무가 있는 사람만 추린다.
+async function notifyScheduledCashReminder(hour) {
+  const today = kstDateStr(new Date());
+  const timeStr = `${String(hour).padStart(2, "0")}:00`;
+  const schedSnap = await db.collection("schedules").where("date", "==", today).get();
+  const onDutyPhones = new Set();
+  schedSnap.forEach((docSnap) => {
+    const d = docSnap.data();
+    if (d.staffPhone && d.startTime && d.endTime && d.startTime <= timeStr && d.endTime > timeStr) {
+      onDutyPhones.add(d.staffPhone);
+    }
+  });
+  if (onDutyPhones.size === 0) return;
+  const accSnaps = await Promise.all([...onDutyPhones].map((p) => db.collection("accounts").doc(p).get()));
+  await Promise.all(
+    accSnaps
+      .filter((s) => s.exists)
+      .map((s) => {
+        const data = s.data();
+        return sendToTokens(tokensOf(data.fcmTokens), {
+          title: "시재 등록 알림",
+          body: `${timeStr} 시재를 등록해주세요`,
+          link: registerLinkForRole(data.role),
+        });
+      })
+  );
+}
+
+exports.notifyCashRegister11am = onSchedule({ schedule: "0 11 * * 1-5", timeZone: "Asia/Seoul" }, () => notifyScheduledCashReminder(11));
+exports.notifyCashRegister2pm = onSchedule({ schedule: "0 14 * * 1-5", timeZone: "Asia/Seoul" }, () => notifyScheduledCashReminder(14));
+exports.notifyCashRegister6pm = onSchedule({ schedule: "0 18 * * 1-5", timeZone: "Asia/Seoul" }, () => notifyScheduledCashReminder(18));
+
+// ---- 근무표 출근 전날 알림 (매일 밤 9시) ----
+// 내일(KST) 날짜로 등록된 근무표 항목을 모아, 각자 본인에게만 "내일 근무예요"
+// 알림을 보낸다 — 다른 직원의 스케줄까지 알 필요는 없으므로 본인 항목만.
+exports.notifyTomorrowShift = onSchedule({ schedule: "0 21 * * *", timeZone: "Asia/Seoul" }, async () => {
+  const tomorrow = kstDateStr(new Date(Date.now() + 24 * 60 * 60 * 1000));
+  const schedSnap = await db.collection("schedules").where("date", "==", tomorrow).get();
+  if (schedSnap.empty) return;
+  await Promise.all(
+    schedSnap.docs.map(async (docSnap) => {
+      const d = docSnap.data();
+      if (!d.staffPhone) return;
+      const accSnap = await db.collection("accounts").doc(d.staffPhone).get();
+      if (!accSnap.exists) return;
+      const tokens = tokensOf(accSnap.data().fcmTokens);
+      await sendToTokens(tokens, {
+        title: "내일 근무 알림",
+        body: `내일 ${d.shiftType || ""} ${d.startTime || ""}~${d.endTime || ""} 근무예요`,
+        link: "/staff.html?view=payroll",
+      });
+    })
+  );
+});
+
+// ---- 인류애 바사삭 등록 알림 ----
+// 가볍게 공감하고 넘기는 게 목적인 기능이라, 작성자 본인을 뺀 전 직원(+사장님)
+// 에게 바로 알림을 보낸다 — 공유해요처럼 역할별로 열어줄 페이지가 다를 필요가
+// 없는 단일 화면 기능이라 링크도 /staff.html 하나로 고정.
+exports.notifyOnHumanityCrack = onDocumentCreated("humanityCracks/{crackId}", async (event) => {
+  const crack = event.data.data();
+  const accSnap = await db.collection("accounts").get();
+  const tokens = [];
+  accSnap.forEach((doc) => {
+    if (doc.id === crack.staffPhone) return;
+    tokens.push(...tokensOf(doc.data().fcmTokens));
+  });
+  await sendToTokens(tokens, {
+    title: "💢 인류애 바사삭",
+    body: `${crack.staffName ? crack.staffName + "님: " : ""}${crack.reason || ""}`,
+    link: "/staff.html",
+  });
+});
+
+// ---- 사진 저장(다운로드) 프록시 ----
+// Storage 버킷에 CORS 설정이 없어서, 클라이언트가 사진 URL을 바로 fetch()해서
+// 다운로드하려 하면 브라우저가 막아버린다(이미지를 <img>로 "보여주는" 건
+// CORS 없이도 되지만, fetch로 바이트를 "읽어오는" 건 버킷의 CORS 설정이
+// 필요하다). 서버(Admin SDK)는 이 제약이 없으니, 여기서 대신 받아
+// Content-Disposition: attachment로 내려주면 클라이언트는 이 함수 주소만
+// fetch하면 새 창 없이 바로 저장할 수 있다.
+exports.downloadImage = onRequest({ cors: true }, async (req, res) => {
+  const filePath = req.query.path;
+  if (!filePath) {
+    res.status(400).send("path query parameter required");
+    return;
+  }
+  try {
+    const bucket = admin.storage().bucket();
+    const file = bucket.file(filePath);
+    const [buf] = await file.download();
+    const [meta] = await file.getMetadata();
+    res.set("Content-Type", meta.contentType || "application/octet-stream");
+    res.set("Content-Disposition", `attachment; filename="mamory_${Date.now()}.jpg"`);
+    res.send(buf);
+  } catch (e) {
+    res.status(500).send("download failed");
+  }
+});

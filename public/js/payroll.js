@@ -6,7 +6,7 @@
 // 사장님 계정에서는 이 탭이 완전히 다른 화면이 된다 — 본인 근무를 기록하는
 // 게 아니라, 직원들이 월급날 제출한 급여 요청(payrollRequests)을 직원별로
 // 모아 보여주는 수신함 역할만 한다.
-import { db, collection, collectionGroup, doc, addDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy, where, serverTimestamp } from "./firebase-init.js";
+import { db, collection, collectionGroup, doc, addDoc, updateDoc, deleteDoc, getDocs, onSnapshot, query, orderBy, where, serverTimestamp } from "./firebase-init.js";
 import { toast, escapeHtml } from "./util.js";
 import { avatarHtml } from "./avatar.js";
 
@@ -16,16 +16,47 @@ let started = false;
 
 let hourlyWage = 0;
 let payCycleStartDay = 1; // 1~28일 중 "이 날부터 다음달 이 날 전날까지"가 한 주기
+let paydayOfMonth = null; // 1~28일 — 실제로 월급을 받는 날짜. null이면 아직 등록 안 함
 let insuranceType = "33"; // "33" = 3.3% 사업소득세 공제, "4das" = 4대보험 공제
+// 급여 제출할 때 같이 넘어가서 사장님이 바로 입금할 수 있게 — 계좌 설정도
+// payCycleStartDay/paydayOfMonth처럼 한 번 등록해두면 계속 재사용된다.
+let bankName = "";
+let bankAccountNumber = "";
 let shifts = []; // 전체 근무 기록 — live
 let cycleOffset = 0; // 0 = 오늘이 속한 주기, -1 = 이전 주기, +1 = 다음 주기
 let view = "list"; // list | payslip
-let editMode = false;
+let shiftCalYear = 0;
+let shiftCalMonth = 0; // 0-indexed
+let shiftCalSelectedDate = null; // 상세 보기 대상 날짜 — null이면 달력만 표시
 let myPayrollRequests = []; // 내가 제출한 급여 요청 — live, 이미 제출한 기간인지 확인용
 let submittedDetailOpen = false; // "제출한 내용 보기" 토글
 let showForm = false;
 
 const WEEKDAYS = ["일", "월", "화", "수", "목", "금", "토"];
+
+// 2026년 대한민국 법정공휴일 — 캘린더에 주말과 같이 빨간색으로 표시하는
+// 용도라 API 연동 없이 그 해 날짜만 박아둔다. 설/추석/부처님오신날처럼
+// 음력 기준인 날짜는 매년 바뀌므로, 새해가 되면 이 목록도 갱신해야 한다.
+const KR_HOLIDAYS_2026 = new Set([
+  "2026-01-01", // 신정
+  "2026-02-16", "2026-02-17", "2026-02-18", // 설날 연휴
+  "2026-03-01", "2026-03-02", // 삼일절 + 대체공휴일
+  "2026-05-05", // 어린이날
+  "2026-05-24", "2026-05-25", // 부처님오신날 + 대체공휴일
+  "2026-06-06", // 현충일
+  "2026-07-17", // 제헌절 (2026년 한시적으로 공휴일 재지정)
+  "2026-08-15", "2026-08-17", // 광복절 + 대체공휴일
+  "2026-09-24", "2026-09-25", "2026-09-26", // 추석 연휴
+  "2026-10-03", "2026-10-05", // 개천절 + 대체공휴일
+  "2026-10-09", // 한글날
+  "2026-12-25", // 크리스마스
+]);
+
+// 주말(토/일)이거나 공휴일이면 true — 캘린더 날짜를 빨간색으로 표시할지
+// 판단하는 기준.
+function isRedDate(dateStr, dow) {
+  return dow === 0 || dow === 6 || KR_HOLIDAYS_2026.has(dateStr);
+}
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -70,6 +101,22 @@ function formatCycleLabel(start, end) {
   return `${yy}.${pad2(start.getMonth() + 1)}.${pad2(start.getDate())} ~ ${pad2(end.getMonth() + 1)}.${pad2(end.getDate())}`;
 }
 
+// "매달 O일"이라는 규칙 설명보다, 실제로 다가오는 월급날이 며칠인지 바로
+// 보여주는 게 직원마다 등록일이 다 달라서 더 와닿는다.
+function nextPaydayLabel() {
+  if (paydayOfMonth == null) return "급여 지급일 미등록 — 정산일 옆 버튼에서 등록해주세요";
+  const today = new Date();
+  if (today.getDate() === paydayOfMonth) return "오늘이 월급날이에요! 🎉";
+  let y = today.getFullYear();
+  let m = today.getMonth();
+  if (today.getDate() > paydayOfMonth) {
+    m += 1;
+    if (m > 11) { m = 0; y += 1; }
+  }
+  const d = new Date(y, m, paydayOfMonth);
+  return `다음 월급날 ${d.getMonth() + 1}월 ${d.getDate()}일 (${WEEKDAYS[d.getDay()]})`;
+}
+
 function formatShiftDateLabel(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
   const dt = new Date(y, m - 1, d);
@@ -99,6 +146,13 @@ function shiftsInCycle(start, end) {
   const startStr = ymd(start);
   const endStr = ymd(end);
   return shifts.filter((s) => s.date >= startStr && s.date <= endStr).sort((a, b) => (a.date + a.startTime).localeCompare(b.date + b.startTime));
+}
+
+// 근무 등록/수정 캘린더에 이미 등록해둔 날짜를 점으로 표시하기 위한 날짜
+// 집합 — 기간과 무관하게 전체 근무 기록 기준이라, 어느 달로 넘어가도
+// "이 날은 이미 등록했었지"를 바로 알 수 있다.
+function registeredShiftDates() {
+  return new Set(shifts.map((s) => s.date));
 }
 
 // 하우머치 등 대부분의 급여 계산기가 그렇듯, 공제액은 반올림이 아니라
@@ -333,7 +387,7 @@ function editShiftHtml() {
             <span class="payroll-date-summary-text">${dateSummary}</span>
             <span class="payroll-date-summary-chev">${editShowDatePicker ? "︿" : "⌄"}</span>
           </button>
-          ${editShowDatePicker ? calendarHtml(editDates, editCalYear, editCalMonth, "editCalPrevMonth", "editCalNextMonth", "data-edit-date") : ""}
+          ${editShowDatePicker ? calendarHtml(editDates, editCalYear, editCalMonth, "editCalPrevMonth", "editCalNextMonth", "data-edit-date", registeredShiftDates()) : ""}
         </div>
         <div class="field">
           <label>근무 시간</label>
@@ -364,6 +418,10 @@ async function submitPayrollRequest() {
     toast("제출할 근무 기록이 없어요");
     return;
   }
+  if (!bankName || !bankAccountNumber) {
+    toast("입금받을 계좌를 먼저 등록해주세요 (상단 🏦 계좌 등록)");
+    return;
+  }
   const { gross, deduction, net } = payslipTotals(cycleShifts);
   if (!confirm(`${cycleLabel} 급여(실수령액 ${Math.round(net).toLocaleString()}원)를 사장님께 제출할까요?`)) return;
   await addDoc(collection(db, "payrollRequests"), {
@@ -374,6 +432,8 @@ async function submitPayrollRequest() {
     cycleEnd: ymd(end),
     hourlyWage,
     insuranceType,
+    bankName,
+    bankAccountNumber,
     gross: Math.round(gross),
     deductionTotal: deduction.total,
     deductionRows: deduction.rows,
@@ -410,13 +470,59 @@ async function editPayCycleStartDay() {
   render();
 }
 
+// 정산 시작일(급여 계산 기간)과 실제로 통장에 월급이 들어오는 날은 서로
+// 별개 개념이다 — 어떤 직원은 정산 종료일에 바로 받고, 어떤 직원은 정산
+// 기간과 무관한 고정된 날짜(예: 매달 15일)에 받는다. 그래서 "정산 시작일"
+// 계산으로 월급날을 추정하지 않고, 본인이 직접 등록한 날짜(1~28일)만
+// 월급날 배너/알림의 기준으로 쓴다.
+async function editPaydayOfMonth() {
+  const input = window.prompt(
+    "월급 받는 날을 입력하세요 (1~28일). 예: 15 → 매달 15일에 월급을 받아요",
+    paydayOfMonth ? String(paydayOfMonth) : ""
+  );
+  if (input === null) return;
+  const n = parseInt(input, 10);
+  if (!Number.isFinite(n) || n < 1 || n > 28) {
+    toast("1~28 사이로 입력해주세요");
+    return;
+  }
+  paydayOfMonth = n;
+  await updateDoc(doc(db, "accounts", account.phone), { paydayOfMonth: n });
+  toast("월급날을 저장했어요");
+  render();
+}
+
+// 한 번 등록해두면 급여 제출할 때마다 스냅샷으로 같이 실려가서, 사장님이
+// 급여 제출함만 보고 바로 입금할 수 있다.
+async function editBankInfo() {
+  const bank = window.prompt("은행명을 입력하세요 (예: 국민은행)", bankName || "");
+  if (bank === null) return;
+  const trimmedBank = bank.trim();
+  if (!trimmedBank) {
+    toast("은행명을 입력해주세요");
+    return;
+  }
+  const acct = window.prompt("계좌번호를 입력하세요", bankAccountNumber || "");
+  if (acct === null) return;
+  const trimmedAcct = acct.trim();
+  if (!trimmedAcct) {
+    toast("계좌번호를 입력해주세요");
+    return;
+  }
+  bankName = trimmedBank;
+  bankAccountNumber = trimmedAcct;
+  await updateDoc(doc(db, "accounts", account.phone), { bankName: trimmedBank, bankAccountNumber: trimmedAcct });
+  toast("계좌 정보를 저장했어요");
+  render();
+}
+
 // ---- 렌더 ----
 
 // 앞/뒤 달의 날짜를 흐리게라도 채워 넣는 이유 — 첫 주가 목/금/토처럼 늦게
 // 시작하는 달은 첫 줄이 거의 텅 비어 보여서, 실제로는 줄 간격이 다 똑같은데
 // "첫 주와 둘째 주 사이 공백이 유독 크다"는 착시가 생겼다. 실제 달력 앱들처럼
 // 빈 칸을 이전/다음 달 숫자로 채우면 이 착시가 사라진다.
-function calendarHtml(selectedDates, year, month, prevBtnId, nextBtnId, dateAttr) {
+function calendarHtml(selectedDates, year, month, prevBtnId, nextBtnId, dateAttr, registeredDates) {
   const firstDow = new Date(year, month, 1).getDay();
   const totalDays = daysInMonth(year, month + 1);
   let prevYear = year, prevMonth = month - 1;
@@ -430,7 +536,8 @@ function calendarHtml(selectedDates, year, month, prevBtnId, nextBtnId, dateAttr
     cells.push({ d: prevMonthDays - i, muted: true });
   }
   for (let d = 1; d <= totalDays; d++) {
-    cells.push({ d, muted: false, dateStr: ymd(new Date(year, month, d)) });
+    const dt = new Date(year, month, d);
+    cells.push({ d, muted: false, dateStr: ymd(dt), dow: dt.getDay() });
   }
   const trailing = (7 - (cells.length % 7)) % 7;
   for (let d = 1; d <= trailing; d++) {
@@ -452,7 +559,9 @@ function calendarHtml(selectedDates, year, month, prevBtnId, nextBtnId, dateAttr
           if (c.muted) return `<span class="payroll-calendar-cell muted">${c.d}</span>`;
           const active = selectedDates.has(c.dateStr);
           const isToday = c.dateStr === todayDateStr;
-          return `<button type="button" class="payroll-calendar-cell ${active ? "active" : ""} ${isToday ? "today" : ""}" ${dateAttr}="${c.dateStr}">${c.d}</button>`;
+          const isRegistered = registeredDates && registeredDates.has(c.dateStr);
+          const isRed = isRedDate(c.dateStr, c.dow);
+          return `<button type="button" class="payroll-calendar-cell ${active ? "active" : ""} ${isToday ? "today" : ""} ${isRed ? "red-date" : ""}" ${dateAttr}="${c.dateStr}">${c.d}${isRegistered ? `<span class="payroll-calendar-dot"></span>` : ""}</button>`;
         }).join("")}
       </div>
     </div>`;
@@ -493,7 +602,7 @@ function formHtml() {
             <span class="payroll-date-summary-text">${dateSummary}</span>
             <span class="payroll-date-summary-chev">${showDatePicker ? "︿" : "⌄"}</span>
           </button>
-          ${showDatePicker ? calendarHtml(formDates, calYear, calMonth, "calPrevMonth", "calNextMonth", "data-form-date") : ""}
+          ${showDatePicker ? calendarHtml(formDates, calYear, calMonth, "calPrevMonth", "calNextMonth", "data-form-date", registeredShiftDates()) : ""}
         </div>
         <div class="field">
           <label>근무 시간</label>
@@ -546,23 +655,100 @@ function formHtml() {
     </div>`;
 }
 
-function listHtml(cycleShifts) {
-  if (cycleShifts.length === 0) {
-    return `<div class="card"><div class="empty">이 기간에 등록된 근무가 없어요.</div></div>`;
+// 리스트로는 근무가 많아질수록 한눈에 들어오지 않아서, 다른 탭들(스케줄/
+// 출퇴근기록)과 같은 월간 캘린더로 보여준다 — 근무 등록된 날엔 점을 찍고,
+// 그 날짜 칸 안에 근무시간을 형광펜처럼 눈에 띄게 표시한다. 날짜를 누르면
+// 그날 등록된 근무를 수정/삭제할 수 있는 상세 창이 뜬다.
+function ensureShiftCalStarted() {
+  if (shiftCalYear) return;
+  const today = new Date();
+  shiftCalYear = today.getFullYear();
+  shiftCalMonth = today.getMonth();
+}
+
+function openShiftCalDay(dateStr) {
+  const dayShifts = shifts.filter((s) => s.date === dateStr);
+  if (dayShifts.length === 0) {
+    toast("등록된 근무가 없어요. + 등록으로 추가해보세요");
+    return;
   }
-  const rows = cycleShifts.map((s) => {
-    const pay = computeShiftPay(s, hourlyWage);
-    return `
-      <div class="payroll-shift-row ${editMode ? "payroll-shift-row-editable" : ""}" ${editMode ? `data-shift-edit="${s.id}"` : ""}>
-        <div class="payroll-shift-info">
-          <div class="payroll-shift-date">${formatShiftDateLabel(s.date)}</div>
-          <div class="payroll-shift-time">${s.startTime}~${s.endTime}</div>
+  shiftCalSelectedDate = dateStr;
+  render();
+}
+
+function closeShiftCalDay() {
+  shiftCalSelectedDate = null;
+  render();
+}
+
+function myShiftCalendarHtml() {
+  ensureShiftCalStarted();
+  const firstDow = new Date(shiftCalYear, shiftCalMonth, 1).getDay();
+  const totalDays = daysInMonth(shiftCalYear, shiftCalMonth + 1);
+  const byDate = new Map();
+  for (const s of shifts) {
+    if (!byDate.has(s.date)) byDate.set(s.date, []);
+    byDate.get(s.date).push(s);
+  }
+  const todayDateStr = ymd(new Date());
+
+  const cells = [];
+  for (let i = 0; i < firstDow; i++) cells.push(null);
+  for (let d = 1; d <= totalDays; d++) cells.push(d);
+
+  return `
+    <div class="payroll-calendar">
+      <div class="payroll-calendar-header">
+        <button type="button" class="icon-btn" id="shiftCalPrevMonth">‹</button>
+        <strong>${shiftCalYear}년 ${shiftCalMonth + 1}월</strong>
+        <button type="button" class="icon-btn" id="shiftCalNextMonth">›</button>
+      </div>
+      <div class="payroll-calendar-weekdays">${WEEKDAYS.map((w) => `<span>${w}</span>`).join("")}</div>
+      <div class="payroll-calendar-grid payroll-schedule-grid">
+        ${cells.map((d) => {
+          if (d === null) return `<div class="payroll-schedule-cell muted"></div>`;
+          const dt = new Date(shiftCalYear, shiftCalMonth, d);
+          const dateStr = ymd(dt);
+          const isToday = dateStr === todayDateStr;
+          const isRed = isRedDate(dateStr, dt.getDay());
+          const dayShifts = byDate.get(dateStr) || [];
+          return `
+            <button type="button" class="payroll-schedule-cell ${isToday ? "today" : ""}" data-shift-cal-day="${dateStr}">
+              <div class="payroll-schedule-daynum ${isRed ? "red-date" : ""}">${d}${dayShifts.length > 0 ? `<span class="payroll-shift-cal-dot"></span>` : ""}</div>
+              ${dayShifts.length > 0 ? `<div class="payroll-shift-cal-timeband">${dayShifts.map((s) => `<span class="payroll-shift-cal-time">${s.startTime}~${s.endTime}</span>`).join("")}</div>` : ""}
+            </button>`;
+        }).join("")}
+      </div>
+    </div>`;
+}
+
+function shiftCalDayOverlayHtml() {
+  if (!shiftCalSelectedDate) return "";
+  const dayShifts = shifts.filter((s) => s.date === shiftCalSelectedDate);
+  return `
+    <div class="payroll-form-overlay" id="shiftCalDayOverlay">
+      <div class="payroll-form-sheet">
+        <div class="row-between">
+          <div style="font-weight:800; font-size:16px;">${formatShiftDateLabel(shiftCalSelectedDate)} 근무</div>
+          <button class="payroll-form-close-btn" id="shiftCalDayCloseBtn" aria-label="닫기">✕</button>
         </div>
-        <div class="payroll-shift-pay">${Math.round(pay.total).toLocaleString()}원</div>
-        ${editMode ? `<button class="payroll-shift-delete-btn" data-shift-delete="${s.id}">삭제</button>` : ""}
-      </div>`;
-  }).join("");
-  return `<div class="card payroll-shift-list">${rows}</div>`;
+        ${dayShifts.length === 0 ? `<div class="empty" style="margin-top:12px;">등록된 근무가 없어요.</div>` : `
+        <div class="payroll-shift-list" style="margin:14px 0;">
+          ${dayShifts.map((s) => {
+            const pay = computeShiftPay(s, hourlyWage);
+            return `
+            <div class="payroll-shift-row">
+              <div class="payroll-shift-info">
+                <div class="payroll-shift-date">${s.startTime}~${s.endTime}</div>
+                <div class="payroll-shift-time">${Math.round(pay.total).toLocaleString()}원</div>
+              </div>
+              <button class="payroll-shift-edit-btn" data-shift-cal-edit="${s.id}">수정</button>
+              <button class="payroll-shift-delete-btn" data-shift-cal-delete="${s.id}">삭제</button>
+            </div>`;
+          }).join("")}
+        </div>`}
+      </div>
+    </div>`;
 }
 
 function payslipTotals(cycleShifts) {
@@ -593,7 +779,7 @@ function formatSubmittedAt(ts) {
   return `${d.getMonth() + 1}월 ${d.getDate()}일 ${pad2(d.getHours())}:${pad2(d.getMinutes())} 제출`;
 }
 
-function payslipHtml(cycleShifts, cycleLabel, payday) {
+function payslipHtml(cycleShifts, cycleLabel) {
   const { totals, gross, deduction, net } = payslipTotals(cycleShifts);
   const { start, end } = cycleBounds(cycleOffset);
   const cycleStartStr = ymd(start);
@@ -622,13 +808,24 @@ function payslipHtml(cycleShifts, cycleLabel, payday) {
               <span>${(s.pay || 0).toLocaleString()}원</span>
             </div>`).join("")}
         </div>` : ""}
-    </div>` : `<button class="btn secondary block" id="payrollSubmitRequestBtn" style="margin-top:4px;" ${cycleShifts.length === 0 ? "disabled" : ""}>사장님께 이번 급여 제출하기</button>`;
+    </div>` : (() => {
+        // 등록해둔 월급날 당일에만 제출할 수 있게 잠근다 — 잠겼을 때도
+        // 버튼 자체는 눌러지게 두고(disabled 대신), 눌렀을 때 왜 안 되는지
+        // 토스트로 알려준다. 월급날을 아직 등록 안 했으면 예전처럼 언제든
+        // 제출 가능하게 둔다.
+        const isPaydayToday = paydayOfMonth != null && new Date().getDate() === paydayOfMonth;
+        const locked = paydayOfMonth != null && !isPaydayToday;
+        if (locked) {
+          return `<button type="button" class="btn secondary block payroll-submit-locked" id="payrollSubmitRequestBtn" data-payday-locked="${paydayOfMonth}" style="margin-top:4px;">🔒 사장님께 이번 급여 제출하기</button>`;
+        }
+        return `<button class="btn secondary block" id="payrollSubmitRequestBtn" style="margin-top:4px;" ${cycleShifts.length === 0 ? "disabled" : ""}>사장님께 이번 급여 제출하기</button>`;
+      })();
 
   return `
     <div class="card payroll-payslip-hero">
       <div class="payroll-payslip-store">MMTH | ${cycleLabel}</div>
       <div class="payroll-payslip-net">${Math.round(net).toLocaleString()}원 <span class="tag submitted">실수령액</span></div>
-      <div class="payroll-payslip-payday">급여 지급일 ${pad2(payday.getMonth() + 1)}.${pad2(payday.getDate())}(${WEEKDAYS[payday.getDay()]})</div>
+      <div class="payroll-payslip-payday">${nextPaydayLabel()}</div>
     </div>
     <div class="card">
       <div class="row-between"><strong>${sumIcon("plus")}지급 합계</strong><strong>${Math.round(gross).toLocaleString()}원</strong></div>
@@ -653,18 +850,22 @@ function render() {
   const cycleShifts = shiftsInCycle(start, end);
   const gross = cycleShifts.reduce((s, it) => s + computeShiftPay(it, hourlyWage).total, 0);
   const net = gross - computeDeduction(gross, insuranceType).total;
-  const isPayday = ymd(new Date()) === ymd(cycleBounds(0).end);
+  const isPayday = paydayOfMonth != null && new Date().getDate() === paydayOfMonth;
 
   let html = `
+    ${isPayday ? `<div class="payroll-payday-banner">💰 월급날입니다! 사장님께 급여내역을 제출하세요</div>` : ""}
     <div class="card payroll-summary-card">
       <div class="row-between">
         <div class="payroll-store-label">MMTH</div>
-        <button class="payroll-settings-btn" id="payrollSettingsBtn">⚙️ 정산일 ${payCycleStartDay}일</button>
+        <div style="display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end;">
+          <button class="payroll-settings-btn" id="payrollSettingsBtn">⚙️ 정산일 ${payCycleStartDay}일</button>
+          <button class="payroll-settings-btn" id="payrollPaydayBtn">💰 ${paydayOfMonth ? `월급날 ${paydayOfMonth}일` : "월급날 등록"}</button>
+          <button class="payroll-settings-btn" id="payrollBankBtn">🏦 ${bankName ? escapeHtml(bankName) : "계좌 등록"}</button>
+        </div>
       </div>
       <div class="payroll-total-amount">${Math.round(net).toLocaleString()}원</div>
     </div>
-    ${isPayday ? `<div class="payroll-payday-banner">💰 월급날입니다! 사장님께 급여내역을 제출하세요</div>` : ""}
-    ${view !== "attendance" ? `
+    ${view !== "attendance" && view !== "schedule" ? `
     <div class="payroll-cycle-nav">
       <button class="payroll-cycle-arrow" id="payrollCyclePrev">‹</button>
       <span class="payroll-cycle-label">${cycleLabel}</span>
@@ -674,20 +875,22 @@ function render() {
       <button type="button" class="${view === "list" ? "active" : ""}" data-payroll-view="list">근무내역</button>
       <button type="button" class="${view === "payslip" ? "active" : ""}" data-payroll-view="payslip">급여명세서</button>
       <button type="button" class="${view === "attendance" ? "active" : ""}" data-payroll-view="attendance">출퇴근기록</button>
+      <button type="button" class="${view === "schedule" ? "active" : ""}" data-payroll-view="schedule">스케줄</button>
     </div>`;
 
   if (view === "list") {
     html += `
       <div class="row-between" style="margin:14px 0 8px;">
         <div style="font-weight:800;">나의 근무</div>
-        <div style="display:flex; gap:6px;">
-          <button class="btn secondary" id="payrollEditToggleBtn" style="padding:6px 12px; font-size:12px;">${editMode ? "완료" : "✏️ 편집"}</button>
-          <button class="btn gold" id="payrollAddBtn" style="padding:6px 12px; font-size:12px;">+ 등록</button>
-        </div>
+        <button class="btn gold" id="payrollAddBtn" style="padding:6px 12px; font-size:12px;">+ 등록</button>
       </div>
-      ${listHtml(cycleShifts)}`;
+      ${myShiftCalendarHtml()}
+      ${shiftCalDayOverlayHtml()}`;
   } else if (view === "payslip") {
-    html += payslipHtml(cycleShifts, cycleLabel, end);
+    html += payslipHtml(cycleShifts, cycleLabel);
+  } else if (view === "schedule") {
+    ensureScheduleStarted();
+    html += scheduleTabHtml();
   } else {
     html += attendanceTabHtml();
   }
@@ -696,8 +899,11 @@ function render() {
   if (editingShiftId) html += editShiftHtml();
 
   rootEl.innerHTML = html;
+  wireScheduleEvents();
 
   document.getElementById("payrollSettingsBtn").addEventListener("click", editPayCycleStartDay);
+  document.getElementById("payrollPaydayBtn").addEventListener("click", editPaydayOfMonth);
+  document.getElementById("payrollBankBtn").addEventListener("click", editBankInfo);
   const cyclePrevBtn = document.getElementById("payrollCyclePrev");
   const cycleNextBtn = document.getElementById("payrollCycleNext");
   if (cyclePrevBtn) cyclePrevBtn.addEventListener("click", () => { cycleOffset -= 1; render(); });
@@ -705,19 +911,50 @@ function render() {
   rootEl.querySelectorAll("[data-payroll-view]").forEach((el) => {
     el.addEventListener("click", () => { view = el.dataset.payrollView; render(); });
   });
-  const editToggleBtn = document.getElementById("payrollEditToggleBtn");
-  if (editToggleBtn) editToggleBtn.addEventListener("click", () => { editMode = !editMode; if (!editMode) editingShiftId = null; render(); });
-  rootEl.querySelectorAll("[data-shift-delete]").forEach((el) => {
-    el.addEventListener("click", (e) => { e.stopPropagation(); deleteShift(el.dataset.shiftDelete); });
-  });
-  rootEl.querySelectorAll("[data-shift-edit]").forEach((el) => {
-    el.addEventListener("click", () => {
-      const shift = shifts.find((s) => s.id === el.dataset.shiftEdit);
-      if (shift) openEditShift(shift);
+  const shiftCalPrevBtn = document.getElementById("shiftCalPrevMonth");
+  const shiftCalNextBtn = document.getElementById("shiftCalNextMonth");
+  if (shiftCalPrevBtn) {
+    shiftCalPrevBtn.addEventListener("click", () => {
+      shiftCalMonth -= 1;
+      if (shiftCalMonth < 0) { shiftCalMonth = 11; shiftCalYear -= 1; }
+      render();
     });
+  }
+  if (shiftCalNextBtn) {
+    shiftCalNextBtn.addEventListener("click", () => {
+      shiftCalMonth += 1;
+      if (shiftCalMonth > 11) { shiftCalMonth = 0; shiftCalYear += 1; }
+      render();
+    });
+  }
+  rootEl.querySelectorAll("[data-shift-cal-day]").forEach((el) => {
+    el.addEventListener("click", () => openShiftCalDay(el.dataset.shiftCalDay));
   });
+  const shiftCalDayOverlay = document.getElementById("shiftCalDayOverlay");
+  if (shiftCalDayOverlay) {
+    shiftCalDayOverlay.addEventListener("click", (e) => { if (e.target === shiftCalDayOverlay) closeShiftCalDay(); });
+    document.getElementById("shiftCalDayCloseBtn").addEventListener("click", closeShiftCalDay);
+    shiftCalDayOverlay.querySelectorAll("[data-shift-cal-delete]").forEach((el) => {
+      el.addEventListener("click", () => deleteShift(el.dataset.shiftCalDelete));
+    });
+    shiftCalDayOverlay.querySelectorAll("[data-shift-cal-edit]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const shift = shifts.find((s) => s.id === el.dataset.shiftCalEdit);
+        if (shift) openEditShift(shift);
+      });
+    });
+  }
   const submitRequestBtn = document.getElementById("payrollSubmitRequestBtn");
-  if (submitRequestBtn) submitRequestBtn.addEventListener("click", submitPayrollRequest);
+  if (submitRequestBtn) {
+    submitRequestBtn.addEventListener("click", () => {
+      const lockedDay = submitRequestBtn.dataset.paydayLocked;
+      if (lockedDay) {
+        toast(`오늘은 월급날이 아니에요 (매달 ${lockedDay}일에 제출할 수 있어요)`);
+        return;
+      }
+      submitPayrollRequest();
+    });
+  }
   const viewSubmittedBtn = document.getElementById("payrollViewSubmittedBtn");
   if (viewSubmittedBtn) viewSubmittedBtn.addEventListener("click", () => { submittedDetailOpen = !submittedDetailOpen; render(); });
   const addBtn = document.getElementById("payrollAddBtn");
@@ -834,7 +1071,10 @@ function ensureStarted() {
     const data = snap.data() || {};
     hourlyWage = data.hourlyWage || 0;
     payCycleStartDay = data.payCycleStartDay || 1;
+    paydayOfMonth = data.paydayOfMonth || null;
     insuranceType = data.insuranceType || "33";
+    bankName = data.bankName || "";
+    bankAccountNumber = data.bankAccountNumber || "";
     render();
   });
   onSnapshot(collection(db, "accounts", account.phone, "shifts"), (snap) => {
@@ -854,6 +1094,147 @@ let adminStarted = false;
 let adminRequests = []; // 전체 payrollRequests — live
 let adminOpenGroup = null; // 상세를 펼쳐서 보고 있는 직원 전화번호
 let adminTodayAttendance = []; // 오늘 전 직원 출퇴근 도장 — live (collectionGroup)
+
+// ---- 사장님용: 전 직원 출퇴근 캘린더 (과거 기록을 누가·언제 찍었는지 한눈에) ----
+let adminAttCalYear = 0;
+let adminAttCalMonth = 0; // 0-indexed
+let adminAttendanceAll = []; // 지금 보고 있는 달의 전 직원 출퇴근 기록 — live
+let adminAttUnsub = null;
+let adminAttSelectedDate = null; // 상세 보기 대상 날짜 — null이면 달력만 표시
+
+function loadAdminAttendanceForMonth() {
+  if (adminAttUnsub) { adminAttUnsub(); adminAttUnsub = null; }
+  const monthStart = ymd(new Date(adminAttCalYear, adminAttCalMonth, 1));
+  const monthEnd = ymd(new Date(adminAttCalYear, adminAttCalMonth + 1, 0));
+  adminAttUnsub = onSnapshot(
+    query(collectionGroup(db, "attendance"), where("date", ">=", monthStart), where("date", "<=", monthEnd), orderBy("date")),
+    (snap) => {
+      adminAttendanceAll = snap.docs.map((d) => ({ id: d.id, staffPhone: d.ref.parent.parent.id, ...d.data() }));
+      renderAdmin();
+    }
+  );
+}
+
+function openAdminAttDay(dateStr) {
+  adminAttSelectedDate = dateStr;
+  renderAdmin();
+}
+
+function closeAdminAttDay() {
+  adminAttSelectedDate = null;
+  renderAdmin();
+}
+
+function adminAttendanceCalendarHtml() {
+  const firstDow = new Date(adminAttCalYear, adminAttCalMonth, 1).getDay();
+  const totalDays = daysInMonth(adminAttCalYear, adminAttCalMonth + 1);
+  const byDate = new Map();
+  for (const r of adminAttendanceAll) {
+    if (!byDate.has(r.date)) byDate.set(r.date, []);
+    byDate.get(r.date).push(r);
+  }
+  const todayDateStr = ymd(new Date());
+
+  const cells = [];
+  for (let i = 0; i < firstDow; i++) cells.push(null);
+  for (let d = 1; d <= totalDays; d++) cells.push(d);
+
+  return `
+    <div class="payroll-calendar">
+      <div class="payroll-calendar-header">
+        <button type="button" class="icon-btn" id="adminAttCalPrevMonth">‹</button>
+        <strong>${adminAttCalYear}년 ${adminAttCalMonth + 1}월</strong>
+        <button type="button" class="icon-btn" id="adminAttCalNextMonth">›</button>
+      </div>
+      <div class="payroll-calendar-weekdays">${WEEKDAYS.map((w) => `<span>${w}</span>`).join("")}</div>
+      <div class="payroll-calendar-grid payroll-schedule-grid">
+        ${cells.map((d) => {
+          if (d === null) return `<div class="payroll-schedule-cell muted"></div>`;
+          const dt = new Date(adminAttCalYear, adminAttCalMonth, d);
+          const dateStr = ymd(dt);
+          const isToday = dateStr === todayDateStr;
+          const isRed = isRedDate(dateStr, dt.getDay());
+          const names = [...new Set((byDate.get(dateStr) || []).map((r) => r.staffPhone))]
+            .map((phone) => (byDate.get(dateStr) || []).find((r) => r.staffPhone === phone))
+            .sort((a, b) => (a.staffName || "").localeCompare(b.staffName || "", "ko"));
+          return `
+            <button type="button" class="payroll-schedule-cell ${isToday ? "today" : ""}" data-admin-att-day="${dateStr}">
+              <div class="payroll-schedule-daynum ${isRed ? "red-date" : ""}">${d}</div>
+              <div class="payroll-schedule-chips">
+                ${names.map((r) => {
+                  const c = staffChipColor(r.staffPhone);
+                  return `<span class="schedule-chip" style="background:${c.bg}; color:${c.fg};">${escapeHtml(r.staffName || "")}</span>`;
+                }).join("")}
+              </div>
+            </button>`;
+        }).join("")}
+      </div>
+    </div>`;
+}
+
+function adminAttDayOverlayHtml() {
+  if (!adminAttSelectedDate) return "";
+  const records = adminAttendanceAll
+    .filter((r) => r.date === adminAttSelectedDate)
+    .sort((a, b) => (a.staffName || "").localeCompare(b.staffName || "", "ko") || a.time.localeCompare(b.time));
+  return `
+    <div class="payroll-form-overlay" id="adminAttDayOverlay">
+      <div class="payroll-form-sheet">
+        <div class="row-between">
+          <div style="font-weight:800; font-size:16px;">${formatShiftDateLabel(adminAttSelectedDate)} 출퇴근</div>
+          <button class="payroll-form-close-btn" id="adminAttDayCloseBtn" aria-label="닫기">✕</button>
+        </div>
+        ${records.length === 0 ? `<div class="empty" style="margin-top:12px;">찍힌 출퇴근 도장이 없어요.</div>` : `
+        <div class="payroll-shift-list" style="margin:14px 0;">
+          ${records.map((r) => `
+            <div class="payroll-shift-row">
+              ${avatarHtml(r.staffPhone, r.staffName, 32)}
+              <div class="row-between" style="flex:1; min-width:0;">
+                <span class="payroll-shift-date">${escapeHtml(r.staffName || "")}</span>
+                <span class="payroll-shift-time" style="margin-top:0;">${stampLabel(r)}</span>
+              </div>
+            </div>`).join("")}
+        </div>`}
+      </div>
+    </div>`;
+}
+
+function ensureAdminAttStarted() {
+  if (adminAttCalYear) return;
+  const today = new Date();
+  adminAttCalYear = today.getFullYear();
+  adminAttCalMonth = today.getMonth();
+  loadAdminAttendanceForMonth();
+}
+
+function wireAdminAttEvents() {
+  const prevBtn = document.getElementById("adminAttCalPrevMonth");
+  const nextBtn = document.getElementById("adminAttCalNextMonth");
+  if (prevBtn) {
+    prevBtn.addEventListener("click", () => {
+      adminAttCalMonth -= 1;
+      if (adminAttCalMonth < 0) { adminAttCalMonth = 11; adminAttCalYear -= 1; }
+      loadAdminAttendanceForMonth();
+      renderAdmin();
+    });
+  }
+  if (nextBtn) {
+    nextBtn.addEventListener("click", () => {
+      adminAttCalMonth += 1;
+      if (adminAttCalMonth > 11) { adminAttCalMonth = 0; adminAttCalYear += 1; }
+      loadAdminAttendanceForMonth();
+      renderAdmin();
+    });
+  }
+  document.querySelectorAll("[data-admin-att-day]").forEach((el) => {
+    el.addEventListener("click", () => openAdminAttDay(el.dataset.adminAttDay));
+  });
+  const dayOverlay = document.getElementById("adminAttDayOverlay");
+  if (dayOverlay) {
+    dayOverlay.addEventListener("click", (e) => { if (e.target === dayOverlay) closeAdminAttDay(); });
+    document.getElementById("adminAttDayCloseBtn").addEventListener("click", closeAdminAttDay);
+  }
+}
 
 function tsMillisOf(ts) {
   if (!ts) return Date.now();
@@ -895,9 +1276,9 @@ function todayAttendanceHtml() {
   return sorted.map((r) => `
     <div class="payroll-shift-row">
       ${avatarHtml(r.staffPhone, r.staffName, 32)}
-      <div class="payroll-shift-info">
-        <div class="payroll-shift-date">${escapeHtml(r.staffName || "")}</div>
-        <div class="payroll-shift-time">${stampLabel(r)}</div>
+      <div class="row-between" style="flex:1; min-width:0;">
+        <span class="payroll-shift-date">${escapeHtml(r.staffName || "")}</span>
+        <span class="payroll-shift-time" style="margin-top:0;">${stampLabel(r)}</span>
       </div>
     </div>`).join("");
 }
@@ -906,9 +1287,16 @@ function renderAdmin() {
   if (!rootEl) return;
   const groups = groupRequestsByStaff(adminRequests);
   const todayLabel = formatShiftDateLabel(ymd(new Date()));
+  ensureScheduleStarted();
+  ensureAdminAttStarted();
   let html = `
     <div class="category-title row-between"><span>🕐 오늘의 출퇴근</span><span style="font-size:12px; font-weight:600; color:var(--muted);">${todayLabel}</span></div>
     <div class="card">${todayAttendanceHtml()}</div>
+    <div class="category-title">🗓️ 출퇴근 기록 캘린더</div>
+    ${adminAttendanceCalendarHtml()}
+    ${adminAttDayOverlayHtml()}
+    <div class="category-title">📅 근무 스케줄</div>
+    ${scheduleTabHtml()}
     <div class="category-title">💰 월급날 급여 제출함</div>
     <div class="card"><div style="font-size:13px; color:var(--muted);">직원들이 월급날 제출한 근무내역·실수령액이 여기 직원별로 모여요.</div></div>`;
 
@@ -922,7 +1310,10 @@ function renderAdmin() {
           <button type="button" class="row-between payroll-admin-group-head" data-admin-group-toggle="${g.phone}">
             <span style="display:flex; align-items:center; gap:8px;">
               ${avatarHtml(g.phone, g.name, 28)}
-              <strong>${escapeHtml(g.name)}</strong>
+              <div>
+                <strong>${escapeHtml(g.name)}</strong>
+                ${g.requests[0].bankName && g.requests[0].bankAccountNumber ? `<div style="font-size:11px; color:var(--muted);">🏦 ${escapeHtml(g.requests[0].bankName)} ${escapeHtml(g.requests[0].bankAccountNumber)}</div>` : ""}
+              </div>
             </span>
             <span style="font-size:12px; color:var(--muted);">제출 ${g.requests.length}건 ${open ? "︿" : "⌄"}</span>
           </button>
@@ -936,6 +1327,7 @@ function renderAdmin() {
                 <div style="font-weight:800; color:var(--gold);">${(r.net || 0).toLocaleString()}원</div>
               </div>
               <div class="payroll-admin-detail">
+                ${r.bankName && r.bankAccountNumber ? `<div class="row-between payroll-payslip-line"><span>🏦 입금 계좌</span><span>${escapeHtml(r.bankName)} ${escapeHtml(r.bankAccountNumber)}</span></div>` : ""}
                 <div class="row-between payroll-payslip-line"><span>${sumIcon("plus")}지급 합계</span><span>${(r.gross || 0).toLocaleString()}원</span></div>
                 <div class="row-between payroll-payslip-line"><span>${sumIcon("minus")}공제 합계</span><span>${(r.deductionTotal || 0).toLocaleString()}원</span></div>
                 <div class="payroll-admin-shift-header">근무 내역</div>
@@ -944,7 +1336,10 @@ function renderAdmin() {
                     <span>${formatShiftDateLabel(s.date)} ${s.startTime}~${s.endTime}${s.breakMinutes ? ` (휴게 ${s.breakMinutes}분)` : ""}${s.extraAllowance ? ` · 추가수당 ${s.extraAllowance.toLocaleString()}원` : ""}</span>
                     <span>${(s.pay || 0).toLocaleString()}원</span>
                   </div>`).join("")}
-                <button type="button" class="payroll-shift-delete-btn" data-admin-request-delete="${r.id}" style="margin-top:8px;">삭제</button>
+                <div style="display:flex; gap:8px; margin-top:8px;">
+                  <button type="button" class="btn secondary" style="padding:6px 12px; font-size:12px;" data-admin-request-image="${r.id}">🖼️ 이미지로 저장</button>
+                  <button type="button" class="payroll-shift-delete-btn" data-admin-request-delete="${r.id}">삭제</button>
+                </div>
               </div>
             </div>`).join("") : ""}
         </div>`;
@@ -962,6 +1357,107 @@ function renderAdmin() {
   rootEl.querySelectorAll("[data-admin-request-delete]").forEach((el) => {
     el.addEventListener("click", () => deletePayrollRequest(el.dataset.adminRequestDelete));
   });
+  rootEl.querySelectorAll("[data-admin-request-image]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const req = adminRequests.find((r) => r.id === el.dataset.adminRequestImage);
+      if (req) downloadPayrollImage(req);
+    });
+  });
+  wireAdminAttEvents();
+  wireScheduleEvents();
+}
+
+// 세무소 제출용 — 제출된 급여 내역 하나를 이미지(PNG) 한 장으로 그려서
+// 다운로드한다. 화면을 그대로 캡처하는 대신 캔버스에 직접 그리는 이유는
+// 라이브러리(html2canvas 등) 추가 없이 이 값들만으로 깔끔한 레이아웃을
+// 만들 수 있어서다.
+function downloadPayrollImage(req) {
+  const width = 640;
+  const padding = 32;
+  const lineHeight = 24;
+  const deductionRows = req.deductionRows || [];
+  const shifts = req.shifts || [];
+  const height = 250 + deductionRows.length * lineHeight + shifts.length * lineHeight + 40;
+
+  const scale = 2; // 레티나 화면에서도 선명하게
+  const canvas = document.createElement("canvas");
+  canvas.width = width * scale;
+  canvas.height = height * scale;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(scale, scale);
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  let y = padding;
+  ctx.fillStyle = "#1f1f1f";
+  ctx.font = "800 20px sans-serif";
+  ctx.fillText("MMTH 급여내역", padding, y);
+  y += 14;
+  ctx.strokeStyle = "#e5ded2";
+  ctx.beginPath();
+  ctx.moveTo(padding, y);
+  ctx.lineTo(width - padding, y);
+  ctx.stroke();
+  y += 32;
+
+  ctx.font = "700 15px sans-serif";
+  ctx.fillStyle = "#1f1f1f";
+  ctx.fillText(`${req.staffName || ""}님 · ${req.cycleLabel || ""}`, padding, y);
+  y += 34;
+
+  ctx.font = "800 26px sans-serif";
+  ctx.fillStyle = "#d9774a";
+  ctx.fillText(`실수령액 ${(req.net || 0).toLocaleString()}원`, padding, y);
+  y += 38;
+
+  ctx.font = "700 14px sans-serif";
+  ctx.fillStyle = "#1f1f1f";
+  ctx.fillText(`지급 합계   ${(req.gross || 0).toLocaleString()}원`, padding, y);
+  y += lineHeight;
+  ctx.fillText(`공제 합계 (${req.insuranceType === "4das" ? "4대보험" : "3.3%"})   ${(req.deductionTotal || 0).toLocaleString()}원`, padding, y);
+  y += lineHeight + 4;
+
+  ctx.font = "13px sans-serif";
+  ctx.fillStyle = "#6b6b66";
+  deductionRows.forEach((row) => {
+    ctx.fillText(`· ${row.label}   ${(row.amount || 0).toLocaleString()}원`, padding + 8, y);
+    y += lineHeight;
+  });
+
+  y += 14;
+  ctx.strokeStyle = "#e5ded2";
+  ctx.beginPath();
+  ctx.moveTo(padding, y);
+  ctx.lineTo(width - padding, y);
+  ctx.stroke();
+  y += 28;
+
+  ctx.font = "700 14px sans-serif";
+  ctx.fillStyle = "#1f1f1f";
+  ctx.fillText("근무 내역", padding, y);
+  y += lineHeight;
+
+  ctx.font = "13px sans-serif";
+  shifts.forEach((s) => {
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#1f1f1f";
+    ctx.fillText(`${formatShiftDateLabel(s.date)} ${s.startTime}~${s.endTime}`, padding, y);
+    ctx.textAlign = "right";
+    ctx.fillText(`${(s.pay || 0).toLocaleString()}원`, width - padding, y);
+    y += lineHeight;
+  });
+
+  ctx.textAlign = "left";
+  y += 16;
+  ctx.font = "11px sans-serif";
+  ctx.fillStyle = "#9a9690";
+  ctx.fillText(`제출: ${formatSubmittedAt(req.createdAt)}`, padding, y);
+
+  const link = document.createElement("a");
+  link.download = `${req.staffName || "직원"}_급여_${req.cycleStart || ""}.png`;
+  link.href = canvas.toDataURL("image/png");
+  link.click();
 }
 
 function ensureAdminStarted() {
@@ -1002,6 +1498,7 @@ let clockRootEl = null;
 let clockAccount = { name: "", phone: "" };
 let clockStarted = false;
 let lastClockType = null; // "in" | "out" | null — 버튼을 출근/퇴근 중 뭘 보여줄지만 결정
+let clockSubmitting = false; // 저장 중 연타로 도장이 중복 찍히는 걸 막는 잠금
 
 function timeNowStr() {
   const d = new Date();
@@ -1009,30 +1506,41 @@ function timeNowStr() {
 }
 
 async function recordAttendanceStamp(type) {
-  const stampDate = ymd(new Date());
-  const time = timeNowStr();
-  await addDoc(collection(db, "accounts", clockAccount.phone, "attendance"), {
-    type,
-    date: stampDate,
-    time,
-    staffName: clockAccount.name,
-    createdAt: serverTimestamp(),
-  });
-  await updateDoc(doc(db, "accounts", clockAccount.phone), { lastClockType: type });
-  toast(`${time} ${type === "in" ? "출근" : "퇴근"} 도장 찍었어요`);
+  // 저장 중엔 버튼이 바로 안 바뀌어서(서버 응답 대기), 반응이 없다고 여러 번
+  // 연타하면 도장이 그만큼 중복으로 찍혔다 — 저장이 끝날 때까지 잠가서 막는다.
+  if (clockSubmitting) return;
+  clockSubmitting = true;
+  renderClockWidget();
+  try {
+    const stampDate = ymd(new Date());
+    const time = timeNowStr();
+    await addDoc(collection(db, "accounts", clockAccount.phone, "attendance"), {
+      type,
+      date: stampDate,
+      time,
+      staffName: clockAccount.name,
+      createdAt: serverTimestamp(),
+    });
+    await updateDoc(doc(db, "accounts", clockAccount.phone), { lastClockType: type });
+    toast(`${time} ${type === "in" ? "출근" : "퇴근"} 도장 찍었어요`);
+  } finally {
+    clockSubmitting = false;
+    renderClockWidget();
+  }
 }
 
 function renderClockWidget() {
   if (!clockRootEl) return;
+  const disabledAttr = clockSubmitting ? "disabled" : "";
   clockRootEl.innerHTML = lastClockType === "in"
     ? `
       <div class="clock-widget">
         <div class="clock-widget-status">🟢 출근 중</div>
-        <button class="btn urgent block" id="clockOutBtn">🔴 퇴근 도장 찍기</button>
+        <button class="btn urgent block" id="clockOutBtn" ${disabledAttr}>${clockSubmitting ? "저장 중..." : "🔴 퇴근 도장 찍기"}</button>
       </div>`
     : `
       <div class="clock-widget">
-        <button class="btn normal block" id="clockInBtn">🕐 출근 도장 찍기</button>
+        <button class="btn normal block" id="clockInBtn" ${disabledAttr}>${clockSubmitting ? "저장 중..." : "🕐 출근 도장 찍기"}</button>
       </div>`;
   const inBtn = clockRootEl.querySelector("#clockInBtn");
   const outBtn = clockRootEl.querySelector("#clockOutBtn");
@@ -1109,12 +1617,14 @@ function attendanceCalendarHtml() {
       <div class="payroll-calendar-grid payroll-attendance-grid">
         ${cells.map((d) => {
           if (d === null) return `<div class="payroll-attendance-cell muted"></div>`;
-          const dateStr = ymd(new Date(attCalYear, attCalMonth, d));
+          const dt = new Date(attCalYear, attCalMonth, d);
+          const dateStr = ymd(dt);
           const isToday = dateStr === todayDateStr;
+          const isRed = isRedDate(dateStr, dt.getDay());
           const records = (byDate.get(dateStr) || []).sort((a, b) => a.time.localeCompare(b.time));
           return `
             <div class="payroll-attendance-cell ${isToday ? "today" : ""}">
-              <div class="payroll-attendance-daynum">${d}</div>
+              <div class="payroll-attendance-daynum ${isRed ? "red-date" : ""}">${d}</div>
               <div class="payroll-attendance-stamps">
                 ${records.map((r) => `<span class="payroll-attendance-chip ${r.type === "in" ? "chip-in" : "chip-out"}">${r.time}</span>`).join("")}
               </div>
@@ -1126,4 +1636,529 @@ function attendanceCalendarHtml() {
 
 function attendanceTabHtml() {
   return attendanceCalendarHtml();
+}
+
+// ---- 근무 스케줄표 (급여관리 탭의 네 번째 서브탭 — 직원/사장 공용) ----
+// 개인 근무기록(shifts)과 달리 이건 팀 전체가 함께 보는 공유 일정이라
+// accounts 하위가 아니라 최상위 schedules 컬렉션에 저장한다. 한 달 전체를
+// 한 번에 봐야 해서(day별 서브컬렉션이면 리스너가 최대 31개 필요) 문서마다
+// date 필드를 두고 범위 쿼리 한 번으로 불러온다 — 급여대장 shifts와 같은 방식.
+const SHIFT_TYPES = ["오픈", "오픈미들", "미들마감", "마감", "풀타임"];
+const SHIFT_TYPE_CLASS = {
+  "오픈": "shift-open",
+  "오픈미들": "shift-openmid",
+  "미들마감": "shift-midclose",
+  "마감": "shift-close",
+  "풀타임": "shift-full",
+};
+
+// 캘린더 칸의 이름 칩은 근무 유형이 아니라 "누구인지"가 한눈에 보여야
+// 해서, 전화번호 기준으로 항상 같은 사람은 항상 같은 색이 나오게 고른다
+// (요일이 바뀌어도 흔들리지 않는 고정 색).
+const STAFF_CHIP_PALETTE = [
+  { bg: "var(--normal-soft)", fg: "var(--normal)" },
+  { bg: "var(--sky-soft)", fg: "var(--sky)" },
+  { bg: "var(--toggle-blue-soft)", fg: "var(--toggle-blue)" },
+  { bg: "var(--urgent-soft)", fg: "var(--urgent)" },
+  { bg: "var(--gold-soft)", fg: "var(--gold)" },
+  { bg: "var(--navy-soft)", fg: "var(--navy)" },
+];
+
+function staffChipColor(phone) {
+  // 계정 목록 안에서의 순번으로 색을 배정하면(해시와 달리) 등록된 사람
+  // 수만큼은 서로 겹치지 않는 걸 보장할 수 있다 — 해시 방식은 유리/진우처럼
+  // 우연히 같은 나머지가 나오면 색이 겹쳤었다.
+  const idx = [...staffAccountsList].map((a) => a.phone).sort().indexOf(phone);
+  if (idx >= 0) return STAFF_CHIP_PALETTE[idx % STAFF_CHIP_PALETTE.length];
+  let hash = 0;
+  const key = phone || "";
+  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  return STAFF_CHIP_PALETTE[hash % STAFF_CHIP_PALETTE.length];
+}
+
+let scheduleStarted = false;
+let scheduleEntries = []; // 지금 보고 있는 달의 스케줄 — live
+let scheduleCalYear = 0;
+let scheduleCalMonth = 0; // 0-indexed
+let scheduleUnsub = null;
+let scheduleSelectedDate = null; // 상세/추가 대상 날짜 — null이면 달력만 표시
+let showScheduleForm = false;
+let scheduleFormShiftType = "오픈";
+let scheduleFormStaffPhone = "";
+let scheduleFormStaffName = "";
+let scheduleFormStartHour = "";
+let scheduleFormStartMin = "";
+let scheduleFormEndHour = "";
+let scheduleFormEndMin = "";
+let editingScheduleId = null; // null이면 새 근무 추가, 값이 있으면 그 근무를 수정 중
+let staffAccountsList = []; // {phone, name} — 담당자 선택용, 최초 진입 시 한 번만 로드
+
+// 요일 반복 등록 — 하루하루 따로 누를 필요 없이, 이 달 안에서 선택한
+// 요일(들)에 한 번에 등록한다.
+let showRecurringForm = false;
+let recurringWeekdays = new Set(); // 0(일)~6(토)
+let recurringShiftType = "오픈";
+let recurringStaffPhone = "";
+let recurringStaffName = "";
+let recurringStartHour = "";
+let recurringStartMin = "";
+let recurringEndHour = "";
+let recurringEndMin = "";
+
+// 직원 개인 화면(render)과 사장님 화면(renderAdmin) 양쪽에서 다 쓰는 공용
+// 기능이라, 지금 어느 쪽이 마운트돼 있는지에 맞는 렌더 함수를 다시 불러준다.
+function rerenderCurrent() {
+  if (account.role === "owner") renderAdmin();
+  else render();
+}
+
+function loadScheduleForMonth() {
+  if (scheduleUnsub) { scheduleUnsub(); scheduleUnsub = null; }
+  const monthStart = ymd(new Date(scheduleCalYear, scheduleCalMonth, 1));
+  const monthEnd = ymd(new Date(scheduleCalYear, scheduleCalMonth + 1, 0));
+  scheduleUnsub = onSnapshot(
+    query(collection(db, "schedules"), where("date", ">=", monthStart), where("date", "<=", monthEnd), orderBy("date")),
+    (snap) => {
+      scheduleEntries = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      rerenderCurrent();
+    }
+  );
+}
+
+async function loadStaffAccountsList() {
+  if (staffAccountsList.length > 0) return;
+  const snap = await getDocs(collection(db, "accounts"));
+  staffAccountsList = snap.docs.map((d) => ({ phone: d.id, name: d.data().name || "" }));
+  rerenderCurrent();
+}
+
+function ensureScheduleStarted() {
+  if (scheduleStarted) return;
+  scheduleStarted = true;
+  const today = new Date();
+  scheduleCalYear = today.getFullYear();
+  scheduleCalMonth = today.getMonth();
+  loadScheduleForMonth();
+  loadStaffAccountsList();
+}
+
+function openScheduleDay(dateStr) {
+  scheduleSelectedDate = dateStr;
+  showScheduleForm = false;
+  rerenderCurrent();
+}
+
+function closeScheduleDay() {
+  scheduleSelectedDate = null;
+  showScheduleForm = false;
+  rerenderCurrent();
+}
+
+function openScheduleForm(entry) {
+  if (entry) {
+    editingScheduleId = entry.id;
+    scheduleFormShiftType = entry.shiftType;
+    scheduleFormStaffPhone = entry.staffPhone;
+    scheduleFormStaffName = entry.staffName || "";
+    const [sh, sm] = (entry.startTime || "").split(":");
+    const [eh, em] = (entry.endTime || "").split(":");
+    scheduleFormStartHour = sh !== undefined ? String(Number(sh)) : "";
+    scheduleFormStartMin = sm !== undefined ? String(Number(sm)) : "";
+    scheduleFormEndHour = eh !== undefined ? String(Number(eh)) : "";
+    scheduleFormEndMin = em !== undefined ? String(Number(em)) : "";
+  } else {
+    editingScheduleId = null;
+    scheduleFormShiftType = "오픈";
+    scheduleFormStaffPhone = "";
+    scheduleFormStaffName = "";
+    scheduleFormStartHour = "";
+    scheduleFormStartMin = "";
+    scheduleFormEndHour = "";
+    scheduleFormEndMin = "";
+  }
+  showScheduleForm = true;
+  rerenderCurrent();
+}
+
+function cancelScheduleForm() {
+  editingScheduleId = null;
+  showScheduleForm = false;
+  rerenderCurrent();
+}
+
+async function submitScheduleEntry() {
+  if (!scheduleFormStaffPhone) {
+    toast("담당자를 선택해주세요");
+    return;
+  }
+  const startTime = scheduleFormStartHour !== "" && scheduleFormStartMin !== "" ? `${pad2(scheduleFormStartHour)}:${pad2(scheduleFormStartMin)}` : "";
+  const endTime = scheduleFormEndHour !== "" && scheduleFormEndMin !== "" ? `${pad2(scheduleFormEndHour)}:${pad2(scheduleFormEndMin)}` : "";
+  if (!startTime || !endTime) {
+    toast("근무 시간을 입력해주세요");
+    return;
+  }
+  if (editingScheduleId) {
+    await updateDoc(doc(db, "schedules", editingScheduleId), {
+      shiftType: scheduleFormShiftType,
+      staffPhone: scheduleFormStaffPhone,
+      staffName: scheduleFormStaffName,
+      startTime,
+      endTime,
+    });
+    toast("근무를 수정했어요");
+  } else {
+    await addDoc(collection(db, "schedules"), {
+      date: scheduleSelectedDate,
+      shiftType: scheduleFormShiftType,
+      staffPhone: scheduleFormStaffPhone,
+      staffName: scheduleFormStaffName,
+      startTime,
+      endTime,
+      createdAt: serverTimestamp(),
+    });
+    toast("근무를 등록했어요");
+  }
+  editingScheduleId = null;
+  showScheduleForm = false;
+  rerenderCurrent();
+}
+
+// 등록(새 근무 추가)은 직원/사장님 누구나 할 수 있게 열어두지만, 이미 등록된
+// 근무를 고치거나 지우는 건 본인 근무가 아닌 이상 함부로 건드리면 안 된다 —
+// 사장님은 전체를 관리할 수 있고, 직원은 본인 이름으로 된 근무만 수정/삭제할
+// 수 있다(다른 직원의 근무는 손댈 수 없음).
+function canEditScheduleEntry(e) {
+  return account.role === "owner" || e.staffPhone === account.phone;
+}
+
+async function deleteScheduleEntry(id) {
+  const entry = scheduleEntries.find((e) => e.id === id);
+  if (entry && !canEditScheduleEntry(entry)) {
+    toast("본인 근무만 삭제할 수 있어요");
+    return;
+  }
+  if (!confirm("이 근무 일정을 삭제할까요?")) return;
+  await deleteDoc(doc(db, "schedules", id));
+  toast("삭제했어요");
+}
+
+function scheduleCalendarHtml() {
+  const firstDow = new Date(scheduleCalYear, scheduleCalMonth, 1).getDay();
+  const totalDays = daysInMonth(scheduleCalYear, scheduleCalMonth + 1);
+  const byDate = new Map();
+  for (const e of scheduleEntries) {
+    if (!byDate.has(e.date)) byDate.set(e.date, []);
+    byDate.get(e.date).push(e);
+  }
+  const todayDateStr = ymd(new Date());
+
+  const cells = [];
+  for (let i = 0; i < firstDow; i++) cells.push(null);
+  for (let d = 1; d <= totalDays; d++) cells.push(d);
+
+  return `
+    <div class="payroll-calendar">
+      <div class="payroll-calendar-header">
+        <button type="button" class="icon-btn" id="scheduleCalPrevMonth">‹</button>
+        <strong>${scheduleCalYear}년 ${scheduleCalMonth + 1}월</strong>
+        <button type="button" class="icon-btn" id="scheduleCalNextMonth">›</button>
+      </div>
+      <div class="payroll-calendar-weekdays">${WEEKDAYS.map((w) => `<span>${w}</span>`).join("")}</div>
+      <div class="payroll-calendar-grid payroll-schedule-grid">
+        ${cells.map((d) => {
+          if (d === null) return `<div class="payroll-schedule-cell muted"></div>`;
+          const dt = new Date(scheduleCalYear, scheduleCalMonth, d);
+          const dateStr = ymd(dt);
+          const isToday = dateStr === todayDateStr;
+          const isRed = isRedDate(dateStr, dt.getDay());
+          // 사람 기준(이름)으로 정렬해서, 같은 날 여러 명이 있어도 그
+          // 순서가 요일마다 뒤바뀌지 않고 항상 고정되게 한다.
+          const entries = [...(byDate.get(dateStr) || [])].sort((a, b) =>
+            (a.staffName || "").localeCompare(b.staffName || "", "ko")
+          );
+          return `
+            <button type="button" class="payroll-schedule-cell ${isToday ? "today" : ""}" data-schedule-day="${dateStr}">
+              <div class="payroll-schedule-daynum ${isRed ? "red-date" : ""}">${d}</div>
+              <div class="payroll-schedule-chips">
+                ${entries.map((e) => {
+                  const c = staffChipColor(e.staffPhone);
+                  return `<span class="schedule-chip" style="background:${c.bg}; color:${c.fg};">${escapeHtml(e.staffName || "")}</span>`;
+                }).join("")}
+              </div>
+            </button>`;
+        }).join("")}
+      </div>
+    </div>`;
+}
+
+function scheduleFormHtml() {
+  return `
+    <div class="field" style="margin-top:14px;">
+      <label>근무 유형</label>
+      <div class="schedule-type-row">
+        ${SHIFT_TYPES.map((t) => `<button type="button" class="schedule-type-btn ${SHIFT_TYPE_CLASS[t]} ${scheduleFormShiftType === t ? "active" : ""}" data-schedule-type="${t}">${t}</button>`).join("")}
+      </div>
+    </div>
+    <div class="field">
+      <label>담당자</label>
+      <select id="scheduleStaffSelect">
+        <option value="">선택하세요</option>
+        ${staffAccountsList.map((a) => `<option value="${a.phone}" ${scheduleFormStaffPhone === a.phone ? "selected" : ""}>${escapeHtml(a.name)}</option>`).join("")}
+      </select>
+    </div>
+    <div class="field" style="margin-bottom:0;">
+      <label>근무 시간</label>
+      <div class="payroll-time-row">
+        ${timeSelectHtml("scheduleFormStart", scheduleFormStartHour, scheduleFormStartMin)}
+        <span>-</span>
+        ${timeSelectHtml("scheduleFormEnd", scheduleFormEndHour, scheduleFormEndMin)}
+      </div>
+    </div>
+    <div style="display:flex; gap:8px; margin-top:16px;">
+      <button class="btn secondary" id="scheduleFormCancelBtn" style="flex:1;">취소</button>
+      <button class="btn gold" id="scheduleSubmitBtn" style="flex:2;">${editingScheduleId ? "수정 완료" : "등록"}</button>
+    </div>`;
+}
+
+function scheduleDayOverlayHtml() {
+  if (!scheduleSelectedDate) return "";
+  const entries = [...scheduleEntries]
+    .filter((e) => e.date === scheduleSelectedDate)
+    .sort((a, b) => a.startTime.localeCompare(b.startTime));
+  return `
+    <div class="payroll-form-overlay" id="scheduleDayOverlay">
+      <div class="payroll-form-sheet">
+        <div class="row-between">
+          <div style="font-weight:800; font-size:16px;">${formatShiftDateLabel(scheduleSelectedDate)} 근무</div>
+          <button class="payroll-form-close-btn" id="scheduleDayCloseBtn" aria-label="닫기">✕</button>
+        </div>
+        ${entries.length === 0 ? `<div class="empty" style="margin-top:12px;">등록된 근무가 없어요.</div>` : `
+        <div class="payroll-shift-list" style="margin:14px 0;">
+          ${entries.map((e) => `
+            <div class="payroll-shift-row">
+              <span class="schedule-chip ${SHIFT_TYPE_CLASS[e.shiftType] || ""}">${escapeHtml(e.shiftType)}</span>
+              <div class="payroll-shift-info">
+                <div class="payroll-shift-date">${escapeHtml(e.staffName || "")}</div>
+                <div class="payroll-shift-time">${e.startTime}~${e.endTime}</div>
+              </div>
+              ${canEditScheduleEntry(e) ? `
+              <button class="payroll-shift-edit-btn" data-schedule-edit="${e.id}">수정</button>
+              <button class="payroll-shift-delete-btn" data-schedule-delete="${e.id}">삭제</button>` : ""}
+            </div>`).join("")}
+        </div>`}
+        ${showScheduleForm ? scheduleFormHtml() : `<button class="btn gold block" id="scheduleAddEntryBtn" style="margin-top:10px;">+ 근무 추가</button>`}
+      </div>
+    </div>`;
+}
+
+function openRecurringForm() {
+  recurringWeekdays = new Set();
+  recurringShiftType = "오픈";
+  recurringStaffPhone = "";
+  recurringStaffName = "";
+  recurringStartHour = "";
+  recurringStartMin = "";
+  recurringEndHour = "";
+  recurringEndMin = "";
+  showRecurringForm = true;
+  rerenderCurrent();
+}
+
+function closeRecurringForm() {
+  showRecurringForm = false;
+  rerenderCurrent();
+}
+
+async function submitRecurringSchedule() {
+  if (recurringWeekdays.size === 0) {
+    toast("반복할 요일을 선택해주세요");
+    return;
+  }
+  if (!recurringStaffPhone) {
+    toast("담당자를 선택해주세요");
+    return;
+  }
+  const startTime = recurringStartHour !== "" && recurringStartMin !== "" ? `${pad2(recurringStartHour)}:${pad2(recurringStartMin)}` : "";
+  const endTime = recurringEndHour !== "" && recurringEndMin !== "" ? `${pad2(recurringEndHour)}:${pad2(recurringEndMin)}` : "";
+  if (!startTime || !endTime) {
+    toast("근무 시간을 입력해주세요");
+    return;
+  }
+
+  const totalDays = daysInMonth(scheduleCalYear, scheduleCalMonth + 1);
+  const dates = [];
+  for (let d = 1; d <= totalDays; d++) {
+    const dt = new Date(scheduleCalYear, scheduleCalMonth, d);
+    if (recurringWeekdays.has(dt.getDay())) dates.push(ymd(dt));
+  }
+  if (dates.length === 0) {
+    toast("선택한 요일에 해당하는 날짜가 이 달엔 없어요");
+    return;
+  }
+  if (!confirm(`${scheduleCalYear}년 ${scheduleCalMonth + 1}월, ${dates.length}개 날짜에 등록할까요?`)) return;
+
+  await Promise.all(
+    dates.map((d) =>
+      addDoc(collection(db, "schedules"), {
+        date: d,
+        shiftType: recurringShiftType,
+        staffPhone: recurringStaffPhone,
+        staffName: recurringStaffName,
+        startTime,
+        endTime,
+        createdAt: serverTimestamp(),
+      })
+    )
+  );
+  toast(`${dates.length}개 날짜에 등록했어요`);
+  showRecurringForm = false;
+  rerenderCurrent();
+}
+
+function recurringFormOverlayHtml() {
+  return `
+    <div class="payroll-form-overlay" id="recurringFormOverlay">
+      <div class="payroll-form-sheet">
+        <div class="row-between">
+          <div style="font-weight:800; font-size:16px;">요일 반복 등록 (${scheduleCalYear}년 ${scheduleCalMonth + 1}월)</div>
+          <button class="payroll-form-close-btn" id="recurringFormCloseBtn" aria-label="닫기">✕</button>
+        </div>
+        <div class="field" style="margin-top:14px;">
+          <label>반복할 요일 (복수 선택 가능)</label>
+          <div class="schedule-weekday-row">
+            ${WEEKDAYS.map((w, i) => `<button type="button" class="schedule-weekday-btn ${recurringWeekdays.has(i) ? "active" : ""}" data-recurring-weekday="${i}">${w}</button>`).join("")}
+          </div>
+        </div>
+        <div class="field">
+          <label>근무 유형</label>
+          <div class="schedule-type-row">
+            ${SHIFT_TYPES.map((t) => `<button type="button" class="schedule-type-btn ${SHIFT_TYPE_CLASS[t]} ${recurringShiftType === t ? "active" : ""}" data-recurring-type="${t}">${t}</button>`).join("")}
+          </div>
+        </div>
+        <div class="field">
+          <label>담당자</label>
+          <select id="recurringStaffSelect">
+            <option value="">선택하세요</option>
+            ${staffAccountsList.map((a) => `<option value="${a.phone}" ${recurringStaffPhone === a.phone ? "selected" : ""}>${escapeHtml(a.name)}</option>`).join("")}
+          </select>
+        </div>
+        <div class="field" style="margin-bottom:0;">
+          <label>근무 시간</label>
+          <div class="payroll-time-row">
+            ${timeSelectHtml("recurringFormStart", recurringStartHour, recurringStartMin)}
+            <span>-</span>
+            ${timeSelectHtml("recurringFormEnd", recurringEndHour, recurringEndMin)}
+          </div>
+        </div>
+        <button class="btn gold block" id="recurringSubmitBtn" style="margin-top:16px;">이 달에 반복 등록</button>
+      </div>
+    </div>`;
+}
+
+function scheduleTabHtml() {
+  return `
+    ${scheduleCalendarHtml()}
+    <button class="btn secondary block" id="scheduleRecurringBtn" style="margin-top:10px;">+ 요일 반복 등록</button>
+    ${scheduleDayOverlayHtml()}
+    ${showRecurringForm ? recurringFormOverlayHtml() : ""}`;
+}
+
+function wireScheduleEvents() {
+  const prevBtn = document.getElementById("scheduleCalPrevMonth");
+  const nextBtn = document.getElementById("scheduleCalNextMonth");
+  if (prevBtn) {
+    prevBtn.addEventListener("click", () => {
+      scheduleCalMonth -= 1;
+      if (scheduleCalMonth < 0) { scheduleCalMonth = 11; scheduleCalYear -= 1; }
+      loadScheduleForMonth();
+      rerenderCurrent();
+    });
+  }
+  if (nextBtn) {
+    nextBtn.addEventListener("click", () => {
+      scheduleCalMonth += 1;
+      if (scheduleCalMonth > 11) { scheduleCalMonth = 0; scheduleCalYear += 1; }
+      loadScheduleForMonth();
+      rerenderCurrent();
+    });
+  }
+  document.querySelectorAll("[data-schedule-day]").forEach((el) => {
+    el.addEventListener("click", () => openScheduleDay(el.dataset.scheduleDay));
+  });
+  const dayOverlay = document.getElementById("scheduleDayOverlay");
+  if (dayOverlay) {
+    dayOverlay.addEventListener("click", (e) => { if (e.target === dayOverlay) closeScheduleDay(); });
+    document.getElementById("scheduleDayCloseBtn").addEventListener("click", closeScheduleDay);
+    document.querySelectorAll("[data-schedule-delete]").forEach((el) => {
+      el.addEventListener("click", () => deleteScheduleEntry(el.dataset.scheduleDelete));
+    });
+    document.querySelectorAll("[data-schedule-edit]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const found = scheduleEntries.find((e) => e.id === el.dataset.scheduleEdit);
+        if (found && canEditScheduleEntry(found)) openScheduleForm(found);
+      });
+    });
+    const addEntryBtn = document.getElementById("scheduleAddEntryBtn");
+    if (addEntryBtn) addEntryBtn.addEventListener("click", () => openScheduleForm());
+    const cancelBtn = document.getElementById("scheduleFormCancelBtn");
+    if (cancelBtn) cancelBtn.addEventListener("click", cancelScheduleForm);
+    document.querySelectorAll("[data-schedule-type]").forEach((el) => {
+      el.addEventListener("click", () => { scheduleFormShiftType = el.dataset.scheduleType; rerenderCurrent(); });
+    });
+    const staffSelect = document.getElementById("scheduleStaffSelect");
+    if (staffSelect) {
+      staffSelect.addEventListener("change", (e) => {
+        scheduleFormStaffPhone = e.target.value;
+        const found = staffAccountsList.find((a) => a.phone === e.target.value);
+        scheduleFormStaffName = found ? found.name : "";
+      });
+    }
+    const startHour = document.getElementById("scheduleFormStartHour");
+    const startMin = document.getElementById("scheduleFormStartMin");
+    const endHour = document.getElementById("scheduleFormEndHour");
+    const endMin = document.getElementById("scheduleFormEndMin");
+    if (startHour) startHour.addEventListener("change", (e) => { scheduleFormStartHour = e.target.value; });
+    if (startMin) startMin.addEventListener("change", (e) => { scheduleFormStartMin = e.target.value; });
+    if (endHour) endHour.addEventListener("change", (e) => { scheduleFormEndHour = e.target.value; });
+    if (endMin) endMin.addEventListener("change", (e) => { scheduleFormEndMin = e.target.value; });
+    const submitBtn = document.getElementById("scheduleSubmitBtn");
+    if (submitBtn) submitBtn.addEventListener("click", submitScheduleEntry);
+  }
+
+  const recurringBtn = document.getElementById("scheduleRecurringBtn");
+  if (recurringBtn) recurringBtn.addEventListener("click", openRecurringForm);
+  const recurringOverlay = document.getElementById("recurringFormOverlay");
+  if (recurringOverlay) {
+    recurringOverlay.addEventListener("click", (e) => { if (e.target === recurringOverlay) closeRecurringForm(); });
+    document.getElementById("recurringFormCloseBtn").addEventListener("click", closeRecurringForm);
+    document.querySelectorAll("[data-recurring-weekday]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const day = Number(el.dataset.recurringWeekday);
+        if (recurringWeekdays.has(day)) recurringWeekdays.delete(day);
+        else recurringWeekdays.add(day);
+        rerenderCurrent();
+      });
+    });
+    document.querySelectorAll("[data-recurring-type]").forEach((el) => {
+      el.addEventListener("click", () => { recurringShiftType = el.dataset.recurringType; rerenderCurrent(); });
+    });
+    const recurringStaffSelect = document.getElementById("recurringStaffSelect");
+    if (recurringStaffSelect) {
+      recurringStaffSelect.addEventListener("change", (e) => {
+        recurringStaffPhone = e.target.value;
+        const found = staffAccountsList.find((a) => a.phone === e.target.value);
+        recurringStaffName = found ? found.name : "";
+      });
+    }
+    const rStartHour = document.getElementById("recurringFormStartHour");
+    const rStartMin = document.getElementById("recurringFormStartMin");
+    const rEndHour = document.getElementById("recurringFormEndHour");
+    const rEndMin = document.getElementById("recurringFormEndMin");
+    if (rStartHour) rStartHour.addEventListener("change", (e) => { recurringStartHour = e.target.value; });
+    if (rStartMin) rStartMin.addEventListener("change", (e) => { recurringStartMin = e.target.value; });
+    if (rEndHour) rEndHour.addEventListener("change", (e) => { recurringEndHour = e.target.value; });
+    if (rEndMin) rEndMin.addEventListener("change", (e) => { recurringEndMin = e.target.value; });
+    const recurringSubmitBtn = document.getElementById("recurringSubmitBtn");
+    if (recurringSubmitBtn) recurringSubmitBtn.addEventListener("click", submitRecurringSchedule);
+  }
 }

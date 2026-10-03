@@ -9,6 +9,14 @@ service firebase.storage {
         && request.resource.contentType.matches('image/.*');
       allow delete: if request.auth != null;
     }
+    // 사장님이 발주 체크 전 첨부하는 결제 영수증 사진.
+    match /receiptPhotos/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && request.resource.size < 8 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if request.auth != null;
+    }
     // 프로필 사진. 계정 전화번호별 고정 경로라 재업로드하면 이전 사진을 덮어씀.
     match /avatars/{allPaths=**} {
       allow read: if request.auth != null;

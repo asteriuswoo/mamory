@@ -36,6 +36,13 @@ export function watchAccounts(cb) {
   };
 }
 
+// @멘션 자동완성처럼 "전체 계정 목록"이 필요한 곳에서 쓴다 — ensureAccountsWatched()가
+// 아직 안 돌았으면(=아무도 watchAccounts를 호출한 적 없으면) 시작시켜 둔다.
+export function allAccounts() {
+  ensureAccountsWatched();
+  return Object.entries(accountsMap).map(([phone, data]) => ({ phone, name: data.name || "" }));
+}
+
 function initialOf(name) {
   return (name || "?").trim().charAt(0) || "?";
 }

@@ -224,23 +224,120 @@ async function removeMaterial(id) {
   toast("삭제했어요");
 }
 
-async function moveMaterial(id, direction) {
-  const m = materials.find((x) => x.id === id);
-  if (!m) return;
-  const siblings = sortMaterials(materials.filter((x) => x.subCategory === m.subCategory && x.mainCategory === m.mainCategory));
-  const idx = siblings.findIndex((x) => x.id === id);
-  const targetIdx = idx + direction;
-  if (targetIdx < 0 || targetIdx >= siblings.length) return;
+// ---- 자재 순서 드래그 재정렬 ----
+// 화살표(▲▼)로 바꿀 때마다 자매 자재 전체의 sortOrder를 다시 매기고 통째로
+// 다시 그려서, 누를 때마다 목록이 한번 번쩍이는 느낌이 있었다 — 꾹 눌러서
+// 드래그하는 방식으로 바꿔서 그 번쩍임 없이 자연스럽게 옮길 수 있게 한다.
+// 드래그 중엔 같은 소분류 카드 안의 DOM만 translateY로 움직이고(Firestore엔
+// 아무것도 안 씀), 손을 뗀 순간에만 최종 순서로 sortOrder를 한 번에 다시
+// 매긴다.
+let drag = null;
 
-  // Swap positions, then renumber the whole subcategory with fresh, guaranteed
-  // -unique values. Older materials share a sortOrder fallback (same-second
-  // creation time) often enough that a plain two-item swap can be a no-op —
-  // renumbering everyone sidesteps that entirely.
-  [siblings[idx], siblings[targetIdx]] = [siblings[targetIdx], siblings[idx]];
+function wireMaterialDragHandles() {
+  listEl.querySelectorAll("[data-drag-handle]").forEach((handle) => {
+    handle.addEventListener("pointerdown", onDragHandlePointerDown);
+  });
+}
+
+function onDragHandlePointerDown(e) {
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+  e.preventDefault(); // iOS 길게 누르기 텍스트 선택 콜아웃이 뜨지 않도록
+  const handle = e.currentTarget;
+  const row = handle.closest(".admin-row");
+  const container = row.parentElement;
+  const startX = e.clientX;
+  const startY = e.clientY;
+  const pointerId = e.pointerId;
+
+  const holdTimer = setTimeout(() => {
+    cleanupPreHold();
+    beginDrag(row, container, pointerId, startY);
+  }, 350);
+
+  function onMoveBeforeHold(ev) {
+    if (Math.abs(ev.clientY - startY) > 8 || Math.abs(ev.clientX - startX) > 8) {
+      clearTimeout(holdTimer);
+      cleanupPreHold();
+    }
+  }
+  function cleanupPreHold() {
+    document.removeEventListener("pointermove", onMoveBeforeHold);
+    document.removeEventListener("pointerup", onUpBeforeHold);
+  }
+  function onUpBeforeHold() {
+    clearTimeout(holdTimer);
+    cleanupPreHold();
+  }
+  document.addEventListener("pointermove", onMoveBeforeHold);
+  document.addEventListener("pointerup", onUpBeforeHold, { once: true });
+}
+
+function beginDrag(row, container, pointerId, startY) {
+  const rows = Array.from(container.querySelectorAll(".admin-row"));
+  if (rows.length < 2) return;
+  const activeIndex = rows.indexOf(row);
+  drag = {
+    container,
+    rows,
+    ids: rows.map((r) => r.dataset.id),
+    activeIndex,
+    currentIndex: activeIndex,
+    rowHeight: row.offsetHeight,
+    startY,
+    pointerId,
+    row,
+  };
+  row.classList.add("dragging-row");
+  row.style.zIndex = "5";
+  try { row.setPointerCapture(pointerId); } catch (e) { /* 이미 떼진 포인터면 무시 */ }
+  row.addEventListener("pointermove", onDragMove);
+  row.addEventListener("pointerup", onDragEnd);
+  row.addEventListener("pointercancel", onDragEnd);
+}
+
+function onDragMove(e) {
+  if (!drag) return;
+  const deltaY = e.clientY - drag.startY;
+  drag.row.style.transform = `translateY(${deltaY}px)`;
+  let newIndex = drag.activeIndex + Math.round(deltaY / drag.rowHeight);
+  if (newIndex < 0) newIndex = 0;
+  if (newIndex > drag.rows.length - 1) newIndex = drag.rows.length - 1;
+  if (newIndex === drag.currentIndex) return;
+  const dir = newIndex > drag.currentIndex ? 1 : -1;
+  for (let i = drag.currentIndex; i !== newIndex; i += dir) {
+    const otherRow = drag.rows[i + dir];
+    if (otherRow === drag.row) continue;
+    const prevShift = parseFloat(otherRow.dataset.shift || "0");
+    const nextShift = prevShift - dir * drag.rowHeight;
+    otherRow.dataset.shift = String(nextShift);
+    otherRow.style.transition = "transform .15s";
+    otherRow.style.transform = `translateY(${nextShift}px)`;
+  }
+  const [movedId] = drag.ids.splice(drag.currentIndex, 1);
+  drag.ids.splice(newIndex, 0, movedId);
+  drag.currentIndex = newIndex;
+}
+
+async function onDragEnd() {
+  if (!drag) return;
+  const { rows, ids, row, pointerId } = drag;
+  try { row.releasePointerCapture(pointerId); } catch (e) { /* no-op */ }
+  row.removeEventListener("pointermove", onDragMove);
+  row.removeEventListener("pointerup", onDragEnd);
+  row.removeEventListener("pointercancel", onDragEnd);
+  const originalIds = rows.map((r) => r.dataset.id);
+  rows.forEach((r) => {
+    r.style.transition = "";
+    r.style.transform = "";
+    r.style.zIndex = "";
+    delete r.dataset.shift;
+  });
+  row.classList.remove("dragging-row");
+  const changed = ids.some((id, i) => id !== originalIds[i]);
+  drag = null;
+  if (!changed) return;
   const base = Date.now();
-  await Promise.all(
-    siblings.map((sib, i) => updateDoc(doc(db, "materials", sib.id), { sortOrder: base + i }))
-  );
+  await Promise.all(ids.map((id, i) => updateDoc(doc(db, "materials", id), { sortOrder: base + i })));
 }
 
 function renderSubList() {
@@ -323,7 +420,7 @@ function render() {
         <button class="subcat-add-btn" data-quick-add="${escapeHtml(sub)}" title="이 소분류에 자재 추가">+</button>
       </div>
       <div class="card">`;
-    list.forEach((m, idx) => {
+    list.forEach((m) => {
       if (m.id === editingId) {
         html += `
           <div class="admin-row">
@@ -333,11 +430,8 @@ function render() {
           </div>`;
       } else {
         html += `
-          <div class="admin-row">
-            <div class="reorder-btns">
-              <button class="icon-btn" data-action="up" data-id="${m.id}" ${idx === 0 ? "disabled" : ""}>▲</button>
-              <button class="icon-btn" data-action="down" data-id="${m.id}" ${idx === list.length - 1 ? "disabled" : ""}>▼</button>
-            </div>
+          <div class="admin-row" data-id="${m.id}">
+            <div class="drag-handle" data-drag-handle title="꾹 눌러서 순서 변경">⠿</div>
             <div style="flex:1">
               <div class="name">${escapeHtml(m.name)}</div>
             </div>
@@ -386,12 +480,7 @@ function render() {
   listEl.querySelectorAll('[data-action="delete"]').forEach((el) =>
     el.addEventListener("click", () => removeMaterial(el.dataset.id))
   );
-  listEl.querySelectorAll('[data-action="up"]').forEach((el) =>
-    el.addEventListener("click", () => moveMaterial(el.dataset.id, -1))
-  );
-  listEl.querySelectorAll('[data-action="down"]').forEach((el) =>
-    el.addEventListener("click", () => moveMaterial(el.dataset.id, 1))
-  );
+  wireMaterialDragHandles();
 }
 
 export function mount(account) {

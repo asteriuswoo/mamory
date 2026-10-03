@@ -31,16 +31,19 @@ let account = null;
 let currentView = null; // { path, mod }
 let unwireAvatar = null;
 
-// #accountName / #logoutBtn / #refreshBtn live INSIDE each view's own
-// #mainContent markup (every view happens to render the same account card at
-// its top), not in the shared shell — so unlike the header/bottom-tabs, they
-// get thrown away and recreated on every view switch and need re-wiring
-// every time, not just once at boot.
+// #accountName / #logoutBtn / #refreshBtn used to live inside every view's
+// own #mainContent markup, but now only the home tab (자재 관리 = admin.html)
+// keeps that account card — the other views skip straight to their content,
+// so these elements won't exist there. Each lookup is null-checked since
+// this runs on every view switch regardless of which view it is.
 function wireContentChrome() {
-  if (unwireAvatar) unwireAvatar();
-  unwireAvatar = wireAccountHeaderAvatar(document.getElementById("accountName"), account, "사장님 계정");
-  document.getElementById("logoutBtn").addEventListener("click", logout);
-  document.getElementById("refreshBtn").addEventListener("click", () => window.forceAppRefresh());
+  if (unwireAvatar) { unwireAvatar(); unwireAvatar = null; }
+  const accountNameEl = document.getElementById("accountName");
+  if (accountNameEl) unwireAvatar = wireAccountHeaderAvatar(accountNameEl, account, "사장님 계정");
+  const logoutBtn = document.getElementById("logoutBtn");
+  if (logoutBtn) logoutBtn.addEventListener("click", logout);
+  const refreshBtn = document.getElementById("refreshBtn");
+  if (refreshBtn) refreshBtn.addEventListener("click", () => window.forceAppRefresh());
 }
 
 function pathOf(href) {

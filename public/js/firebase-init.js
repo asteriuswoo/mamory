@@ -20,6 +20,8 @@ import {
   runTransaction,
   increment,
   enableIndexedDbPersistence,
+  disableNetwork,
+  enableNetwork,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   getAuth,
@@ -43,6 +45,25 @@ export { ref, uploadBytes, getDownloadURL };
 // Fails silently in multi-tab sessions or unsupported browsers, where the
 // app just falls back to network-only like before.
 enableIndexedDbPersistence(db).catch(() => {});
+
+// 모바일 브라우저는 앱이 한참 백그라운드에 있으면 JS 타이머/네트워크를
+// 통째로 멈춰뒀다가 돌아왔을 때 Firestore의 실시간 연결(onSnapshot)을 제대로
+// 되살리지 못하는 경우가 있다 — 화면엔 기본값/빈 목록만 보이고, 새로고침을
+// 몇 번 하거나 앱을 껐다 켜야만 다시 정상으로 돌아오던 문제가 이것.
+// 오래(1분+) 숨겨져 있다가 다시 보이면 네트워크를 껐다 켜서 이미 떠있는
+// 모든 리스너가 서버와 새로 동기화하도록 강제한다.
+let hiddenSinceMs = null;
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    hiddenSinceMs = Date.now();
+    return;
+  }
+  const wasHiddenLong = hiddenSinceMs && Date.now() - hiddenSinceMs > 60 * 1000;
+  hiddenSinceMs = null;
+  if (wasHiddenLong) {
+    disableNetwork(db).then(() => enableNetwork(db)).catch(() => {});
+  }
+});
 
 // Web Push isn't available everywhere (notably most of iOS Safari unless the
 // PWA is installed on 16.4+), so callers must await messagingReady before

@@ -8,12 +8,33 @@
 //      주문 등) 기록 — 시재와 같은 날짜 범위를 공유한다.
 //   3. 선결제 충전 등록 — 손님이 충전할 때마다 남기는 기록. 차감/잔액 개념 없이
 //      "누가 언제 얼마 냈는지"만 쌓이는 로그이며, 같은 손님 이름으로 계속 쌓인다.
-import { db, collection, doc, addDoc, deleteDoc, getDocs, onSnapshot, query, orderBy, serverTimestamp, runTransaction, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
-import { todayStr, dateStrDaysAgo, dateStrOf, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, resizeImageFile, dayAccentClass, openImageLightbox } from "./util.js";
+import { db, collection, doc, addDoc, updateDoc, deleteDoc, getDocs, setDoc, arrayUnion, onSnapshot, query, orderBy, serverTimestamp, runTransaction, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
+import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, resizeImageFile, dayAccentClass, openImageLightbox } from "./util.js";
 import { avatarHtml, watchAccounts } from "./avatar.js";
 
 const date = todayStr();
 const recentDates = Array.from({ length: 7 }, (_, i) => dateStrDaysAgo(i));
+
+// 시재등록(시재+현금지출)과 선결제등록은 서로 날짜 개념부터 다른 완전히
+// 별개 기능이라 세그먼트 탭으로 나눈다 — 공유하기 탭과 같은 패턴. 새로고침해도
+// 보던 탭 그대로 떠야 해서 sessionStorage에 남겨두고 시작할 때 복원한다.
+const REGISTER_TAB_KEY = "mamory_registerTab";
+function loadRegisterTab() {
+  try {
+    const saved = sessionStorage.getItem(REGISTER_TAB_KEY);
+    return saved === "cash" || saved === "topup" ? saved : "cash";
+  } catch (e) {
+    return "cash";
+  }
+}
+function saveRegisterTab() {
+  try {
+    sessionStorage.setItem(REGISTER_TAB_KEY, registerTab);
+  } catch (e) {
+    // sessionStorage 불가 환경이면 그냥 이번 로드는 기본 탭으로 넘어간다.
+  }
+}
+let registerTab = loadRegisterTab(); // "cash" | "topup"
 
 function dowLabel(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
@@ -285,21 +306,31 @@ const expenseChipCounts = {}; // date -> 그 날 지출 건수 (시재 칩과 �
 
 let expenseDescDraft = "";
 let expenseAmountDraft = "";
-let expenseReceiptUrl = "";
+let expenseReceiptUrls = [];
+let expenseAttachTargetId = null; // 이미 등록된 지출 중 뒤늦게 영수증을 붙일 대상 id
 
 function expenseTotalFor(list) {
   return list.reduce((s, e) => s + (e.amount || 0), 0);
 }
 
-async function onExpenseReceiptSelected(file) {
-  if (!file) return;
-  toast("영수증 업로드 중...");
+// 옛 지출 기록은 receiptUrl(단수) 하나였고, 지금은 여러 장을 담는
+// receiptUrls(배열)로 바뀌었다 — 어느 쪽으로 저장됐든 한 번에 뽑아 쓴다.
+function expenseReceiptUrlsOf(e) {
+  if (e.receiptUrls && e.receiptUrls.length > 0) return e.receiptUrls;
+  return e.receiptUrl ? [e.receiptUrl] : [];
+}
+
+async function onExpenseReceiptsSelected(files) {
+  if (!files || files.length === 0) return;
+  toast(files.length > 1 ? `영수증 ${files.length}장 업로드 중...` : "영수증 업로드 중...");
   try {
-    const blob = await resizeImageFile(file);
-    const path = `notePhotos/${date}/expense_${account.phone}_${Date.now()}.jpg`;
-    const fileRef = ref(storage, path);
-    await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
-    expenseReceiptUrl = await getDownloadURL(fileRef);
+    for (const file of files) {
+      const blob = await resizeImageFile(file);
+      const path = `notePhotos/${date}/expense_${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
+      const fileRef = ref(storage, path);
+      await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
+      expenseReceiptUrls.push(await getDownloadURL(fileRef));
+    }
     render();
     toast("영수증을 첨부했어요");
   } catch (e) {
@@ -322,16 +353,45 @@ async function submitExpense() {
   await addDoc(collection(db, "cashRegister", date, "expenses"), {
     description: desc,
     amount,
-    receiptUrl: expenseReceiptUrl || "",
+    receiptUrls: expenseReceiptUrls,
     staffName: account.name,
     staffPhone: account.phone,
     createdAt: serverTimestamp(),
   });
   expenseDescDraft = "";
   expenseAmountDraft = "";
-  expenseReceiptUrl = "";
+  expenseReceiptUrls = [];
   toast("지출을 등록했어요");
   render();
+}
+
+// 등록할 때 깜빡하고 영수증을 안 붙였어도 나중에 붙일 수 있게 — 등록 자체를
+// 막는 대신, 이미 쌓인 기록에도 뒤늦게 사진만 추가하는 길을 열어둔다.
+async function onExpenseRowReceiptsSelected(id, files) {
+  if (!files || files.length === 0) return;
+  toast(files.length > 1 ? `영수증 ${files.length}장 업로드 중...` : "영수증 업로드 중...");
+  try {
+    const existing = cashExpenses.find((e) => e.id === id);
+    const urls = existing ? expenseReceiptUrlsOf(existing) : [];
+    for (const file of files) {
+      const blob = await resizeImageFile(file);
+      const path = `notePhotos/${cashDate}/expense_${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
+      const fileRef = ref(storage, path);
+      await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
+      urls.push(await getDownloadURL(fileRef));
+    }
+    await updateDoc(doc(db, "cashRegister", cashDate, "expenses", id), { receiptUrls: urls });
+    if (cashDate !== date) {
+      // 과거 날짜는 live 리스너가 없어서 직접 반영해야 화면에 바로 보인다.
+      const target = cashExpenses.find((e) => e.id === id);
+      if (target) target.receiptUrls = urls;
+      render();
+    }
+    toast("영수증을 첨부했어요");
+  } catch (e) {
+    console.error(e);
+    toast("영수증 업로드에 실패했어요");
+  }
 }
 
 // 시재/충전 로그와 마찬가지로 사장님 계정에서만 지울 수 있다.
@@ -358,7 +418,9 @@ function expenseListHtml(list) {
           <span class="expense-desc">${escapeHtml(e.description)}</span>
           <span class="expense-meta">${escapeHtml(e.staffName || "")}님 · ${formatTimeLabel(e.createdAt)}</span>
         </div>
-        ${e.receiptUrl ? `<img src="${e.receiptUrl}" class="expense-receipt-thumb" data-expense-photo="${e.receiptUrl}" alt="영수증" />` : ""}
+        ${expenseReceiptUrlsOf(e).length > 0
+          ? expenseReceiptUrlsOf(e).map((url) => `<img src="${url}" class="expense-receipt-thumb" data-expense-photo="${url}" alt="영수증" />`).join("")
+          : `<button class="expense-attach-btn" data-expense-attach="${e.id}">📎 첨부</button>`}
         <span class="expense-amount">−${(e.amount || 0).toLocaleString()}원</span>
         ${account.role === "owner" ? `<button class="expense-delete-btn" data-expense-delete="${e.id}" aria-label="삭제">✕</button>` : ""}
       </div>`)
@@ -375,13 +437,14 @@ function expenseCardHtml(isToday) {
         <input type="text" id="expenseDescInput" placeholder="무엇에 썼나요? (예: 우유 2개)" value="${escapeHtml(expenseDescDraft)}" />
         <input type="number" id="expenseAmountInput" placeholder="금액" inputmode="numeric" value="${escapeHtml(expenseAmountDraft)}" />
       </div>
-      <div class="photo-attach-row">
-        <input type="file" accept="image/*" id="expenseReceiptInput" style="display:none;" />
-        ${expenseReceiptUrl ? `
+      <div class="photo-attach-row" style="flex-wrap:wrap;">
+        <input type="file" accept="image/*" id="expenseReceiptInput" multiple style="display:none;" />
+        ${expenseReceiptUrls.map((url, i) => `
           <div class="photo-preview">
-            <img src="${expenseReceiptUrl}" alt="영수증" class="expense-receipt-preview-img" data-expense-photo="${expenseReceiptUrl}" />
-            <button class="photo-remove-btn" id="expenseReceiptRemoveBtn">✕</button>
-          </div>` : `<button class="photo-add-btn" id="expenseReceiptAddBtn">🧾 영수증 첨부</button>`}
+            <img src="${url}" alt="영수증" class="expense-receipt-preview-img" data-expense-photo="${url}" />
+            <button class="photo-remove-btn" data-expense-receipt-remove="${i}">✕</button>
+          </div>`).join("")}
+        <button class="photo-add-btn" id="expenseReceiptAddBtn">🧾 영수증 첨부</button>
       </div>
       <button class="btn gold block" id="expenseAddBtn" style="margin-top:8px;">지출 등록</button>`
     : "";
@@ -391,6 +454,7 @@ function expenseCardHtml(isToday) {
     <div class="card section-expense">
       <div class="expense-hint">돈통에서 현금으로 급하게 쓴 비용을 남겨주세요 (예: 편의점 우유 구매, 얼음 주문)</div>
       ${form}
+      <input type="file" accept="image/*" id="expenseRowReceiptInput" multiple style="display:none;" />
       ${expenseListHtml(cashExpenses)}
     </div>`;
 }
@@ -403,8 +467,8 @@ function expenseCardHtml(isToday) {
 const KNOWN_CUSTOMERS = ["다온주얼리", "퍼펙트환전소", "태극", "금복당", "이석희", "부성사", "크림", "샤샤", "감동"];
 
 let topups = []; // 전체 기간, live — 날짜 무관하게 이름 칩을 항상 채우는 데 쓴다
-let topupDate = date; // 지금 보고 있는(내역을 필터링해 보여주는) 날짜
-let topupNameDraft = "";
+let customTopupNames = []; // 직원이 직접 추가한 손님 이름(config/topupCustomers) — live, 전 직원 공유
+let topupSelectedName = null; // null이면 손님 목록, 이름이 있으면 그 손님의 전체 충전 내역을 본다
 let topupAmountDraft = "";
 
 function groupByCustomer(list) {
@@ -423,13 +487,16 @@ function groupByCustomer(list) {
   }));
 }
 
-// 이름 칩은 날짜 탐색과 무관하게 항상 전체 기간(포스기 명단 + 실제 충전
-// 이력) 기준으로 채워진다 — 과거 날짜를 보고 있어도 손님 이름을 바로 골라
-// "지금" 충전을 등록할 수 있어야 하기 때문.
+// 이름 목록은 날짜와 무관하게 항상 전체(포스기 명단 + 직접 추가한 손님 +
+// 실제 충전 이력) 기준으로 채워진다 — 날짜가 지나도 이름 탭만 누르면 그
+// 손님의 충전 내역이 통째로 남아있는 게 이번 개편의 핵심.
 function topupChipNames() {
   const groups = groupByCustomer(topups);
   const byName = new Map(groups.map((g) => [g.name, g]));
   KNOWN_CUSTOMERS.forEach((name) => {
+    if (!byName.has(name)) byName.set(name, { name, lastAt: -1 });
+  });
+  customTopupNames.forEach((name) => {
     if (!byName.has(name)) byName.set(name, { name, lastAt: -1 });
   });
   return [...byName.values()]
@@ -437,86 +504,58 @@ function topupChipNames() {
     .map((g) => g.name);
 }
 
-// 화면에 보이는 충전 내역 카드는 지금 보고 있는 날짜(topupDate)의 것만 —
-// 시재와 달리 과거 날짜도 언제든 바로 열어볼 수 있고, 새 충전은 어떤 날짜를
-// 보고 있든 상관없이 항상 "지금"으로 등록된다.
-function topupGroupsForDate(dateStr) {
-  return groupByCustomer(topups.filter((t) => dateStrOf(t.createdAt) === dateStr))
-    .sort((a, b) => b.lastAt - a.lastAt);
-}
-
-function topupDayChipCounts() {
-  const counts = {};
-  topups.forEach((t) => {
-    const d = dateStrOf(t.createdAt);
-    counts[d] = (counts[d] || 0) + 1;
-  });
-  return counts;
-}
-
-function wireTopupDayChips() {
-  const chipsEl = rootEl.querySelector("#topupDayChips");
-  if (!chipsEl) return;
-  const counts = topupDayChipCounts();
-  chipsEl.innerHTML = recentDates
-    .map((d) => {
-      const { dow, dnum } = dowLabel(d);
-      const active = d === topupDate;
-      return `
-        <button class="day-chip ${active ? "active" : ""}" data-tdate="${d}">
-          <div class="dow">${d === date ? "오늘" : dow}</div>
-          <div class="dnum">${dnum}</div>
-          <div class="day-chip-underline ${dayAccentClass(d)}"></div>
-          <div class="dcount">${counts[d] ? counts[d] + "건" : ""}</div>
-        </button>`;
-    })
-    .join("");
-  chipsEl.querySelectorAll("[data-tdate]").forEach((el) => {
-    el.addEventListener("click", () => {
-      topupDate = el.dataset.tdate;
-      render();
-    });
-  });
+// 손님 이름은 여러 직원이 함께 쓰는 공용 명단이라 config 문서에 저장해서
+// 실시간으로 공유한다 — 코드에 박아둔 KNOWN_CUSTOMERS와 달리 배포 없이도
+// 누구나 새 손님을 추가할 수 있다.
+async function addNewTopupCustomer() {
+  const name = (window.prompt("추가할 손님 이름을 입력하세요") || "").trim();
+  if (!name) return;
+  await setDoc(doc(db, "config", "topupCustomers"), { names: arrayUnion(name) }, { merge: true });
+  toast(`${name}님을 추가했어요`);
 }
 
 function topupBoardHtml() {
-  const chipNames = topupChipNames();
-  const activeGroups = topupGroupsForDate(topupDate);
+  if (!topupSelectedName) {
+    const chipNames = topupChipNames();
+    return `
+      <div class="category-title section-title-topup">🧾 선결제 충전 등록</div>
+      <div class="card section-topup">
+        <div class="topup-accrual-hint">💵 현금 결제 시 10% 추가 적립 · 💳 카드 결제 시 5% 추가 적립</div>
+        <div class="topup-name-chips">
+          ${chipNames.map((n) => `<button class="topup-name-chip" data-topup-select="${escapeHtml(n)}">${escapeHtml(n)}</button>`).join("")}
+          <button type="button" class="topup-name-chip add-new" id="topupAddCustomerBtn">+ 손님 추가</button>
+        </div>
+      </div>`;
+  }
+
+  const group = groupByCustomer(topups.filter((t) => (t.customerName || "").trim() === topupSelectedName))[0]
+    || { name: topupSelectedName, total: 0, entries: [] };
+
   return `
     <div class="category-title section-title-topup">🧾 선결제 충전 등록</div>
     <div class="card section-topup">
-      <div class="topup-accrual-hint">💵 현금 결제 시 10% 추가 적립 · 💳 카드 결제 시 5% 추가 적립</div>
-      <div class="field" style="margin:0 0 10px;">
-        <label>충전 내역 — 날짜별로 보기</label>
-        <div class="day-chip-row" id="topupDayChips"></div>
+      <button type="button" class="topup-back-btn" id="topupBackBtn">‹ 손님 목록</button>
+      <div class="topup-group-head">
+        <span class="topup-group-name">${escapeHtml(group.name)}</span>
+        <span class="topup-group-total">누적 ${group.total.toLocaleString()}원</span>
       </div>
       <div class="topup-form">
-        <input type="text" id="topupNameInput" placeholder="손님 이름" value="${escapeHtml(topupNameDraft)}" />
         <input type="number" id="topupAmountInput" placeholder="충전 금액" inputmode="numeric" value="${escapeHtml(topupAmountDraft)}" />
         <button class="btn gold" id="topupAddBtn">등록</button>
       </div>
-      ${chipNames.length > 0 ? `
-        <div class="topup-name-chips">
-          ${chipNames.map((n) => `<button class="topup-name-chip" data-topup-name="${escapeHtml(n)}">${escapeHtml(n)}</button>`).join("")}
-        </div>` : ""}
-      ${activeGroups.length === 0 ? `<div class="empty">${topupDate === date ? "오늘" : formatDateLabel(topupDate)} 등록된 충전 내역이 없어요.</div>` : activeGroups.map((g) => `
-        <div class="topup-group">
-          <div class="topup-group-head">
-            <span class="topup-group-name">${escapeHtml(g.name)}</span>
-            <span class="topup-group-total">누적 ${g.total.toLocaleString()}원</span>
-          </div>
-          <div class="topup-entry-list">
-            ${g.entries.map((e) => `
-              <div class="topup-entry-row">
-                ${avatarHtml(e.staffPhone, e.staffName, 22)}
-                <div class="topup-entry-body">
-                  <span class="topup-entry-amount">+${(e.amount || 0).toLocaleString()}원</span>
-                  <span class="topup-entry-meta">${escapeHtml(e.staffName || "")}님 등록 · ${formatTimestampLabel(e.createdAt)}</span>
-                </div>
-                ${account.role === "owner" ? `<button class="topup-entry-delete-btn" data-topup-delete="${e.id}" aria-label="삭제">✕</button>` : ""}
-              </div>`).join("")}
-          </div>
-        </div>`).join("")}
+      <div class="topup-accrual-hint">💵 현금 결제 시 10% 추가 적립 · 💳 카드 결제 시 5% 추가 적립</div>
+      ${group.entries.length === 0 ? `<div class="empty">아직 등록된 충전 내역이 없어요.</div>` : `
+      <div class="topup-entry-list">
+        ${group.entries.map((e) => `
+          <div class="topup-entry-row">
+            ${avatarHtml(e.staffPhone, e.staffName, 22)}
+            <div class="topup-entry-body">
+              <span class="topup-entry-amount">+${(e.amount || 0).toLocaleString()}원</span>
+              <span class="topup-entry-meta">${escapeHtml(e.staffName || "")}님 등록 · ${formatTimestampLabel(e.createdAt)}</span>
+            </div>
+            ${account.role === "owner" ? `<button class="topup-entry-delete-btn" data-topup-delete="${e.id}" aria-label="삭제">✕</button>` : ""}
+          </div>`).join("")}
+      </div>`}
     </div>`;
 }
 
@@ -529,12 +568,9 @@ async function deleteTopupEntry(entryId) {
 }
 
 async function submitTopup() {
-  const name = topupNameDraft.trim();
+  const name = topupSelectedName;
   const amount = parseInt(topupAmountDraft, 10);
-  if (!name) {
-    toast("손님 이름을 입력해주세요");
-    return;
-  }
+  if (!name) return;
   if (!Number.isFinite(amount) || amount <= 0) {
     toast("충전 금액을 입력해주세요");
     return;
@@ -547,7 +583,6 @@ async function submitTopup() {
     createdAt: serverTimestamp(),
   });
   toast(`${name}님 ${amount.toLocaleString()}원 충전을 등록했어요`);
-  topupNameDraft = "";
   topupAmountDraft = "";
   render();
 }
@@ -558,20 +593,31 @@ function render() {
   if (!rootEl) return;
   const isToday = cashDate === date;
   let html = `
-    <div class="card">
-      <div class="field" style="margin:0">
-        <label>최근 7일</label>
-        <div class="day-chip-row" id="registerDayChips"></div>
+    <div class="seg register-tab-seg">
+      <button type="button" class="${registerTab === "cash" ? "active" : ""}" data-register-tab="cash">💰 시재등록</button>
+      <button type="button" class="${registerTab === "topup" ? "active" : ""}" data-register-tab="topup">🧾 선결제등록</button>
+    </div>`;
+
+  if (registerTab === "cash") {
+    html += `
+      <div class="card">
+        <div class="field" style="margin:0">
+          <label>최근 7일</label>
+          <div class="day-chip-row" id="registerDayChips"></div>
+        </div>
       </div>
-    </div>
 `;
-  html += cashCardHtml(isToday);
-  html += expenseCardHtml(isToday);
-  html += topupBoardHtml();
+    html += cashCardHtml(isToday);
+    html += expenseCardHtml(isToday);
+  } else {
+    html += topupBoardHtml();
+  }
 
   rootEl.innerHTML = html;
-  wireRegisterDayChips();
-  wireTopupDayChips();
+  rootEl.querySelectorAll("[data-register-tab]").forEach((el) => {
+    el.addEventListener("click", () => { registerTab = el.dataset.registerTab; saveRegisterTab(); render(); });
+  });
+  if (registerTab === "cash") wireRegisterDayChips();
 
   function refreshCashDraftDisplay(denom) {
     const countEl = rootEl.querySelector(`[data-cash-count="${denom}"]`);
@@ -620,10 +666,19 @@ function render() {
   if (expenseAmountInput) expenseAmountInput.addEventListener("input", (e) => { expenseAmountDraft = e.target.value; });
   const expenseReceiptInput = rootEl.querySelector("#expenseReceiptInput");
   const expenseReceiptAddBtn = rootEl.querySelector("#expenseReceiptAddBtn");
-  const expenseReceiptRemoveBtn = rootEl.querySelector("#expenseReceiptRemoveBtn");
   if (expenseReceiptAddBtn) expenseReceiptAddBtn.addEventListener("click", () => expenseReceiptInput.click());
-  if (expenseReceiptInput) expenseReceiptInput.addEventListener("change", (e) => onExpenseReceiptSelected(e.target.files[0]));
-  if (expenseReceiptRemoveBtn) expenseReceiptRemoveBtn.addEventListener("click", () => { expenseReceiptUrl = ""; render(); });
+  if (expenseReceiptInput) {
+    expenseReceiptInput.addEventListener("change", (e) => {
+      onExpenseReceiptsSelected(Array.from(e.target.files || []));
+      e.target.value = "";
+    });
+  }
+  rootEl.querySelectorAll("[data-expense-receipt-remove]").forEach((el) => {
+    el.addEventListener("click", () => {
+      expenseReceiptUrls.splice(Number(el.dataset.expenseReceiptRemove), 1);
+      render();
+    });
+  });
   const expenseAddBtn = rootEl.querySelector("#expenseAddBtn");
   if (expenseAddBtn) expenseAddBtn.addEventListener("click", submitExpense);
   rootEl.querySelectorAll("[data-expense-delete]").forEach((el) => {
@@ -632,22 +687,39 @@ function render() {
   rootEl.querySelectorAll("[data-expense-photo]").forEach((el) => {
     el.addEventListener("click", () => openImageLightbox(el.dataset.expensePhoto, "영수증"));
   });
+  const expenseRowReceiptInput = rootEl.querySelector("#expenseRowReceiptInput");
+  rootEl.querySelectorAll("[data-expense-attach]").forEach((el) => {
+    el.addEventListener("click", () => {
+      expenseAttachTargetId = el.dataset.expenseAttach;
+      if (expenseRowReceiptInput) expenseRowReceiptInput.click();
+    });
+  });
+  if (expenseRowReceiptInput) {
+    expenseRowReceiptInput.addEventListener("change", (e) => {
+      const files = Array.from(e.target.files || []);
+      const id = expenseAttachTargetId;
+      expenseAttachTargetId = null;
+      e.target.value = "";
+      if (id && files.length > 0) onExpenseRowReceiptsSelected(id, files);
+    });
+  }
 
-  const topupNameInput = rootEl.querySelector("#topupNameInput");
   const topupAmountInput = rootEl.querySelector("#topupAmountInput");
-  if (topupNameInput) topupNameInput.addEventListener("input", (e) => { topupNameDraft = e.target.value; });
   if (topupAmountInput) {
     topupAmountInput.addEventListener("input", (e) => { topupAmountDraft = e.target.value; });
     topupAmountInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) submitTopup(); });
   }
   const topupAddBtn = rootEl.querySelector("#topupAddBtn");
   if (topupAddBtn) topupAddBtn.addEventListener("click", submitTopup);
-  rootEl.querySelectorAll("[data-topup-name]").forEach((el) => {
+  const topupAddCustomerBtn = rootEl.querySelector("#topupAddCustomerBtn");
+  if (topupAddCustomerBtn) topupAddCustomerBtn.addEventListener("click", addNewTopupCustomer);
+  const topupBackBtn = rootEl.querySelector("#topupBackBtn");
+  if (topupBackBtn) topupBackBtn.addEventListener("click", () => { topupSelectedName = null; render(); });
+  rootEl.querySelectorAll("[data-topup-select]").forEach((el) => {
     el.addEventListener("click", () => {
-      topupNameDraft = el.dataset.topupName;
+      topupSelectedName = el.dataset.topupSelect;
+      topupAmountDraft = "";
       render();
-      const input = rootEl.querySelector("#topupAmountInput");
-      if (input) input.focus();
     });
   });
   rootEl.querySelectorAll("[data-topup-delete]").forEach((el) => {
@@ -674,6 +746,10 @@ function ensureStarted() {
   });
   onSnapshot(query(collection(db, "topups"), orderBy("createdAt", "desc")), (snap) => {
     topups = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    render();
+  });
+  onSnapshot(doc(db, "config", "topupCustomers"), (snap) => {
+    customTopupNames = (snap.exists() && snap.data().names) || [];
     render();
   });
   loadAllCashChipTotals();

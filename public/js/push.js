@@ -30,12 +30,14 @@ export function isPushDisabled() {
 // with a device id that persists in localStorage lets re-registration
 // *replace* this device's entry instead of adding another one.
 const DEVICE_ID_KEY = "mmate_device_id";
-// Remembers the exact token string THIS browser last wrote for itself, so a
-// later re-registration (e.g. after a service-worker update mints a new
-// token) can find and remove that specific old entry — including ones saved
-// before the {id, token} shape existed, which the deviceId match alone
-// can't catch since those were stored as bare strings keyed by their own value.
-const LAST_TOKEN_KEY = "mmate_last_fcm_token";
+// Remembers which phone/account THIS browser last registered its push token
+// under. logout() doesn't (and can't, since the old account is already gone
+// from localStorage by then) unregister the old account's copy of this
+// device — so switching accounts on one device used to leave it permanently
+// registered under BOTH the old and the new account, doubling every
+// notification that goes to both. Comparing against this key lets
+// registerPushToken clean up the old account's entry itself.
+const LAST_TOKEN_PHONE_KEY = "mmate_last_fcm_phone";
 
 function getDeviceId() {
   let id = localStorage.getItem(DEVICE_ID_KEY);
@@ -46,9 +48,20 @@ function getDeviceId() {
   return id;
 }
 
+// 다들 모바일 한 대로만 앱을 쓰기 때문에, 알림도 딱 한 사람당 한 기기(모바일)
+// 기준으로만 인정한다 — 데스크톱 브라우저(개발/테스트 포함)에서는 알림
+// 기기로 등록되지 않는다.
+function isMobileDevice() {
+  if (navigator.userAgentData && typeof navigator.userAgentData.mobile === "boolean") {
+    return navigator.userAgentData.mobile;
+  }
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+}
+
 export async function registerPushToken(phone) {
   if (!("serviceWorker" in navigator) || !VAPID_KEY) return;
   if (isPushDisabled()) return;
+  if (!isMobileDevice()) return;
   const supported = await messagingReady;
   if (!supported || !messaging) return;
   try {
@@ -60,18 +73,31 @@ export async function registerPushToken(phone) {
     if (!token) return;
 
     const deviceId = getDeviceId();
-    const prevToken = localStorage.getItem(LAST_TOKEN_KEY);
-    const accRef = doc(db, "accounts", phone);
-    const snap = await getDoc(accRef);
-    const existing = (snap.exists() && snap.data().fcmTokens) || [];
-    // Legacy entries were plain token strings with no device id — treat each
-    // as its own one-off device so old installs still get migrated cleanly.
-    const deduped = existing
-      .map((t) => (typeof t === "string" ? { id: t, token: t } : t))
-      .filter((t) => t.id !== deviceId && t.token !== prevToken);
-    deduped.push({ id: deviceId, token });
-    await updateDoc(accRef, { fcmTokens: deduped });
-    localStorage.setItem(LAST_TOKEN_KEY, token);
+
+    // This device switched to a different account since it last registered —
+    // strip this device's old entry out of the previous account first, or
+    // that account keeps getting this device's notifications forever.
+    const lastPhone = localStorage.getItem(LAST_TOKEN_PHONE_KEY);
+    if (lastPhone && lastPhone !== phone) {
+      const oldRef = doc(db, "accounts", lastPhone);
+      const oldSnap = await getDoc(oldRef);
+      if (oldSnap.exists()) {
+        const oldTokens = oldSnap.data().fcmTokens || [];
+        const oldFiltered = oldTokens
+          .map((t) => (typeof t === "string" ? { id: t, token: t } : t))
+          .filter((t) => t.id !== deviceId);
+        if (oldFiltered.length !== oldTokens.length) {
+          await updateDoc(oldRef, { fcmTokens: oldFiltered }).catch(() => {});
+        }
+      }
+    }
+
+    // 계정당 토큰은 항상 이 한 건으로 통째로 교체한다(누적/병합 아님) — 한
+    // 사람은 폰 한 대라고 보고, 기기를 재설치하거나 localStorage가 지워져서
+    // 새 deviceId가 발급돼도 예전 등록이 남아 알림이 여러 번 가는 일이
+    // 없도록 한다.
+    await updateDoc(doc(db, "accounts", phone), { fcmTokens: [{ id: deviceId, token }] });
+    localStorage.setItem(LAST_TOKEN_PHONE_KEY, phone);
   } catch (e) {
     console.error("FCM 토큰 등록 실패", e);
   }

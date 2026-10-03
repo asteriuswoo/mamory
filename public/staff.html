@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="icons/icon-192.png?v=4" />
 <link rel="icon" href="icons/icon-192.png?v=4" />
 <title>자재 발주 담기 - MAMORY</title>
-<link rel="stylesheet" href="css/style.css?v=56" />
+<link rel="stylesheet" href="css/style.css?v=80" />
 </head>
 <body class="has-bottom-tabs">
 <header class="topbar">
@@ -27,7 +27,9 @@
 </header>
 
 <main>
-  <div class="card">
+  <div id="monthEndBanner" class="payroll-payday-banner" style="display:none;">📅 다음달 근무등록을 스케줄탭에 해주세요!</div>
+
+  <div class="card" id="profileCard">
     <div class="row-between">
       <div>
         <div id="accountName">-</div>
@@ -38,7 +40,10 @@
         <button class="logout-btn" id="logoutBtn">로그아웃</button>
       </div>
     </div>
-    <div id="clockWidgetRoot"></div>
+    <div class="clock-humanity-row">
+      <button type="button" class="btn humanity-trigger-btn" id="humanityBtn" style="flex:1;">😠 인류애 바사삭</button>
+      <div id="clockWidgetRoot" style="flex:1;"></div>
+    </div>
     <a href="owner.html" id="backToOwnerBtn" class="btn secondary block" style="margin-top:10px; display:none;">사장님 계정으로 변경</a>
     <button id="deleteAccountBtn" style="margin-top:10px; background:none; border:none; padding:0; font-size:11.5px; color:var(--muted); text-decoration:underline; text-underline-offset:2px;">계정탈퇴하기</button>
   </div>
@@ -62,6 +67,8 @@
     </div>
   </div>
 </main>
+
+<div id="humanityOverlayRoot"></div>
 
 <nav class="bottom-tabs">
   <button class="bottom-tab" data-nav="share">
@@ -98,6 +105,26 @@
   </button>
 </nav>
 
+<script>
+// staff.js는 모듈이라 로드/실행이 살짝 늦다 — 그 사이에 이 파일에 그대로
+// 박혀있는 기본 탭(자재선택) 마크업이 한 프레임 먼저 그려져서, 새로고침할
+// 때마다 다른 탭에 있었어도 자재선택이 잠깐 스쳐 지나갔다. 주소창의
+// ?view=를 여기서 동기적으로 먼저 읽어 화면이 그려지기 전에 바로잡는다.
+// staff.js의 render()가 실제로 그 탭을 그리는 순간 #screen의 숨김은 풀린다.
+(function () {
+  var v = new URLSearchParams(location.search).get("view");
+  if (!v || v === "main") return;
+  var screen = document.getElementById("screen");
+  if (screen) screen.style.display = "none";
+  var profileCard = document.getElementById("profileCard");
+  if (profileCard) profileCard.style.display = "none";
+  var monthEndBanner = document.getElementById("monthEndBanner");
+  if (monthEndBanner) monthEndBanner.style.display = "none";
+  document.querySelectorAll(".bottom-tab[data-nav]").forEach(function (el) {
+    el.classList.toggle("active", el.dataset.nav === v);
+  });
+})();
+</script>
 <script type="module" src="js/staff.js"></script>
 <script src="js/register-sw.js"></script>
 </body>

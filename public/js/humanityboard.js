@@ -1,0 +1,263 @@
+// 인류애 바사삭 — 직원 홈 화면과 사장님 화면 양쪽에서 같은 버튼/오버레이를
+// 띄워 쓰는 공용 모듈. mountHumanityTrigger(triggerBtn, overlayRootEl, account)로
+// 붙여 쓴다. 전역 로그(humanityCracks)라 업무 데이터와는 완전히 분리되어 있다.
+import { db, collection, addDoc, deleteDoc, doc, updateDoc, onSnapshot, query, orderBy, serverTimestamp, arrayUnion, arrayRemove } from "./firebase-init.js";
+import { toast, escapeHtml, formatTimeLabel, formatDateLabel, dateStrOf } from "./util.js";
+import { avatarHtml } from "./avatar.js";
+
+let overlayRoot = null;
+let triggerBtnEl = null;
+let account = { name: "", phone: "" };
+let showOverlay = false;
+let list = []; // 전체 기록 — live, createdAt 내림차순
+let unsub = null;
+let draft = "";
+const openReplyFor = new Set();
+// 실시간으로 새 글/반응이 들어올 때마다 다시 그리는데, 답글 입력창에 value
+// 바인딩이 없으면 타이핑 중이던 내용이 날아간다 — id별로 기억해뒀다가 다시
+// 그릴 때 그대로 복원한다 (공유해요 게시판에서 겪은 것과 같은 버그).
+const replyDrafts = new Map();
+
+export function mountHumanityTrigger(triggerBtn, overlayRootEl, acc) {
+  overlayRoot = overlayRootEl;
+  triggerBtnEl = triggerBtn;
+  account = acc;
+  if (triggerBtn) triggerBtn.addEventListener("click", open);
+  ensureStarted();
+}
+
+function ensureStarted() {
+  if (unsub) return;
+  unsub = onSnapshot(query(collection(db, "humanityCracks"), orderBy("createdAt", "desc")), (snap) => {
+    list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    renderBadge();
+    if (showOverlay) renderOverlay();
+  });
+}
+
+function isNewToMe(it) {
+  return !(it.seenBy || []).includes(account.phone);
+}
+
+// 오버레이를 열어서 피드를 보는 순간 "확인했다"로 치고, 그 시점에 쌓여있던
+// 전부를 한 번에 seenBy 처리한다 — 공유해요 게시판과 달리 글 하나하나를
+// 따로 클릭해서 열어보는 구조가 아니라 열면 다 보이는 가벼운 피드라서.
+function markAllSeen() {
+  list.forEach((it) => {
+    if (isNewToMe(it)) {
+      updateDoc(doc(db, "humanityCracks", it.id), { seenBy: arrayUnion(account.phone) }).catch(() => {});
+    }
+  });
+}
+
+function renderBadge() {
+  if (!triggerBtnEl) return;
+  let wrap = triggerBtnEl.querySelector(".humanity-badge-wrap");
+  if (!wrap) {
+    wrap = document.createElement("span");
+    wrap.className = "humanity-badge-wrap";
+    triggerBtnEl.appendChild(wrap);
+  }
+  const unseen = list.filter(isNewToMe).length;
+  wrap.innerHTML = `
+    ${list.length > 0 ? `<span class="humanity-count-badge">+${list.length}</span>` : ""}
+    ${unseen > 0 ? `<span class="corner-badge">N</span>` : ""}
+  `;
+}
+
+function open() {
+  showOverlay = true;
+  markAllSeen();
+  renderBadge();
+  renderOverlay();
+}
+
+function close() {
+  showOverlay = false;
+  renderOverlay();
+}
+
+async function submit() {
+  const text = draft.trim();
+  if (!text) {
+    toast("무슨 일이 있었는지 적어주세요");
+    return;
+  }
+  await addDoc(collection(db, "humanityCracks"), {
+    reason: text,
+    staffName: account.name,
+    staffPhone: account.phone,
+    seenBy: [account.phone],
+    createdAt: serverTimestamp(),
+  });
+  draft = "";
+  toast("기록했어요 😮‍💨");
+  renderOverlay();
+}
+
+async function removeEntry(id) {
+  const it = list.find((x) => x.id === id);
+  if (!it || it.staffPhone !== account.phone) return;
+  if (!confirm("삭제할까요?")) return;
+  await deleteDoc(doc(db, "humanityCracks", id));
+}
+
+// 슬퍼요 하나뿐이라 토글(눌렀으면 취소, 안 눌렀으면 추가)로만 동작한다 —
+// 공유해요 게시판의 하트/슬픔/최고처럼 여러 반응 중 하나를 고르는 구조가
+// 아니라 단일 반응이라 더 단순하게 arrayUnion/arrayRemove만 쓴다.
+async function toggleSad(id) {
+  const it = list.find((x) => x.id === id);
+  if (!it) return;
+  const sadBy = it.sadBy || [];
+  const mine = sadBy.includes(account.phone);
+  await updateDoc(doc(db, "humanityCracks", id), {
+    sadBy: mine ? arrayRemove(account.phone) : arrayUnion(account.phone),
+  });
+}
+
+async function addReply(id, content) {
+  const text = (content || "").trim();
+  if (!text) {
+    toast("댓글 내용을 입력해주세요");
+    return;
+  }
+  const reply = { content: text, staffName: account.name, staffPhone: account.phone, createdAt: Date.now() };
+  await updateDoc(doc(db, "humanityCracks", id), { replies: arrayUnion(reply) });
+  replyDrafts.delete(id);
+  renderOverlay();
+}
+
+async function deleteReplyAt(id, idx) {
+  const it = list.find((x) => x.id === id);
+  const reply = it && it.replies && it.replies[idx];
+  if (!reply) return;
+  if (reply.staffPhone !== account.phone) {
+    toast("본인이 작성한 댓글만 삭제할 수 있어요");
+    return;
+  }
+  if (!confirm("댓글을 삭제할까요?")) return;
+  await updateDoc(doc(db, "humanityCracks", id), { replies: arrayRemove(reply) });
+}
+
+function repliesHtml(it) {
+  const replies = it.replies || [];
+  let html = "";
+  if (replies.length > 0) {
+    html += `<div class="reply-list">${replies.map((r, idx) => {
+      const mine = r.staffPhone === account.phone;
+      return `
+        <div class="reply-row">
+          ${avatarHtml(r.staffPhone, r.staffName, 18)}
+          <div class="reply-body">
+            <span class="reply-who">${escapeHtml(r.staffName || "")}님</span><span class="reply-content">${escapeHtml(r.content)}</span>
+            ${mine ? `<div class="reply-actions"><button class="reply-delete-btn" data-humanity-reply-delete="${it.id}" data-humanity-reply-idx="${idx}">삭제</button></div>` : ""}
+          </div>
+        </div>`;
+    }).join("")}</div>`;
+  }
+  if (openReplyFor.has(it.id)) {
+    html += `
+      <div class="reply-input-row">
+        <input type="text" class="reply-input" data-humanity-reply-for="${it.id}" placeholder="댓글 달기" value="${escapeHtml(replyDrafts.get(it.id) || "")}" />
+        <button class="reply-send-btn" data-humanity-reply-send="${it.id}">등록</button>
+      </div>`;
+  } else {
+    html += `<button class="reply-toggle-btn" data-humanity-reply-toggle="${it.id}">댓글달기</button>`;
+  }
+  return html;
+}
+
+function entryRowHtml(it) {
+  const sadBy = it.sadBy || [];
+  const mine = sadBy.includes(account.phone);
+  return `
+    <div class="humanity-row">
+      ${avatarHtml(it.staffPhone, it.staffName, 30)}
+      <div class="humanity-row-body">
+        <div class="humanity-row-head"><strong>${escapeHtml(it.staffName || "익명")}</strong><span class="humanity-row-time">${formatTimeLabel(it.createdAt)}</span></div>
+        <div class="humanity-row-text">${escapeHtml(it.reason || "")}</div>
+        <button class="humanity-sad-btn ${mine ? "active" : ""}" data-humanity-sad="${it.id}">😢${sadBy.length > 0 ? ` ${sadBy.length}` : ""}</button>
+        ${repliesHtml(it)}
+      </div>
+      ${it.staffPhone === account.phone ? `<button class="payroll-shift-delete-btn" data-humanity-delete="${it.id}">삭제</button>` : ""}
+    </div>`;
+}
+
+// 리스트가 길어질수록 "그날그날" 흐름으로 보는 게 한눈에 들어오지, 달력으로
+// 날짜 하나하나 눌러 들어가는 건 오히려 번거롭다는 피드백으로 캘린더에서
+// 되돌렸다 — createdAt 내림차순 리스트에서 날짜가 바뀔 때마다 구분선만 끼워
+// 넣는다.
+function listHtml() {
+  if (list.length === 0) return `<div class="empty" style="margin-top:12px;">아직 기록된 게 없어요.</div>`;
+  let html = "";
+  let lastDate = null;
+  for (const it of list) {
+    const d = dateStrOf(it.createdAt);
+    if (d !== lastDate) {
+      html += `<div class="humanity-date-header">${formatDateLabel(d)}</div>`;
+      lastDate = d;
+    }
+    html += entryRowHtml(it);
+  }
+  return html;
+}
+
+function overlayHtml() {
+  return `
+    <div class="payroll-form-overlay" id="humanityOverlay">
+      <div class="payroll-form-sheet">
+        <div class="row-between">
+          <div style="font-weight:800; font-size:16px;">💢 인류애 바사삭</div>
+          <button class="payroll-form-close-btn" id="humanityCloseBtn" aria-label="닫기">✕</button>
+        </div>
+        <div style="font-size:12px; color:var(--muted); margin:6px 0 14px;">오늘 인류애가 바사삭 깨진 순간이 있었다면 짧게 남겨보세요. 다같이 볼 수 있어요.</div>
+        <textarea id="humanityInput" class="humanity-input" placeholder="무슨 일이 있었나요?" rows="3">${escapeHtml(draft)}</textarea>
+        <button class="btn gold block" id="humanitySubmitBtn" style="margin-top:8px;">기록하기</button>
+        <div class="humanity-list" style="margin-top:16px;">${listHtml()}</div>
+      </div>
+    </div>`;
+}
+
+function renderOverlay() {
+  if (!overlayRoot) return;
+  overlayRoot.innerHTML = showOverlay ? overlayHtml() : "";
+  wireOverlay();
+}
+
+function wireOverlay() {
+  const overlay = document.getElementById("humanityOverlay");
+  if (!overlay) return;
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  document.getElementById("humanityCloseBtn").addEventListener("click", close);
+  const input = document.getElementById("humanityInput");
+  if (input) input.addEventListener("input", (e) => { draft = e.target.value; });
+  const submitBtn = document.getElementById("humanitySubmitBtn");
+  if (submitBtn) submitBtn.addEventListener("click", submit);
+
+  overlay.querySelectorAll("[data-humanity-delete]").forEach((el) => {
+    el.addEventListener("click", () => removeEntry(el.dataset.humanityDelete));
+  });
+  overlay.querySelectorAll("[data-humanity-sad]").forEach((el) => {
+    el.addEventListener("click", () => toggleSad(el.dataset.humanitySad));
+  });
+  overlay.querySelectorAll("[data-humanity-reply-toggle]").forEach((el) => {
+    el.addEventListener("click", () => {
+      openReplyFor.add(el.dataset.humanityReplyToggle);
+      renderOverlay();
+      const replyInput = overlay.querySelector(`.reply-input[data-humanity-reply-for="${el.dataset.humanityReplyToggle}"]`);
+      if (replyInput) replyInput.focus();
+    });
+  });
+  overlay.querySelectorAll("[data-humanity-reply-send]").forEach((el) => {
+    const id = el.dataset.humanityReplySend;
+    const replyInput = overlay.querySelector(`.reply-input[data-humanity-reply-for="${id}"]`);
+    el.addEventListener("click", () => addReply(id, replyInput.value));
+    replyInput.addEventListener("input", (e) => { replyDrafts.set(id, e.target.value); });
+    replyInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) addReply(id, replyInput.value);
+    });
+  });
+  overlay.querySelectorAll("[data-humanity-reply-delete]").forEach((el) => {
+    el.addEventListener("click", () => deleteReplyAt(el.dataset.humanityReplyDelete, Number(el.dataset.humanityReplyIdx)));
+  });
+}

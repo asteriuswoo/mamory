@@ -165,12 +165,60 @@ export function openImageLightbox(src, alt) {
   overlay.innerHTML = `
     <button class="img-lightbox-close" aria-label="닫기">✕</button>
     <img src="${src}" alt="${escapeHtml(alt || "")}" class="img-lightbox-img" />
+    <button class="img-lightbox-save" type="button">💾 저장</button>
   `;
   const close = () => overlay.remove();
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay || e.target.closest(".img-lightbox-close")) close();
   });
+  overlay.querySelector(".img-lightbox-save").addEventListener("click", () => saveImageToDevice(src));
   document.body.appendChild(overlay);
+}
+
+// Storage 버킷에 CORS 설정이 없어서, 사진 URL을 브라우저에서 바로 fetch()하면
+// "No 'Access-Control-Allow-Origin' header" 에러로 막힌다 — <img>로 그냥
+// 보여주는 건 CORS 없이도 되지만, 바이트를 읽어와 저장하려면 버킷 CORS가
+// 필요한데 그건 gsutil 같은 인프라 설정이라 앱 코드만으로는 바꿀 수 없다.
+// 대신 downloadImage 함수(서버라 CORS 제약이 없다)를 프록시로 거쳐서
+// 받아오면, 같은 바이트를 CORS 걱정 없이 가져올 수 있다.
+const DOWNLOAD_PROXY_URL = "https://asia-northeast3-mmth-order.cloudfunctions.net/downloadImage";
+
+function storagePathFromUrl(url) {
+  const m = url.match(/\/o\/([^?]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+async function saveImageToDevice(src) {
+  try {
+    const path = storagePathFromUrl(src);
+    const fetchUrl = path ? `${DOWNLOAD_PROXY_URL}?path=${encodeURIComponent(path)}` : src;
+    const res = await fetch(fetchUrl);
+    if (!res.ok) throw new Error("download failed");
+    const blob = await res.blob();
+    const filename = `mamory_${Date.now()}.jpg`;
+    const file = new File([blob], filename, { type: blob.type || "image/jpeg" });
+    // 모바일 사파리는 <a download>를 블롭에 제대로 적용하지 않고, 대신
+    // 파일 미리보기(QuickLook) 화면으로 아예 이동시켜버린다 — 누르자마자
+    // "다른 페이지로 넘어간" 것처럼 느껴지는 게 이 때문. 파일 공유를 지원하는
+    // 환경(iOS 15+ 등)에서는 그 자리에서 네이티브 공유시트를 띄우는 게
+    // 훨씬 자연스럽다("이미지 저장"이 그 시트 안에 바로 있다). 지원 안
+    // 하는 환경(대부분의 데스크톱 브라우저)에서만 기존 blob 앵커 다운로드로
+    // 대체한다.
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file] });
+      return;
+    }
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(blobUrl);
+  } catch (e) {
+    if (e.name !== "AbortError") toast("사진 저장에 실패했어요"); // 공유시트를 취소한 건 실패가 아니다
+  }
 }
 
 export function escapeHtml(str) {

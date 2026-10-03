@@ -1,12 +1,102 @@
 // 공유하기 (품절 공유 / 공유해요) — 직원 화면(staff.js)과 사장님 화면(share.js)에서
 // 공통으로 쓰는 렌더링/데이터 모듈. mountShareBoard(el, account)로 붙여 쓴다.
-import { db, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, getDocs, serverTimestamp, arrayUnion, arrayRemove, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
-import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, toast, escapeHtml, resizeImageFile, dayAccentClass, openImageLightbox } from "./util.js";
-import { avatarHtml, watchAccounts } from "./avatar.js";
+import { db, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, getDocs, query, orderBy, serverTimestamp, arrayUnion, arrayRemove, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
+import { todayStr, dateStrDaysAgo, dateStrOf, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, escapeHtml, resizeImageFile, dayAccentClass, openImageLightbox } from "./util.js";
+import { avatarHtml, watchAccounts, allAccounts } from "./avatar.js";
 
 const date = todayStr();
 const recentDates = Array.from({ length: 7 }, (_, i) => dateStrDaysAgo(i));
+const carryoverDates = Array.from({ length: 4 }, (_, i) => dateStrDaysAgo(i));
 const soldoutSuggestDates = Array.from({ length: 3 }, (_, i) => dateStrDaysAgo(i));
+
+// 품절공유/공유해요/레시피를 한 화면에 세로로 다 쌓아두면 댓글이 많이 달린
+// 쪽이 길어질수록 다른 섹션이 점점 아래로 밀려서 찾기 어려워진다 — 세그먼트
+// 탭으로 나눠서 한 번에 한 섹션만 보여준다. 새로고침해도 보던 탭 그대로
+// 떠야 하니 sessionStorage에 남겨두고 시작할 때 복원한다.
+const SHARE_TAB_KEY = "mamory_shareTab";
+function loadShareTab() {
+  try {
+    const saved = sessionStorage.getItem(SHARE_TAB_KEY);
+    return saved === "soldout" || saved === "note" || saved === "recipe" ? saved : "soldout";
+  } catch (e) {
+    return "soldout";
+  }
+}
+function saveShareTab() {
+  try {
+    sessionStorage.setItem(SHARE_TAB_KEY, shareTab);
+  } catch (e) {
+    // sessionStorage 불가 환경이면 그냥 이번 로드는 기본 탭으로 넘어간다.
+  }
+}
+let shareTab = loadShareTab(); // "soldout" | "note" | "recipe"
+
+// 탭마다 "내가 마지막으로 그 탭을 본 시각" 이후 새 글/답글/레시피가
+// 올라왔으면 N배지를 띄운다 — 기기(localStorage)에 계정별로 저장해서
+// 새로고침해도 유지된다. 처음 설치하는 순간엔 과거 글들이 전부 "새 글"로
+// 보이면 안 되니, 저장된 값이 없을 때는 지금 시각을 기준으로 삼는다.
+const TAB_SEEN_KEY = "mamory_shareTabSeenAt";
+let tabSeenAt = null;
+
+function loadTabSeen() {
+  try {
+    const all = JSON.parse(localStorage.getItem(TAB_SEEN_KEY) || "{}");
+    return all[account.phone] || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveTabSeen() {
+  try {
+    const all = JSON.parse(localStorage.getItem(TAB_SEEN_KEY) || "{}");
+    all[account.phone] = tabSeenAt;
+    localStorage.setItem(TAB_SEEN_KEY, JSON.stringify(all));
+  } catch (e) {
+    // localStorage 불가 환경이면 그냥 이번 세션만 배지가 덜 정확한 걸로 넘어간다.
+  }
+}
+
+function ensureTabSeenInit() {
+  if (tabSeenAt) return;
+  tabSeenAt = loadTabSeen() || { soldout: Date.now(), note: Date.now(), recipe: Date.now() };
+  saveTabSeen();
+}
+
+// createdAt은 Firestore Timestamp(게시물)일 수도, 그냥 ms 숫자(답글)일 수도
+// 있다 — 서버 확정 전 낙관적 쓰기는 tsMillis()가 Infinity를 주는데, 그건
+// "지금 막 생겼다"는 뜻이라 N배지 판단에선 오히려 적절하다(항상 더 최근으로 침).
+function activityMs(ts) {
+  if (typeof ts === "number") return ts;
+  return tsMillis(ts);
+}
+
+function tabActivityMs(tab) {
+  let max = 0;
+  if (tab === "soldout") {
+    shareTodayItems.filter((it) => it.type === "soldout").forEach((it) => {
+      max = Math.max(max, activityMs(it.createdAt));
+    });
+  } else if (tab === "note") {
+    shareTodayItems.filter((it) => it.type === "note").forEach((it) => {
+      max = Math.max(max, activityMs(it.createdAt));
+      (it.replies || []).forEach((r) => { max = Math.max(max, activityMs(r.createdAt)); });
+    });
+  } else if (tab === "recipe") {
+    recipeList.forEach((r) => { max = Math.max(max, activityMs(r.createdAt)); });
+  }
+  return max;
+}
+
+function tabHasUnseen(tab) {
+  if (tab === shareTab) return false; // 지금 보고 있는 탭은 당연히 안 띄운다
+  ensureTabSeenInit();
+  return tabActivityMs(tab) > (tabSeenAt[tab] || 0);
+}
+
+function tabNBadgeHtml(tab) {
+  return tabHasUnseen(tab) ? `<span class="tab-n-badge">N</span>` : "";
+}
 
 // 첨부 사진을 새 탭으로 열지 않고 그 자리에서 확대해서 보여준다 — 게시글에
 // 붙은 사진, 작성 중인 미리보기 사진 둘 다 대상.
@@ -85,9 +175,42 @@ function postTopRowHtml(it, isToday) {
   }
   return `
     <div class="post-top-row">
-      <div class="name">${isToday && isNewToMe(it) ? `<span class="tag new">N</span>` : ""}${escapeHtml(it.content)}</div>
+      <div class="name">${isToday && isNewToMe(it) ? `<span class="tag new">N</span>` : ""}${it.isNotice ? `<span class="notice-badge">📢 공지</span> ` : ""}${highlightMentions(escapeHtml(it.content))}</div>
       <div class="who">${formatDateLabel(shareDate)}${formatTimeLabel(it.createdAt) ? ` · ${formatTimeLabel(it.createdAt)}` : ""}</div>
     </div>`;
+}
+
+// @멘션 자동완성 후보 — 본인은 멘션할 이유가 없으니 빼고, "모두"를 맨 앞에 둔다.
+function mentionCandidates() {
+  return [{ phone: "all", name: "모두" }, ...allAccounts().filter((a) => a.phone !== account.phone)];
+}
+
+// 작성 중인 텍스트에서 "@이름" 패턴을 뽑아 실제 계정과 매칭한다 — 등록 시
+// 알림을 누구에게 보낼지 정하는 데 쓴다.
+function extractMentions(text) {
+  const accounts = allAccounts();
+  const phones = new Set();
+  let mentionsAll = false;
+  const re = /@([^\s@]+)/g;
+  let m;
+  while ((m = re.exec(text))) {
+    if (m[1] === "모두") { mentionsAll = true; continue; }
+    const found = accounts.find((a) => a.name === m[1]);
+    if (found) phones.add(found.phone);
+  }
+  return { mentions: [...phones], mentionsAll };
+}
+
+// 이미 escapeHtml을 거친 문자열 위에서만 동작 — "@이름"이 실제 계정 이름과
+// 일치할 때만 토글색 글씨로 감싼다(아무 @아무개나 다 색칠하면 오탐이 많다).
+function highlightMentions(escapedContent) {
+  const names = allAccounts().map((a) => a.name);
+  return escapedContent.replace(/@([^\s<]+)/g, (full, name) => {
+    if (name === "모두" || names.includes(name)) {
+      return `<span class="mention-tag">@${name}</span>`;
+    }
+    return full;
+  });
 }
 
 async function saveShareEdit(id, value) {
@@ -146,6 +269,21 @@ async function toggleReaction(itemId, key) {
 // for everything so opening the board doesn't show an input under every
 // note; a "댓글달기" button reveals it on demand instead.
 const openReplyFor = new Set();
+// 실시간으로 새 글/반응이 들어올 때마다 render()가 통째로 다시 그리는데,
+// 답글 입력창에 value 바인딩이 없으면 그 순간 타이핑 중이던 내용이
+// 날아간다 — itemId별로 입력 중인 텍스트를 여기 기억해뒀다가 다시 그릴 때
+// 그대로 복원한다.
+const replyDrafts = new Map();
+// 답글도 본문처럼 @멘션 + 사진첨부를 지원한다 — itemId별로 업로드된(아직
+// 전송 전) 사진 URL들과, "@" 입력 중인지 상태를 따로 들고 있는다(답글
+// 입력창이 여러 개 동시에 열려 있을 수 있어서 글 하나짜리 상태로는 부족하다).
+const replyDraftPhotos = new Map();
+const replyMentionState = new Map(); // itemId -> { active, startIndex, query }
+
+function replyPhotosHtml(photoUrls) {
+  if (!photoUrls || photoUrls.length === 0) return "";
+  return `<div class="receipt-photo-row" style="margin-top:4px;">${photoUrls.map((url) => `<img src="${url}" class="note-photo-thumb share-photo-trigger" alt="답글 사진" style="width:72px; height:72px;" />`).join("")}</div>`;
+}
 
 function repliesHtml(it) {
   const replies = it.replies || [];
@@ -173,7 +311,8 @@ function repliesHtml(it) {
         <div class="reply-row">
           ${avatarHtml(r.staffPhone, r.staffName, 18)}
           <div class="reply-body">
-            <span class="reply-who">${escapeHtml(r.staffName || "")}님</span><span class="reply-content">${escapeHtml(r.content)}</span>
+            <span class="reply-who">${escapeHtml(r.staffName || "")}님</span><span class="reply-content">${highlightMentions(escapeHtml(r.content))}</span>
+            ${replyPhotosHtml(r.photoUrls)}
             ${mine ? `<div class="reply-actions"><button class="reply-edit-btn" data-reply-edit="${key}">수정</button><button class="reply-delete-btn" data-reply-delete-item="${it.id}" data-reply-delete-idx="${idx}">삭제</button></div>` : ""}
           </div>
         </div>`;
@@ -181,10 +320,21 @@ function repliesHtml(it) {
       .join("")}</div>`;
   }
   if (openReplyFor.has(it.id)) {
+    const pendingPhotos = replyDraftPhotos.get(it.id) || [];
     html += `
       <div class="reply-input-row">
-        <input type="text" class="reply-input" data-reply-for="${it.id}" placeholder="답글 달기" />
+        <input type="text" class="reply-input" data-reply-for="${it.id}" placeholder="답글 달기 (@이름으로 멘션)" value="${escapeHtml(replyDrafts.get(it.id) || "")}" />
         <button class="reply-send-btn" data-reply-send="${it.id}">등록</button>
+      </div>
+      <div class="mention-suggest-box" data-reply-mention-box="${it.id}"></div>
+      <div class="photo-attach-row" style="flex-wrap:wrap; margin-top:4px;">
+        <input type="file" accept="image/*" data-reply-photo-input="${it.id}" multiple style="display:none;" />
+        ${pendingPhotos.map((url, i) => `
+          <div class="photo-preview">
+            <img src="${url}" alt="첨부 사진" class="share-photo-trigger" />
+            <button class="photo-remove-btn" data-reply-photo-remove="${it.id}" data-reply-photo-remove-idx="${i}">✕</button>
+          </div>`).join("")}
+        <button class="photo-add-btn" data-reply-photo-add="${it.id}">📷 사진 첨부</button>
       </div>`;
   } else {
     html += `<button class="reply-toggle-btn" data-reply-toggle="${it.id}">댓글달기</button>`;
@@ -192,13 +342,76 @@ function repliesHtml(it) {
   return html;
 }
 
-async function addReply(itemId, content) {
+async function onReplyPhotosSelected(itemId, files) {
+  if (!files || files.length === 0) return;
+  toast(files.length > 1 ? `사진 ${files.length}장 업로드 중...` : "사진 업로드 중...");
+  try {
+    const urls = [];
+    for (const file of files) {
+      const blob = await resizeImageFile(file);
+      const path = `notePhotos/${date}/reply_${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
+      const fileRef = ref(storage, path);
+      await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
+      urls.push(await getDownloadURL(fileRef));
+    }
+    replyDraftPhotos.set(itemId, [...(replyDraftPhotos.get(itemId) || []), ...urls]);
+    render();
+    toast("사진을 첨부했어요");
+  } catch (e) {
+    console.error(e);
+    toast("사진 업로드에 실패했어요");
+  }
+}
+
+function renderReplyMentionSuggestions(itemId) {
+  const box = rootEl.querySelector(`[data-reply-mention-box="${itemId}"]`);
+  if (!box) return;
+  const state = replyMentionState.get(itemId);
+  if (!state || !state.active) { box.innerHTML = ""; return; }
+  const q = state.query.trim();
+  const matches = mentionCandidates().filter((a) => !q || a.name.includes(q)).slice(0, 6);
+  if (matches.length === 0) { box.innerHTML = ""; return; }
+  box.innerHTML = matches.map((a) => `<button type="button" class="mention-suggest-btn" data-reply-mention-name="${escapeHtml(a.name)}">@${escapeHtml(a.name)}</button>`).join("");
+  box.querySelectorAll("[data-reply-mention-name]").forEach((el) => {
+    el.addEventListener("click", () => insertReplyMention(itemId, el.dataset.replyMentionName));
+  });
+}
+
+function insertReplyMention(itemId, name) {
+  const input = rootEl.querySelector(`.reply-input[data-reply-for="${itemId}"]`);
+  if (!input) return;
+  const state = replyMentionState.get(itemId) || { startIndex: 0 };
+  const current = replyDrafts.get(itemId) || "";
+  const cursor = input.selectionStart;
+  const before = current.slice(0, state.startIndex);
+  const after = current.slice(cursor);
+  const newText = `${before}@${name} ${after}`;
+  replyDrafts.set(itemId, newText);
+  input.value = newText;
+  const newCursor = before.length + name.length + 2;
+  replyMentionState.set(itemId, { active: false, startIndex: -1, query: "" });
+  renderReplyMentionSuggestions(itemId);
+  input.focus();
+  input.setSelectionRange(newCursor, newCursor);
+}
+
+async function addReply(itemId, content, photoUrls) {
   const text = (content || "").trim();
-  if (!text) {
+  const photos = photoUrls || [];
+  if (!text && photos.length === 0) {
     toast("답글 내용을 입력해주세요");
     return;
   }
-  const reply = { content: text, staffName: account.name, staffPhone: account.phone, createdAt: Date.now() };
+  const { mentions, mentionsAll } = extractMentions(text);
+  const reply = {
+    content: text,
+    photoUrls: photos,
+    mentions,
+    mentionsAll,
+    staffName: account.name,
+    staffPhone: account.phone,
+    createdAt: Date.now(),
+  };
   await updateDoc(doc(db, "shares", shareDate, "items", itemId), {
     replies: arrayUnion(reply),
   });
@@ -210,6 +423,9 @@ async function addReply(itemId, content) {
     const it = shareItems.find((x) => x.id === itemId);
     if (it) it.replies = [...(it.replies || []), reply];
   }
+  replyDrafts.delete(itemId);
+  replyDraftPhotos.delete(itemId);
+  replyMentionState.delete(itemId);
   render();
 }
 
@@ -262,10 +478,11 @@ const chipSoldoutItems = {}; // date -> [{id, date, content, resolved}] for that
 
 // 아직 해제 처리 안 된(=resolved 아닌) 지난 날짜들의 품절 게시물을 전부 모은다
 // — "어제" 하루만 보던 것과 달리, 며칠째 그대로여도 해제될 때까지 계속
-// 오늘 체크리스트에 이월된다. 오늘 새로 올라온 품절은 아직 대상이 아니다.
+// 오늘 체크리스트에 이월된다. 단, 너무 오래된 건 의미가 없으니 최근 4일치까지만
+// 이월 대상으로 본다. 오늘 새로 올라온 품절은 아직 대상이 아니다.
 function unresolvedCarryoverItems() {
   const out = [];
-  recentDates.forEach((d) => {
+  carryoverDates.forEach((d) => {
     if (d === date) return;
     (chipSoldoutItems[d] || []).forEach((it) => {
       if (!it.resolved) out.push(it);
@@ -297,24 +514,38 @@ function markSeen(items, forDate) {
   });
 }
 
-function render() {
-  if (!rootEl) return;
-  const isToday = shareDate === date;
-  const soldoutList = sortByTime(shareItems.filter((it) => it.type === "soldout"));
-  const noteList = sortByTime(shareItems.filter((it) => it.type === "note"));
+// 날짜칩으로 특정 날짜를 골라 보는 탭인데, "해제됨"만 그 선택과 무관하게
+// 항상 최근 7일 전체를 한꺼번에 보여주면 날짜칩을 고르는 의미가 없다 —
+// 그래서 지금 보고 있는 날짜(shareDate)에 "그날 해제된" 것만 추려서 보여준다.
+// 원글은 다른 날 올라왔더라도(이월된 품절), 실제로 해제 처리한 날짜가
+// shareDate와 같으면 여기 뜬다 — 그래서 원글 날짜 버킷(recentDates) 전체를
+// 훑어보되, 걸러내는 기준은 resolvedAt 쪽이다.
+function resolvedSoldoutItemsForDate(targetDate) {
+  const out = [];
+  recentDates.forEach((d) => {
+    (chipSoldoutItems[d] || []).forEach((it) => {
+      if (it.resolved && resolvedDateOf(it) === targetDate) out.push(it);
+    });
+  });
+  // activityMs()는 resolvedAt이 아예 없는 걸 "방금 막 생긴 낙관적 쓰기"로
+  // 보고 Infinity를 줘서 맨 앞으로 보내는데, 여기선 그게 아니라 이 필드가
+  // 생기기 전에 해제된 옛 항목이라 "없으면 제일 오래된 것"으로 취급해야
+  // 맞다 — 그래서 activityMs를 바로 쓰지 않고 없을 때 0으로 떨어뜨린다.
+  const resolvedMs = (it) => (it.resolvedAt ? activityMs(it.resolvedAt) : 0);
+  return out.sort((a, b) => resolvedMs(b) - resolvedMs(a));
+}
 
-  markSeen(shareItems, shareDate);
+// 해제됨 목록에 보여줄 날짜 — 원글이 "언제 올라왔는지"가 아니라 "언제
+// 해제됐는지"를 기준으로 묶어야 한다. resolvedAt이 없는(이 필드가 생기기
+// 전에 해제됐던) 옛 항목만 원글 날짜로 대체 표시한다.
+function resolvedDateOf(it) {
+  return it.resolvedAt ? dateStrOf(it.resolvedAt) : it.date;
+}
 
+function soldoutTabHtml(soldoutListAll, isToday) {
+  const activeList = soldoutListAll.filter((it) => !it.resolved);
   let html = `
-    <div class="card">
-      <div class="field" style="margin:0">
-        <label>최근 7일</label>
-        <div class="day-chip-row" id="shareDayChips"></div>
-      </div>
-    </div>
-`;
-  html += `
-    <div class="category-title section-title-soldout">📦 품절 공유<span class="sub">${soldoutList.length}건</span></div>
+    <div class="category-title section-title-soldout">📦 품절 공유<span class="sub">${activeList.length}건</span></div>
     <div class="card section-soldout">`;
 
   const carryoverItems = isToday ? unresolvedCarryoverItems() : [];
@@ -331,10 +562,10 @@ function render() {
       </div>`;
   }
 
-  if (soldoutList.length === 0) {
+  if (activeList.length === 0) {
     html += `<div class="empty">공유된 품절 자재가 없어요.</div>`;
   } else {
-    for (const it of soldoutList) {
+    for (const it of activeList) {
       html += `
         <div class="item-row">
           <div class="post-head">
@@ -358,7 +589,33 @@ function render() {
   }
   html += `</div>`;
 
-  html += `
+  const resolved = resolvedSoldoutItemsForDate(shareDate);
+  if (resolved.length > 0) {
+    html += `
+      <div class="category-title section-title-resolved">✅ 해제됨<span class="sub">${resolved.length}건</span></div>
+      <div class="card section-resolved">`;
+    resolved.forEach((it) => {
+      html += `
+        <div class="item-row">
+          <div class="post-head">
+            <div class="post-avatar-col">
+              ${avatarHtml(it.resolvedByPhone || it.staffPhone, it.resolvedByName || it.staffName, 36)}
+              <div class="post-author-name">${escapeHtml(it.resolvedByName || it.staffName || "")}</div>
+            </div>
+            <div class="post-top-row">
+              <div class="name"><span class="soldout-resolved-highlight">${escapeHtml(it.content)}</span></div>
+              <div class="who">${formatTimeLabel(it.createdAt) || ""}</div>
+            </div>
+          </div>
+        </div>`;
+    });
+    html += `</div>`;
+  }
+  return html;
+}
+
+function noteTabHtml(noteList, isToday) {
+  let html = `
     <div class="category-title section-title-note">💬 공유해요<span class="sub">${noteList.length}건</span></div>
     <div class="card section-note">`;
   if (noteList.length === 0) {
@@ -366,7 +623,7 @@ function render() {
   } else {
     for (const it of noteList) {
       html += `
-        <div class="item-row">
+        <div class="item-row ${it.isNotice ? "post-notice" : ""}">
           <div class="post-head">
             <div class="post-avatar-col">
               ${avatarHtml(it.staffPhone, it.staffName, 36)}
@@ -375,7 +632,10 @@ function render() {
             ${postTopRowHtml(it, isToday)}
           </div>
           <div class="post-body">
-            ${it.photoUrl ? `<img src="${it.photoUrl}" class="note-photo-thumb share-photo-trigger" alt="첨부 사진" />` : ""}
+            ${sharePhotoUrlsOf(it).length > 0 ? `
+            <div class="receipt-photo-row">
+              ${sharePhotoUrlsOf(it).map((url) => `<img src="${url}" class="note-photo-thumb share-photo-trigger" alt="첨부 사진" />`).join("")}
+            </div>` : ""}
             ${reactionRow(it, postActionsHtml(it))}
             ${repliesHtml(it)}
           </div>
@@ -385,23 +645,78 @@ function render() {
   if (isToday) {
     html += `
       <div style="margin-top:12px;">
-        <textarea id="noteInput" rows="3" placeholder="근무 중이 아닌 직원도 볼 수 있게 특이사항을 남겨주세요" style="width:100%;">${escapeHtml(noteDraftText)}</textarea>
-        <div class="photo-attach-row">
-          <input type="file" accept="image/*" id="noteImageInput" style="display:none;" />
-          ${notePhotoUrl ? `
+        <label class="notice-toggle-row">
+          <input type="checkbox" id="noteNoticeCheck" ${noteIsNotice ? "checked" : ""} />
+          <span>📢 공지로 등록</span>
+        </label>
+        <textarea id="noteInput" rows="3" placeholder="근무 중이 아닌 직원도 볼 수 있게 특이사항을 남겨주세요 (@이름으로 멘션할 수 있어요)" style="width:100%;">${escapeHtml(noteDraftText)}</textarea>
+        <div id="mentionSuggestBox" class="mention-suggest-box"></div>
+        <div class="photo-attach-row" style="flex-wrap:wrap;">
+          <input type="file" accept="image/*" id="noteImageInput" multiple style="display:none;" />
+          ${notePhotoUrls.map((url, i) => `
             <div class="photo-preview">
-              <img src="${notePhotoUrl}" alt="첨부 사진" class="share-photo-trigger" />
-              <button class="photo-remove-btn" id="noteImageRemoveBtn">✕</button>
-            </div>` : `<button class="photo-add-btn" id="noteImageAddBtn">📷 사진 첨부</button>`}
+              <img src="${url}" alt="첨부 사진" class="share-photo-trigger" />
+              <button class="photo-remove-btn" data-note-photo-remove="${i}">✕</button>
+            </div>`).join("")}
+          <button class="photo-add-btn" id="noteImageAddBtn">📷 사진 첨부</button>
         </div>
         <button class="btn gold block" id="noteAddBtn" style="margin-top:8px;">공유하기</button>
       </div>`;
   }
   html += `</div>`;
+  return html;
+}
+
+function render() {
+  if (!rootEl) return;
+  const isToday = shareDate === date;
+  const soldoutListAll = sortByTime(shareItems.filter((it) => it.type === "soldout"));
+  const noteListAll = sortByTime(shareItems.filter((it) => it.type === "note"));
+  const noteList = [...noteListAll.filter((it) => it.isNotice), ...noteListAll.filter((it) => !it.isNotice)];
+
+  markSeen(shareItems, shareDate);
+
+  // 지금 보고 있는 탭은 그 순간까지의 활동을 전부 본 걸로 쳐서 seenAt을
+  // 계속 최신으로 유지한다 — 다른 탭으로 넘어간 뒤에도 "내가 마지막으로 본
+  // 시점"이 정확하게 남아있게.
+  ensureTabSeenInit();
+  tabSeenAt[shareTab] = Date.now();
+  saveTabSeen();
+
+  let html = `
+    <div class="seg share-tab-seg">
+      <button type="button" class="${shareTab === "note" ? "active" : ""}" data-share-tab="note">💬 공유해요${tabNBadgeHtml("note")}</button>
+      <button type="button" class="${shareTab === "soldout" ? "active" : ""}" data-share-tab="soldout">📦 품절공유${tabNBadgeHtml("soldout")}</button>
+      <button type="button" class="${shareTab === "recipe" ? "active" : ""}" data-share-tab="recipe">📖 레시피${tabNBadgeHtml("recipe")}</button>
+    </div>`;
+
+  if (shareTab !== "recipe") {
+    html += `
+      <div class="card">
+        <div class="field" style="margin:0">
+          <label>최근 7일</label>
+          <div class="day-chip-row" id="shareDayChips"></div>
+        </div>
+      </div>`;
+  }
+
+  if (shareTab === "soldout") html += soldoutTabHtml(soldoutListAll, isToday);
+  else if (shareTab === "note") html += noteTabHtml(noteList, isToday);
+  else html += recipeTabHtml();
 
   rootEl.innerHTML = html;
-  wireShareDayChips();
+  if (shareTab !== "recipe") wireShareDayChips();
 
+  rootEl.querySelectorAll("[data-share-tab]").forEach((el) => {
+    el.addEventListener("click", () => { shareTab = el.dataset.shareTab; saveShareTab(); render(); });
+  });
+
+  if (shareTab === "soldout") wireSoldoutTab();
+  else if (shareTab === "note") wireNoteTab();
+  else wireRecipeTab();
+}
+
+function wireSoldoutTab() {
   const soldoutInput = rootEl.querySelector("#soldoutInput");
   const soldoutAddBtn = rootEl.querySelector("#soldoutAddBtn");
   if (soldoutAddBtn) {
@@ -410,30 +725,6 @@ function render() {
     // twice — once to finalize the composed character, once for real —
     // which would otherwise post the same entry twice.
     soldoutInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) addShareItem("soldout", soldoutInput.value); });
-  }
-  const noteInput = rootEl.querySelector("#noteInput");
-  if (noteInput) {
-    noteInput.addEventListener("input", (e) => { noteDraftText = e.target.value; });
-  }
-  const noteImageInput = rootEl.querySelector("#noteImageInput");
-  const noteImageAddBtn = rootEl.querySelector("#noteImageAddBtn");
-  const noteImageRemoveBtn = rootEl.querySelector("#noteImageRemoveBtn");
-  if (noteImageAddBtn) noteImageAddBtn.addEventListener("click", () => noteImageInput.click());
-  if (noteImageInput) noteImageInput.addEventListener("change", (e) => onNotePhotoSelected(e.target.files[0]));
-  if (noteImageRemoveBtn) noteImageRemoveBtn.addEventListener("click", () => { notePhotoUrl = ""; render(); });
-  const noteAddBtn = rootEl.querySelector("#noteAddBtn");
-  if (noteAddBtn) {
-    noteAddBtn.addEventListener("click", async () => {
-      const text = noteDraftText.trim();
-      if (!text) {
-        toast("내용을 입력해주세요");
-        return;
-      }
-      await addShareItem("note", text, notePhotoUrl);
-      noteDraftText = "";
-      notePhotoUrl = "";
-      render();
-    });
   }
   rootEl.querySelectorAll("[data-soldout-resolve-check]").forEach((el) => {
     el.addEventListener("change", () => {
@@ -455,30 +746,104 @@ function render() {
         toast("품절 해제한 메뉴를 체크해주세요");
         return;
       }
-      const names = checkedItems
-        .map((it) => (soldoutResolveTextDraft.has(it.id) ? soldoutResolveTextDraft.get(it.id) : it.content).trim())
-        .filter(Boolean)
-        .join(", ");
-      if (!names) {
-        toast("문구를 입력해주세요");
-        return;
-      }
-      await Promise.all(checkedItems.map((it) => updateDoc(doc(db, "shares", it.date, "items", it.id), { resolved: true })));
-      await addShareItem("note", `${names} 품절 해제했습니다😊`);
+      // 더 이상 공유해요에 "~품절 해제했습니다" 글을 따로 올리지 않는다 —
+      // 원글 자체를 resolved로 바꾸고(문구를 고쳤으면 그 내용도 반영), 품절공유
+      // 탭 안의 "해제됨" 구획에서 하이라이트로 보여주는 걸로 충분하다. 해제됨
+      // 구획엔 원글 작성자 대신 "해제 처리한 사람"의 프로필을 보여주는 게
+      // 맞아서 resolvedBy*도 같이 찍어두고, 표시되는 날짜/시각도 원글이
+      // 작성된 때가 아니라 "진짜로 해제 처리한" resolvedAt 기준이어야 해서
+      // 그것도 같이 찍는다 — 품절은 며칠 전에 올라왔어도 해제는 오늘 할 수
+      // 있으니, 원글 날짜로 보여주면 언제 해제됐는지가 거짓으로 보인다.
+      await Promise.all(checkedItems.map((it) => {
+        const text = (soldoutResolveTextDraft.has(it.id) ? soldoutResolveTextDraft.get(it.id) : it.content).trim();
+        return updateDoc(doc(db, "shares", it.date, "items", it.id), {
+          resolved: true,
+          content: text || it.content,
+          resolvedByPhone: account.phone,
+          resolvedByName: account.name,
+          resolvedAt: serverTimestamp(),
+        });
+      }));
       // 로그를 다시 fetch하지 않아도 체크리스트에서 바로 사라지도록 캐시된
       // 항목 자체를 patch — chipSoldoutItems[it.date] 안의 같은 객체를
-      // 참조하고 있어서 이렇게만 해도 다음 render()에 반영된다.
+      // 참조하고 있어서 이렇게만 해도 다음 render()에 반영된다. resolvedAt은
+      // serverTimestamp()라 로컬에선 바로 못 쓰니, replies의 클라이언트
+      // 타임스탬프 패턴과 같이 지금 시각(ms)으로 대신 채워둔다 — 다음
+      // getDocs 때 진짜 서버 값으로 덮어써진다.
       checkedItems.forEach((it) => {
         it.resolved = true;
+        it.resolvedByPhone = account.phone;
+        it.resolvedByName = account.name;
+        it.resolvedAt = Date.now();
         soldoutResolveChecked.delete(it.id);
         soldoutResolveTextDraft.delete(it.id);
       });
+      toast("해제 처리했어요");
       render();
     });
   }
-  rootEl.querySelectorAll("[data-share-remove]").forEach((el) => {
-    el.addEventListener("click", () => deleteShareItem(el.dataset.shareRemove));
+  wireCommonPostActions();
+}
+
+function wireNoteTab() {
+  const noteNoticeCheck = rootEl.querySelector("#noteNoticeCheck");
+  if (noteNoticeCheck) {
+    // 브라우저가 새로고침 시 체크박스를 (우리 HTML엔 checked 속성이 없는데도)
+    // 자기 멋대로 이전 상태로 복원해둘 때가 있다 — 그 상태가 실제 전송될
+    // noteIsNotice 값과 어긋나지 않도록, 그릴 때마다 우리가 들고 있는 값으로
+    // 강제로 맞춰둔다.
+    noteNoticeCheck.checked = noteIsNotice;
+    noteNoticeCheck.addEventListener("change", (e) => { noteIsNotice = e.target.checked; });
+  }
+  const noteInput = rootEl.querySelector("#noteInput");
+  if (noteInput) {
+    noteInput.addEventListener("input", (e) => {
+      noteDraftText = e.target.value;
+      const cursor = e.target.selectionStart;
+      const before = noteDraftText.slice(0, cursor);
+      const atIndex = before.lastIndexOf("@");
+      if (atIndex !== -1 && !/\s/.test(before.slice(atIndex + 1))) {
+        mentionActive = true;
+        mentionStartIndex = atIndex;
+        mentionQuery = before.slice(atIndex + 1);
+      } else {
+        mentionActive = false;
+      }
+      renderMentionSuggestions();
+    });
+  }
+  const noteImageInput = rootEl.querySelector("#noteImageInput");
+  const noteImageAddBtn = rootEl.querySelector("#noteImageAddBtn");
+  if (noteImageAddBtn) noteImageAddBtn.addEventListener("click", () => noteImageInput.click());
+  if (noteImageInput) {
+    noteImageInput.addEventListener("change", (e) => {
+      onNotePhotosSelected(Array.from(e.target.files || []));
+      e.target.value = "";
+    });
+  }
+  rootEl.querySelectorAll("[data-note-photo-remove]").forEach((el) => {
+    el.addEventListener("click", () => {
+      notePhotoUrls.splice(Number(el.dataset.notePhotoRemove), 1);
+      render();
+    });
   });
+  const noteAddBtn = rootEl.querySelector("#noteAddBtn");
+  if (noteAddBtn) {
+    noteAddBtn.addEventListener("click", async () => {
+      const text = noteDraftText.trim();
+      if (!text) {
+        toast("내용을 입력해주세요");
+        return;
+      }
+      const { mentions, mentionsAll } = extractMentions(text);
+      await addShareItem("note", text, notePhotoUrls, { isNotice: noteIsNotice, mentions, mentionsAll });
+      noteDraftText = "";
+      notePhotoUrls = [];
+      noteIsNotice = false;
+      mentionActive = false;
+      render();
+    });
+  }
   rootEl.querySelectorAll("[data-react-id]").forEach((el) => {
     el.addEventListener("click", () => toggleReaction(el.dataset.reactId, el.dataset.reactKey));
   });
@@ -493,40 +858,49 @@ function render() {
   rootEl.querySelectorAll("[data-reply-send]").forEach((el) => {
     const itemId = el.dataset.replySend;
     const input = rootEl.querySelector(`.reply-input[data-reply-for="${itemId}"]`);
-    el.addEventListener("click", () => addReply(itemId, input.value));
+    el.addEventListener("click", () => addReply(itemId, input.value, replyDraftPhotos.get(itemId) || []));
+    input.addEventListener("input", (e) => {
+      replyDrafts.set(itemId, e.target.value);
+      const cursor = e.target.selectionStart;
+      const before = e.target.value.slice(0, cursor);
+      const atIndex = before.lastIndexOf("@");
+      if (atIndex !== -1 && !/\s/.test(before.slice(atIndex + 1))) {
+        replyMentionState.set(itemId, { active: true, startIndex: atIndex, query: before.slice(atIndex + 1) });
+      } else {
+        replyMentionState.set(itemId, { active: false, startIndex: -1, query: "" });
+      }
+      renderReplyMentionSuggestions(itemId);
+    });
     input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.isComposing) addReply(itemId, input.value);
+      if (e.key === "Enter" && !e.isComposing) addReply(itemId, input.value, replyDraftPhotos.get(itemId) || []);
+    });
+  });
+  rootEl.querySelectorAll("[data-reply-photo-add]").forEach((el) => {
+    const itemId = el.dataset.replyPhotoAdd;
+    el.addEventListener("click", () => {
+      const input = rootEl.querySelector(`[data-reply-photo-input="${itemId}"]`);
+      if (input) input.click();
+    });
+  });
+  rootEl.querySelectorAll("[data-reply-photo-input]").forEach((el) => {
+    const itemId = el.dataset.replyPhotoInput;
+    el.addEventListener("change", (e) => {
+      onReplyPhotosSelected(itemId, Array.from(e.target.files || []));
+      e.target.value = "";
+    });
+  });
+  rootEl.querySelectorAll("[data-reply-photo-remove]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const itemId = el.dataset.replyPhotoRemove;
+      const idx = Number(el.dataset.replyPhotoRemoveIdx);
+      const arr = replyDraftPhotos.get(itemId) || [];
+      arr.splice(idx, 1);
+      replyDraftPhotos.set(itemId, arr);
+      render();
     });
   });
   rootEl.querySelectorAll("[data-reply-delete-item]").forEach((el) => {
     el.addEventListener("click", () => deleteReplyAt(el.dataset.replyDeleteItem, Number(el.dataset.replyDeleteIdx)));
-  });
-  rootEl.querySelectorAll("[data-share-edit]").forEach((el) => {
-    el.addEventListener("click", () => {
-      const it = shareItems.find((x) => x.id === el.dataset.shareEdit);
-      if (!it) return;
-      editingItems.set(it.id, it.content);
-      render();
-      const input = rootEl.querySelector(`[data-edit-input="${it.id}"]`);
-      if (input) {
-        input.focus();
-        input.setSelectionRange(input.value.length, input.value.length);
-      }
-    });
-  });
-  rootEl.querySelectorAll("[data-edit-save]").forEach((el) => {
-    const id = el.dataset.editSave;
-    const input = rootEl.querySelector(`[data-edit-input="${id}"]`);
-    el.addEventListener("click", () => saveShareEdit(id, input.value));
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.isComposing && input.tagName !== "TEXTAREA") saveShareEdit(id, input.value);
-    });
-  });
-  rootEl.querySelectorAll("[data-edit-cancel]").forEach((el) => {
-    el.addEventListener("click", () => {
-      editingItems.delete(el.dataset.editCancel);
-      render();
-    });
   });
   rootEl.querySelectorAll("[data-reply-edit]").forEach((el) => {
     el.addEventListener("click", () => {
@@ -555,6 +929,43 @@ function render() {
   rootEl.querySelectorAll("[data-reply-edit-cancel]").forEach((el) => {
     el.addEventListener("click", () => {
       editingReplies.delete(el.dataset.replyEditCancel);
+      render();
+    });
+  });
+  wireCommonPostActions();
+}
+
+// 품절공유/공유해요 둘 다 postActionsHtml(수정/삭제)을 공유하므로, 지금 떠
+// 있는 탭에 맞게 한 번만 와이어링한다 — 다른 탭엔 해당 요소가 없으니 그냥
+// 매치가 0건일 뿐 해롭지 않다.
+function wireCommonPostActions() {
+  rootEl.querySelectorAll("[data-share-remove]").forEach((el) => {
+    el.addEventListener("click", () => deleteShareItem(el.dataset.shareRemove));
+  });
+  rootEl.querySelectorAll("[data-share-edit]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const it = shareItems.find((x) => x.id === el.dataset.shareEdit);
+      if (!it) return;
+      editingItems.set(it.id, it.content);
+      render();
+      const input = rootEl.querySelector(`[data-edit-input="${it.id}"]`);
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    });
+  });
+  rootEl.querySelectorAll("[data-edit-save]").forEach((el) => {
+    const id = el.dataset.editSave;
+    const input = rootEl.querySelector(`[data-edit-input="${id}"]`);
+    el.addEventListener("click", () => saveShareEdit(id, input.value));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing && input.tagName !== "TEXTAREA") saveShareEdit(id, input.value);
+    });
+  });
+  rootEl.querySelectorAll("[data-edit-cancel]").forEach((el) => {
+    el.addEventListener("click", () => {
+      editingItems.delete(el.dataset.editCancel);
       render();
     });
   });
@@ -613,7 +1024,7 @@ function loadAllShareChipCounts() {
         chipCounts[d] = snap.size;
         chipUnseen[d] = snap.docs.some((doc) => !(doc.data().seenBy || []).includes(account.phone));
         const soldoutDocs = snap.docs.filter((doc) => doc.data().type === "soldout");
-        chipSoldoutItems[d] = soldoutDocs.map((doc) => ({ id: doc.id, date: d, content: doc.data().content, resolved: !!doc.data().resolved }));
+        chipSoldoutItems[d] = soldoutDocs.map((doc) => ({ id: doc.id, date: d, content: doc.data().content, resolved: !!doc.data().resolved, staffName: doc.data().staffName, staffPhone: doc.data().staffPhone, resolvedByName: doc.data().resolvedByName, resolvedByPhone: doc.data().resolvedByPhone, resolvedAt: doc.data().resolvedAt, createdAt: doc.data().createdAt }));
         // Today's own render depends on every past day's chipSoldoutItems
         // (the carry-forward 품절 해제 checklist), not just the date
         // currently being browsed.
@@ -631,16 +1042,20 @@ function wireShareDayChipsIfMounted() {
   if (rootEl && rootEl.querySelector("#shareDayChips")) wireShareDayChips();
 }
 
-async function addShareItem(type, content, photoUrl) {
+async function addShareItem(type, content, photoUrls, options) {
   const text = (content || "").trim();
   if (!text) {
     toast(type === "soldout" ? "품절된 자재 이름을 입력해주세요" : "내용을 입력해주세요");
     return;
   }
+  const opts = options || {};
   await addDoc(collection(db, "shares", date, "items"), {
     type,
     content: text,
-    photoUrl: photoUrl || "",
+    photoUrls: photoUrls && photoUrls.length > 0 ? photoUrls : [],
+    isNotice: !!opts.isNotice,
+    mentions: opts.mentions || [],
+    mentionsAll: !!opts.mentionsAll,
     staffName: account.name,
     staffPhone: account.phone,
     seenBy: [account.phone],
@@ -649,21 +1064,67 @@ async function addShareItem(type, content, photoUrl) {
   toast("공유했어요");
 }
 
+// 옛 게시글은 photoUrl(단수) 필드 하나였고, 지금은 여러 장을 담는
+// photoUrls(배열)로 바뀌었다 — 어느 쪽으로 저장됐든 한 번에 뽑아 쓰기 위한
+// 헬퍼. 표시할 땐 항상 이 함수를 거친다.
+function sharePhotoUrlsOf(it) {
+  if (it.photoUrls && it.photoUrls.length > 0) return it.photoUrls;
+  return it.photoUrl ? [it.photoUrl] : [];
+}
+
 // Draft state for the "공유해요" composer — kept outside render() so
 // re-rendering (e.g. from an unrelated reaction elsewhere) doesn't wipe
 // whatever the user is mid-typing or already attached.
 let noteDraftText = "";
-let notePhotoUrl = "";
+let notePhotoUrls = [];
+let noteIsNotice = false;
 
-async function onNotePhotoSelected(file) {
-  if (!file) return;
-  toast("사진 업로드 중...");
+// @멘션 자동완성 입력 상태 — "@"를 입력하는 순간부터 커서가 공백을 만날
+// 때까지를 "멘션 입력 중"으로 보고, 후보 목록을 textarea 바로 아래에 띄운다.
+let mentionActive = false;
+let mentionStartIndex = -1;
+let mentionQuery = "";
+
+function renderMentionSuggestions() {
+  const box = rootEl.querySelector("#mentionSuggestBox");
+  if (!box) return;
+  if (!mentionActive) { box.innerHTML = ""; return; }
+  const q = mentionQuery.trim();
+  const matches = mentionCandidates().filter((a) => !q || a.name.includes(q)).slice(0, 6);
+  if (matches.length === 0) { box.innerHTML = ""; return; }
+  box.innerHTML = matches.map((a) => `<button type="button" class="mention-suggest-btn" data-mention-name="${escapeHtml(a.name)}">@${escapeHtml(a.name)}</button>`).join("");
+  box.querySelectorAll("[data-mention-name]").forEach((el) => {
+    el.addEventListener("click", () => insertMention(el.dataset.mentionName));
+  });
+}
+
+function insertMention(name) {
+  const input = rootEl.querySelector("#noteInput");
+  if (!input) return;
+  const cursor = input.selectionStart;
+  const before = noteDraftText.slice(0, mentionStartIndex);
+  const after = noteDraftText.slice(cursor);
+  const newText = `${before}@${name} ${after}`;
+  noteDraftText = newText;
+  input.value = newText;
+  const newCursor = before.length + name.length + 2;
+  mentionActive = false;
+  renderMentionSuggestions();
+  input.focus();
+  input.setSelectionRange(newCursor, newCursor);
+}
+
+async function onNotePhotosSelected(files) {
+  if (!files || files.length === 0) return;
+  toast(files.length > 1 ? `사진 ${files.length}장 업로드 중...` : "사진 업로드 중...");
   try {
-    const blob = await resizeImageFile(file);
-    const path = `notePhotos/${date}/share_${account.phone}_${Date.now()}.jpg`;
-    const fileRef = ref(storage, path);
-    await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
-    notePhotoUrl = await getDownloadURL(fileRef);
+    for (const file of files) {
+      const blob = await resizeImageFile(file);
+      const path = `notePhotos/${date}/share_${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
+      const fileRef = ref(storage, path);
+      await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
+      notePhotoUrls.push(await getDownloadURL(fileRef));
+    }
     render();
     toast("사진을 첨부했어요");
   } catch (e) {
@@ -756,4 +1217,465 @@ export function getTodayShareCount() {
 
 export function getTodayUnseenCount(myPhone) {
   return shareTodayItems.filter((it) => !(it.seenBy || []).includes(myPhone)).length;
+}
+
+// ---- 메뉴 레시피 (공유하기 > 레시피 탭) ----
+// 날짜별로 나뉘는 품절공유/공유해요와 달리 하루 단위 개념이 없는 카탈로그라,
+// 별도의 flat 컬렉션(recipes)에 쌓아두고 등록일 역순으로 보여준다.
+let recipeList = [];
+let recipeUnsub = null;
+let recipeDraftName = "";
+let recipeDraftInstructions = "";
+let recipeDraftStatus = null; // "new" | "existing" | null(아직 안 고름)
+let recipePhotoUrls = [];
+
+// 레시피변경(신메뉴/기존메뉴)과 단종 소식은 완전히 다른 용도라 레시피 탭
+// 안에서도 또 한 번 세그먼트 탭으로 나눈다 — 둘 다 같은 recipes 컬렉션에
+// status 필드로만 구분해 쌓이지만, 작성 폼과 목록은 서로 다르게 보여준다.
+const RECIPE_SUB_TAB_KEY = "mamory_recipeSubTab";
+function loadRecipeSubTab() {
+  try {
+    const saved = sessionStorage.getItem(RECIPE_SUB_TAB_KEY);
+    return saved === "change" || saved === "discontinued" ? saved : "change";
+  } catch (e) {
+    return "change";
+  }
+}
+function saveRecipeSubTab() {
+  try {
+    sessionStorage.setItem(RECIPE_SUB_TAB_KEY, recipeSubTab);
+  } catch (e) {
+    // sessionStorage 불가 환경이면 그냥 이번 로드는 기본 탭으로 넘어간다.
+  }
+}
+let recipeSubTab = loadRecipeSubTab(); // "change" | "discontinued"
+let discoDraftName = "";
+let discoDraftNote = "";
+let discoPhotoUrls = [];
+
+// 등록 후에도 틀린 부분을 고칠 수 있어야 해서, 한 번에 하나씩만 수정 모드로
+// 들어간다 — editingItems(품절/공유)와 같은 "id -> 수정 중" 패턴.
+let editingRecipeId = null;
+let editRecipeDraft = { menuName: "", instructions: "", status: null, photoUrls: [] };
+
+function ensureRecipesStarted() {
+  if (recipeUnsub) return;
+  recipeUnsub = onSnapshot(query(collection(db, "recipes"), orderBy("createdAt", "desc")), (snap) => {
+    recipeList = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    if (shareTab === "recipe") render();
+  });
+}
+
+async function uploadRecipePhotos(files) {
+  const urls = [];
+  for (const file of files) {
+    const blob = await resizeImageFile(file);
+    const path = `notePhotos/recipes/${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
+    const fileRef = ref(storage, path);
+    await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
+    urls.push(await getDownloadURL(fileRef));
+  }
+  return urls;
+}
+
+async function onRecipePhotosSelected(files) {
+  if (!files || files.length === 0) return;
+  toast(files.length > 1 ? `사진 ${files.length}장 업로드 중...` : "사진 업로드 중...");
+  try {
+    recipePhotoUrls.push(...(await uploadRecipePhotos(files)));
+    render();
+    toast("사진을 첨부했어요");
+  } catch (e) {
+    console.error(e);
+    toast("사진 업로드에 실패했어요");
+  }
+}
+
+async function onEditRecipePhotosSelected(files) {
+  if (!files || files.length === 0) return;
+  toast(files.length > 1 ? `사진 ${files.length}장 업로드 중...` : "사진 업로드 중...");
+  try {
+    editRecipeDraft.photoUrls.push(...(await uploadRecipePhotos(files)));
+    render();
+    toast("사진을 첨부했어요");
+  } catch (e) {
+    console.error(e);
+    toast("사진 업로드에 실패했어요");
+  }
+}
+
+async function onDiscoPhotosSelected(files) {
+  if (!files || files.length === 0) return;
+  toast(files.length > 1 ? `사진 ${files.length}장 업로드 중...` : "사진 업로드 중...");
+  try {
+    discoPhotoUrls.push(...(await uploadRecipePhotos(files)));
+    render();
+    toast("사진을 첨부했어요");
+  } catch (e) {
+    console.error(e);
+    toast("사진 업로드에 실패했어요");
+  }
+}
+
+async function submitRecipe() {
+  const menuName = recipeDraftName.trim();
+  const instructions = recipeDraftInstructions.trim();
+  if (!menuName) {
+    toast("메뉴 이름을 입력해주세요");
+    return;
+  }
+  if (!instructions) {
+    toast("제조법을 입력해주세요");
+    return;
+  }
+  if (!recipeDraftStatus) {
+    toast("신메뉴/기존메뉴 상태를 선택해주세요");
+    return;
+  }
+  await addDoc(collection(db, "recipes"), {
+    menuName,
+    instructions,
+    status: recipeDraftStatus,
+    photoUrls: recipePhotoUrls,
+    staffName: account.name,
+    staffPhone: account.phone,
+    createdAt: serverTimestamp(),
+  });
+  recipeDraftName = "";
+  recipeDraftInstructions = "";
+  recipeDraftStatus = null;
+  recipePhotoUrls = [];
+  toast("레시피를 등록했어요");
+  render();
+}
+
+// 단종은 "제조법"이 필요 없는, 메뉴 이름 + (선택) 사유 정도의 짧은 공지라
+// 레시피변경과는 작성 폼 자체를 분리했다 — 같은 recipes 컬렉션에
+// status:"discontinued"로 쌓여서 단종 탭에서만 걸러 보여준다.
+async function submitDiscontinued() {
+  const menuName = discoDraftName.trim();
+  if (!menuName) {
+    toast("메뉴 이름을 입력해주세요");
+    return;
+  }
+  await addDoc(collection(db, "recipes"), {
+    menuName,
+    instructions: discoDraftNote.trim(),
+    status: "discontinued",
+    photoUrls: discoPhotoUrls,
+    staffName: account.name,
+    staffPhone: account.phone,
+    createdAt: serverTimestamp(),
+  });
+  discoDraftName = "";
+  discoDraftNote = "";
+  discoPhotoUrls = [];
+  toast("단종 소식을 공유했어요");
+  render();
+}
+
+function startEditRecipe(id) {
+  const r = recipeList.find((x) => x.id === id);
+  if (!r || r.staffPhone !== account.phone) {
+    toast("본인이 등록한 레시피만 수정할 수 있어요");
+    return;
+  }
+  editingRecipeId = id;
+  editRecipeDraft = {
+    menuName: r.menuName,
+    instructions: r.instructions,
+    status: r.status || null,
+    photoUrls: [...(r.photoUrls || [])],
+  };
+  render();
+}
+
+function cancelEditRecipe() {
+  editingRecipeId = null;
+  render();
+}
+
+async function saveEditRecipe() {
+  const menuName = editRecipeDraft.menuName.trim();
+  const instructions = editRecipeDraft.instructions.trim();
+  const isDisco = editRecipeDraft.status === "discontinued";
+  if (!menuName) {
+    toast("메뉴 이름을 입력해주세요");
+    return;
+  }
+  // 단종 항목은 제조법/상태 선택이 아예 없는 폼이라 그 둘은 검사하지 않는다.
+  if (!isDisco && !instructions) {
+    toast("제조법을 입력해주세요");
+    return;
+  }
+  if (!isDisco && !editRecipeDraft.status) {
+    toast("신메뉴/기존메뉴 상태를 선택해주세요");
+    return;
+  }
+  await updateDoc(doc(db, "recipes", editingRecipeId), {
+    menuName,
+    instructions,
+    status: editRecipeDraft.status,
+    photoUrls: editRecipeDraft.photoUrls,
+  });
+  editingRecipeId = null;
+  toast("수정했어요");
+  render();
+}
+
+async function deleteRecipe(id) {
+  const r = recipeList.find((x) => x.id === id);
+  if (!r || r.staffPhone !== account.phone) {
+    toast("본인이 등록한 레시피만 삭제할 수 있어요");
+    return;
+  }
+  if (!confirm("이 레시피를 삭제할까요?")) return;
+  await deleteDoc(doc(db, "recipes", id));
+}
+
+function recipeStatusBadgeHtml(status) {
+  if (status === "new") return `<span class="recipe-status-badge new">NEW</span>`;
+  if (status === "existing") return `<span class="recipe-status-badge existing">기존</span>`;
+  if (status === "discontinued") return `<span class="recipe-status-badge discontinued">단종</span>`;
+  return "";
+}
+
+function recipeStatusRowHtml(selected, dataAttr) {
+  return `
+    <div class="recipe-status-row">
+      <button type="button" class="recipe-status-btn ${selected === "new" ? "active" : ""}" data-${dataAttr}="new">신메뉴</button>
+      <button type="button" class="recipe-status-btn ${selected === "existing" ? "active" : ""}" data-${dataAttr}="existing">기존메뉴</button>
+    </div>`;
+}
+
+function recipeCardHtml(r, idx) {
+  if (editingRecipeId === r.id) {
+    const isDisco = editRecipeDraft.status === "discontinued";
+    return `
+      <div class="recipe-card recipe-edit-form ${idx > 0 ? "recipe-card-divider" : ""}">
+        <div class="field">
+          <label>메뉴 이름</label>
+          <input type="text" id="editRecipeNameInput" value="${escapeHtml(editRecipeDraft.menuName)}" />
+        </div>
+        ${isDisco ? "" : `
+        <div class="field">
+          <label>메뉴 상태</label>
+          ${recipeStatusRowHtml(editRecipeDraft.status, "edit-recipe-status")}
+        </div>`}
+        <div class="field">
+          <label>${isDisco ? "비고 (선택)" : "제조법"}</label>
+          <textarea id="editRecipeInstructionsInput" rows="${isDisco ? 2 : 4}" placeholder="${isDisco ? "단종 사유 등 (선택)" : ""}">${escapeHtml(editRecipeDraft.instructions)}</textarea>
+        </div>
+        <div class="photo-attach-row" style="flex-wrap:wrap;">
+          <input type="file" accept="image/*" id="editRecipePhotoInput" multiple style="display:none;" />
+          ${editRecipeDraft.photoUrls.map((url, i) => `
+            <div class="photo-preview">
+              <img src="${url}" alt="첨부 사진" class="share-photo-trigger" />
+              <button class="photo-remove-btn" data-edit-recipe-photo-remove="${i}">✕</button>
+            </div>`).join("")}
+          <button class="photo-add-btn" id="editRecipePhotoAddBtn">📷 사진 첨부</button>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button type="button" class="btn secondary" id="editRecipeCancelBtn" style="flex:1;">취소</button>
+          <button type="button" class="btn gold" id="editRecipeSaveBtn" style="flex:1;">저장</button>
+        </div>
+      </div>`;
+  }
+  return `
+    <div class="recipe-card ${idx > 0 ? "recipe-card-divider" : ""}">
+      <div class="post-head">
+        <div class="post-avatar-col">
+          ${avatarHtml(r.staffPhone, r.staffName, 32)}
+          <div class="post-author-name">${escapeHtml(r.staffName || "")}</div>
+        </div>
+        <div class="post-top-row">
+          <div class="name">${recipeStatusBadgeHtml(r.status)}${escapeHtml(r.menuName)}</div>
+          <div class="who">${formatTimestampLabel(r.createdAt)}</div>
+        </div>
+      </div>
+      ${r.instructions ? `<div class="recipe-instructions">${escapeHtml(r.instructions).replace(/\n/g, "<br>")}</div>` : ""}
+      ${(r.photoUrls || []).length > 0 ? `
+      <div class="receipt-photo-row" style="margin-top:8px;">
+        ${r.photoUrls.map((url) => `<img src="${url}" class="note-photo-thumb share-photo-trigger" alt="레시피 사진" />`).join("")}
+      </div>` : ""}
+      ${r.staffPhone === account.phone ? `
+      <div class="post-actions" style="margin-top:6px;">
+        <button class="post-edit-btn" data-recipe-edit="${r.id}">수정</button>
+        <button class="post-delete-btn" data-recipe-delete="${r.id}">삭제</button>
+      </div>` : ""}
+    </div>`;
+}
+
+function recipeChangeTabHtml() {
+  const list = recipeList.filter((r) => r.status !== "discontinued");
+  let html = `
+    <div class="category-title section-title-recipe">📖 레시피변경<span class="sub">${list.length}건</span></div>
+    <div class="card section-recipe">
+      <div class="field">
+        <label>메뉴 이름</label>
+        <input type="text" id="recipeNameInput" placeholder="예: 바닐라 라떼" value="${escapeHtml(recipeDraftName)}" />
+      </div>
+      <div class="field">
+        <label>메뉴 상태</label>
+        ${recipeStatusRowHtml(recipeDraftStatus, "recipe-status")}
+      </div>
+      <div class="field">
+        <label>제조법</label>
+        <textarea id="recipeInstructionsInput" rows="4" placeholder="순서대로 적어주세요">${escapeHtml(recipeDraftInstructions)}</textarea>
+      </div>
+      <div class="photo-attach-row" style="flex-wrap:wrap;">
+        <input type="file" accept="image/*" id="recipePhotoInput" multiple style="display:none;" />
+        ${recipePhotoUrls.map((url, i) => `
+          <div class="photo-preview">
+            <img src="${url}" alt="첨부 사진" class="share-photo-trigger" />
+            <button class="photo-remove-btn" data-recipe-photo-remove="${i}">✕</button>
+          </div>`).join("")}
+        <button class="photo-add-btn" id="recipePhotoAddBtn">📷 사진 첨부</button>
+      </div>
+      <button class="btn gold block" id="recipeSubmitBtn" style="margin-top:8px;">레시피 등록</button>
+    </div>`;
+
+  if (list.length === 0) {
+    html += `<div class="card"><div class="empty">아직 등록된 레시피가 없어요.</div></div>`;
+  } else {
+    html += `<div class="card section-recipe-list">`;
+    list.forEach((r, idx) => { html += recipeCardHtml(r, idx); });
+    html += `</div>`;
+  }
+  return html;
+}
+
+// 단종은 제조법이 필요 없는 짧은 공지라 레시피변경과 작성 폼 자체를
+// 분리했다 — 메뉴 이름 + (선택) 비고 + 사진 정도만 받는다.
+function recipeDiscontinuedTabHtml() {
+  const list = recipeList.filter((r) => r.status === "discontinued");
+  let html = `
+    <div class="category-title section-title-recipe">🔴 단종<span class="sub">${list.length}건</span></div>
+    <div class="card section-recipe">
+      <div class="field">
+        <label>메뉴 이름</label>
+        <input type="text" id="discoNameInput" placeholder="예: 바닐라 라떼" value="${escapeHtml(discoDraftName)}" />
+      </div>
+      <div class="field">
+        <label>비고 (선택)</label>
+        <textarea id="discoNoteInput" rows="2" placeholder="단종 사유 등 (선택)">${escapeHtml(discoDraftNote)}</textarea>
+      </div>
+      <div class="photo-attach-row" style="flex-wrap:wrap;">
+        <input type="file" accept="image/*" id="discoPhotoInput" multiple style="display:none;" />
+        ${discoPhotoUrls.map((url, i) => `
+          <div class="photo-preview">
+            <img src="${url}" alt="첨부 사진" class="share-photo-trigger" />
+            <button class="photo-remove-btn" data-disco-photo-remove="${i}">✕</button>
+          </div>`).join("")}
+        <button class="photo-add-btn" id="discoPhotoAddBtn">📷 사진 첨부</button>
+      </div>
+      <button class="btn gold block" id="discoSubmitBtn" style="margin-top:8px;">단종 등록</button>
+    </div>`;
+
+  if (list.length === 0) {
+    html += `<div class="card"><div class="empty">아직 등록된 단종 소식이 없어요.</div></div>`;
+  } else {
+    html += `<div class="card section-recipe-list">`;
+    list.forEach((r, idx) => { html += recipeCardHtml(r, idx); });
+    html += `</div>`;
+  }
+  return html;
+}
+
+function recipeTabHtml() {
+  ensureRecipesStarted();
+  let html = `
+    <div class="seg recipe-sub-seg">
+      <button type="button" class="${recipeSubTab === "change" ? "active" : ""}" data-recipe-sub-tab="change">레시피변경</button>
+      <button type="button" class="${recipeSubTab === "discontinued" ? "active" : ""}" data-recipe-sub-tab="discontinued">단종</button>
+    </div>`;
+  html += recipeSubTab === "change" ? recipeChangeTabHtml() : recipeDiscontinuedTabHtml();
+  return html;
+}
+
+function wireRecipeTab() {
+  rootEl.querySelectorAll("[data-recipe-sub-tab]").forEach((el) => {
+    el.addEventListener("click", () => { recipeSubTab = el.dataset.recipeSubTab; saveRecipeSubTab(); render(); });
+  });
+  const discoNameInput = rootEl.querySelector("#discoNameInput");
+  if (discoNameInput) discoNameInput.addEventListener("input", (e) => { discoDraftName = e.target.value; });
+  const discoNoteInput = rootEl.querySelector("#discoNoteInput");
+  if (discoNoteInput) discoNoteInput.addEventListener("input", (e) => { discoDraftNote = e.target.value; });
+  const discoPhotoInput = rootEl.querySelector("#discoPhotoInput");
+  const discoPhotoAddBtn = rootEl.querySelector("#discoPhotoAddBtn");
+  if (discoPhotoAddBtn) discoPhotoAddBtn.addEventListener("click", () => discoPhotoInput.click());
+  if (discoPhotoInput) {
+    discoPhotoInput.addEventListener("change", (e) => {
+      onDiscoPhotosSelected(Array.from(e.target.files || []));
+      e.target.value = "";
+    });
+  }
+  rootEl.querySelectorAll("[data-disco-photo-remove]").forEach((el) => {
+    el.addEventListener("click", () => {
+      discoPhotoUrls.splice(Number(el.dataset.discoPhotoRemove), 1);
+      render();
+    });
+  });
+  const discoSubmitBtn = rootEl.querySelector("#discoSubmitBtn");
+  if (discoSubmitBtn) discoSubmitBtn.addEventListener("click", submitDiscontinued);
+
+  const nameInput = rootEl.querySelector("#recipeNameInput");
+  if (nameInput) nameInput.addEventListener("input", (e) => { recipeDraftName = e.target.value; });
+  const instrInput = rootEl.querySelector("#recipeInstructionsInput");
+  if (instrInput) instrInput.addEventListener("input", (e) => { recipeDraftInstructions = e.target.value; });
+  rootEl.querySelectorAll("[data-recipe-status]").forEach((el) => {
+    el.addEventListener("click", () => { recipeDraftStatus = el.dataset.recipeStatus; render(); });
+  });
+  const photoInput = rootEl.querySelector("#recipePhotoInput");
+  const photoAddBtn = rootEl.querySelector("#recipePhotoAddBtn");
+  if (photoAddBtn) photoAddBtn.addEventListener("click", () => photoInput.click());
+  if (photoInput) {
+    photoInput.addEventListener("change", (e) => {
+      onRecipePhotosSelected(Array.from(e.target.files || []));
+      e.target.value = "";
+    });
+  }
+  rootEl.querySelectorAll("[data-recipe-photo-remove]").forEach((el) => {
+    el.addEventListener("click", () => {
+      recipePhotoUrls.splice(Number(el.dataset.recipePhotoRemove), 1);
+      render();
+    });
+  });
+  const submitBtn = rootEl.querySelector("#recipeSubmitBtn");
+  if (submitBtn) submitBtn.addEventListener("click", submitRecipe);
+  rootEl.querySelectorAll("[data-recipe-delete]").forEach((el) => {
+    el.addEventListener("click", () => deleteRecipe(el.dataset.recipeDelete));
+  });
+  rootEl.querySelectorAll("[data-recipe-edit]").forEach((el) => {
+    el.addEventListener("click", () => startEditRecipe(el.dataset.recipeEdit));
+  });
+
+  // 수정 폼 전용 와이어링 — 지금 떠 있는 레시피 카드 중 수정 모드인 게 있을
+  // 때만 해당 요소들이 존재한다.
+  const editNameInput = rootEl.querySelector("#editRecipeNameInput");
+  if (editNameInput) editNameInput.addEventListener("input", (e) => { editRecipeDraft.menuName = e.target.value; });
+  const editInstrInput = rootEl.querySelector("#editRecipeInstructionsInput");
+  if (editInstrInput) editInstrInput.addEventListener("input", (e) => { editRecipeDraft.instructions = e.target.value; });
+  rootEl.querySelectorAll("[data-edit-recipe-status]").forEach((el) => {
+    el.addEventListener("click", () => { editRecipeDraft.status = el.dataset.editRecipeStatus; render(); });
+  });
+  const editPhotoInput = rootEl.querySelector("#editRecipePhotoInput");
+  const editPhotoAddBtn = rootEl.querySelector("#editRecipePhotoAddBtn");
+  if (editPhotoAddBtn) editPhotoAddBtn.addEventListener("click", () => editPhotoInput.click());
+  if (editPhotoInput) {
+    editPhotoInput.addEventListener("change", (e) => {
+      onEditRecipePhotosSelected(Array.from(e.target.files || []));
+      e.target.value = "";
+    });
+  }
+  rootEl.querySelectorAll("[data-edit-recipe-photo-remove]").forEach((el) => {
+    el.addEventListener("click", () => {
+      editRecipeDraft.photoUrls.splice(Number(el.dataset.editRecipePhotoRemove), 1);
+      render();
+    });
+  });
+  const editCancelBtn = rootEl.querySelector("#editRecipeCancelBtn");
+  if (editCancelBtn) editCancelBtn.addEventListener("click", cancelEditRecipe);
+  const editSaveBtn = rootEl.querySelector("#editRecipeSaveBtn");
+  if (editSaveBtn) editSaveBtn.addEventListener("click", saveEditRecipe);
 }

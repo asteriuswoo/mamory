@@ -1,18 +1,24 @@
 // 모리 키우기 — a floating round button (above the bottom tabs on owner and
 // staff pages) that shows the store mascot's level/mood and lets anyone feed
-// it whatever food is waiting. Three food sources, all writing to the same
-// shared meta/mascot doc since there's one Mori for the whole store:
-//   - 꿀단지 (honeyJars): awarded server-side (functions/index.js:
-//     awardHoneyOnOrderBatch) whenever the owner submits a 주문완료 batch.
+// it whatever food is waiting. 레벨/경험치(totalXp)는 다 같이 키우는 거라
+// meta/mascot 문서에 공유로 남지만, "먹이가 모였다/배고프다" 표시는 각자
+// 본인이 번 먹이만 본인 화면에 뜨게 accounts/{phone} 문서에 개인별로 쌓는다
+// — 안 그러면 내가 오늘 아무것도 안 했는데 다른 직원이 자재를 요청했다고
+// 내 화면에도 "밥 주세요"가 뜨는 꼴이 된다. 세 가지 먹이:
+//   - 꿀단지 (pendingHoney): awarded server-side (functions/index.js:
+//     awardHoneyOnOrderBatch) whenever the OWNER submits a 주문완료 batch —
+//     owner 역할 계정들의 accounts 문서에 쌓인다.
 //   - 체크베리 (pendingCheckberry): awarded client-side (earnFood) whenever
-//     staff submits a 기본자재 request.
-//   - 주먹밥 (pendingOnigiri): awarded client-side (earnFood) whenever staff
-//     submits a 식자재 request.
+//     THAT staff member submits a 기본자재 request — 그 직원의 accounts
+//     문서에만 쌓인다.
+//   - 주먹밥 (pendingOnigiri): awarded client-side (earnFood) whenever THAT
+//     staff member submits a 식자재 request — 마찬가지로 본인 문서에만.
 // Each of the three is capped at 2 awards per calendar day (see earnFood /
 // awardHoneyOnOrderBatch) so splitting submissions into many small ones
 // can't farm extra food.
-// Feeding consumes all pending food at once and adds it to totalXp, which
-// drives the level (1~20) and growth stage name.
+// Feeding consumes *내 계정의* pending food and adds it to the shared
+// totalXp, which drives the level (1~20) and growth stage name — 레벨 자체는
+// 다 같이 키우는 모리라 공유로 남는다.
 import { db, doc, setDoc, onSnapshot, runTransaction } from "./firebase-init.js";
 import { todayStr } from "./util.js";
 
@@ -109,17 +115,17 @@ function dayDiff(aStr, bStr) {
   return Math.round((a - b) / 86400000);
 }
 
-// 배고픔(밥 주세요 알림)은 모아둔 먹이가 하나라도 있으면 뜬다 — 누가 벌었든
-// 셋 다 같은 모리 몫이라 직원/사장 양쪽 모리탭에 똑같이 보인다.
-// sad는 별개 축: lastSubmitDate(사장이 주문완료 제출한 날)가 하루 이상 지나면
-// 모리가 서운해한다.
-function deriveState(data) {
-  const pendingHoney = (data && data.honeyJars) || 0;
-  const pendingCheckberry = (data && data.pendingCheckberry) || 0;
-  const pendingOnigiri = (data && data.pendingOnigiri) || 0;
+// 배고픔(밥 주세요 알림)은 "내 계정"에 모아둔 먹이가 하나라도 있으면 뜬다 —
+// 레벨/경험치(mascotData)는 공유분이고, 먹이(accountData)는 내 계정 문서에서만
+// 온다. sad는 별개 축: lastSubmitDate(사장이 주문완료 제출한 날)가 하루 이상
+// 지나면 모리가 서운해한다 — 이건 가게 전체 상태라 공유로 둔다.
+function deriveState(mascotData, accountData) {
+  const pendingHoney = (accountData && accountData.pendingHoney) || 0;
+  const pendingCheckberry = (accountData && accountData.pendingCheckberry) || 0;
+  const pendingOnigiri = (accountData && accountData.pendingOnigiri) || 0;
   const totalPending = pendingHoney + pendingCheckberry + pendingOnigiri;
-  const { level, xpIntoLevel, xpNeeded } = levelFromXp(data && data.totalXp);
-  const lastSubmit = (data && data.lastSubmitDate) || null;
+  const { level, xpIntoLevel, xpNeeded } = levelFromXp(mascotData && mascotData.totalXp);
+  const lastSubmit = (mascotData && mascotData.lastSubmitDate) || null;
   const today = todayStr();
   const sad = !lastSubmit || dayDiff(today, lastSubmit) >= 2;
   return {
@@ -135,10 +141,19 @@ function deriveState(data) {
   };
 }
 
-let unsub = null;
-let state = deriveState(null);
+let myPhone = "";
+let mascotData = null; // meta/mascot — 공유 레벨/경험치
+let accountData = null; // accounts/{myPhone} — 내 계정에 쌓인 먹이
+let unsubMascot = null;
+let unsubAccount = null;
+let state = deriveState(null, null);
 let feeding = false;
 let reactPose = null; // briefly "loving" right after a successful feed
+
+function recomputeAndRender() {
+  state = deriveState(mascotData, accountData);
+  render();
+}
 
 function moriMood() {
   if (reactPose) return reactPose;
@@ -239,23 +254,26 @@ async function feedMascot() {
   if (feeding) return;
   feeding = true;
   try {
-    const ref = doc(db, "meta", "mascot");
+    const mascotRef = doc(db, "meta", "mascot");
+    const accountRef = doc(db, "accounts", myPhone);
     const result = await runTransaction(db, async (tx) => {
-      const snap = await tx.get(ref);
-      const data = snap.exists() ? snap.data() : {};
-      const pendingHoney = data.honeyJars || 0;
-      const pendingCheckberry = data.pendingCheckberry || 0;
-      const pendingOnigiri = data.pendingOnigiri || 0;
+      // 읽기는 전부 쓰기보다 먼저 — Firestore 트랜잭션 규칙상 get()들을
+      // 모아서 먼저 끝내야 한다(쓰기 중간에 다시 읽을 수 없다).
+      const [mascotSnap, accountSnap] = await Promise.all([tx.get(mascotRef), tx.get(accountRef)]);
+      const mData = mascotSnap.exists() ? mascotSnap.data() : {};
+      const aData = accountSnap.exists() ? accountSnap.data() : {};
+      const pendingHoney = aData.pendingHoney || 0;
+      const pendingCheckberry = aData.pendingCheckberry || 0;
+      const pendingOnigiri = aData.pendingOnigiri || 0;
       const total = pendingHoney + pendingCheckberry + pendingOnigiri;
       if (total <= 0) return { ok: false };
-      const prev = levelFromXp(data.totalXp);
-      const newTotalXp = (data.totalXp || 0) + total;
+      const prev = levelFromXp(mData.totalXp);
+      const newTotalXp = (mData.totalXp || 0) + total;
       const next = levelFromXp(newTotalXp);
-      tx.set(
-        ref,
-        { honeyJars: 0, pendingCheckberry: 0, pendingOnigiri: 0, totalXp: newTotalXp },
-        { merge: true }
-      );
+      // 레벨/경험치는 다 같이 키우는 모리라 공유 문서에, 먹인 사람의 pending
+      // 먹이는 그 사람 계정 문서에서만 비운다.
+      tx.set(mascotRef, { totalXp: newTotalXp }, { merge: true });
+      tx.set(accountRef, { pendingHoney: 0, pendingCheckberry: 0, pendingOnigiri: 0 }, { merge: true });
       return {
         ok: true,
         gained: total,
@@ -353,16 +371,18 @@ export function recordSubmitToday() {
   setDoc(doc(db, "meta", "mascot"), { lastSubmitDate: todayStr() }, { merge: true }).catch(() => {});
 }
 
-// Called by staff.js right after a 발주 요청하기 submit goes through.
+// Called by staff.js right after a 발주 요청하기 submit goes through — 요청을
+// 낸 "그 직원"의 accounts 문서에만 먹이를 적립한다(다른 직원 화면엔 안 뜬다).
 // 자재요청을 잘게 쪼개 여러 번 제출해서 먹이를 우르르 받아내는 걸 막기 위해,
 // 체크베리/주먹밥 각각 하루 최대 2번까지만 적립된다 — 세 번째부터는 요청
 // 제출 자체는 정상 처리되지만 먹이는 더 안 생긴다.
 export async function earnFood(kind) {
+  if (!myPhone) return;
   const pendingField = kind === "checkberry" ? "pendingCheckberry" : "pendingOnigiri";
   const countField = kind === "checkberry" ? "checkberryCount" : "onigiriCount";
   const countDateField = kind === "checkberry" ? "checkberryCountDate" : "onigiriCountDate";
   const today = todayStr();
-  const ref = doc(db, "meta", "mascot");
+  const ref = doc(db, "accounts", myPhone);
   try {
     await runTransaction(db, async (tx) => {
       const snap = await tx.get(ref);
@@ -380,7 +400,8 @@ export async function earnFood(kind) {
   }
 }
 
-export function mountMascotWidget() {
+export function mountMascotWidget(phone) {
+  if (phone) myPhone = phone;
   if (document.getElementById("mascotFab")) return; // already mounted on this page
   const host = document.createElement("div");
   host.innerHTML = WIDGET_HTML;
@@ -398,9 +419,16 @@ export function mountMascotWidget() {
   render();
   document.getElementById("mascotFeedBtn").addEventListener("click", feedMascot);
 
-  if (unsub) unsub();
-  unsub = onSnapshot(doc(db, "meta", "mascot"), (snap) => {
-    state = deriveState(snap.exists() ? snap.data() : null);
-    render();
+  if (unsubMascot) unsubMascot();
+  unsubMascot = onSnapshot(doc(db, "meta", "mascot"), (snap) => {
+    mascotData = snap.exists() ? snap.data() : null;
+    recomputeAndRender();
   });
+  if (unsubAccount) unsubAccount();
+  if (myPhone) {
+    unsubAccount = onSnapshot(doc(db, "accounts", myPhone), (snap) => {
+      accountData = snap.exists() ? snap.data() : null;
+      recomputeAndRender();
+    });
+  }
 }

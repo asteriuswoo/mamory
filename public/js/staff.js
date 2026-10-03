@@ -1,6 +1,6 @@
-import { db, collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, getDocs, serverTimestamp, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
+import { db, collection, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, getDocs, query, orderBy, serverTimestamp, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
 import { requireAccount, logout } from "./auth.js";
-import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, URGENCY_LABEL, URGENCY_HINT, URGENCY_ORDER, URGENCY_GROUP_CAPTION, sortMaterials, sortByOrder, resizeImageFile, confirmModal, dayAccentClass, NOTIFY_BELL_ON, NOTIFY_BELL_OFF } from "./util.js";
+import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, openImageLightbox, URGENCY_LABEL, URGENCY_HINT, URGENCY_ORDER, URGENCY_GROUP_CAPTION, sortMaterials, sortByOrder, resizeImageFile, confirmModal, dayAccentClass, NOTIFY_BELL_ON, NOTIFY_BELL_OFF } from "./util.js";
 import { mountShareBoard, getTodayUnseenCount, watchUnseenCount } from "./shareboard.js";
 import { mountRegisterBoard } from "./registerboard.js";
 import { mountPayrollBoard, mountClockWidget } from "./payroll.js";
@@ -8,6 +8,13 @@ import { registerPushToken, watchForegroundPush, isPushDisabled, disablePushToke
 import { wireAccountHeaderAvatar } from "./avatar.js";
 import { watchAppBadgeClear } from "./badge.js";
 import { mountMascotWidget, earnFood } from "./mascot.js";
+import { mountHumanityTrigger } from "./humanityboard.js";
+
+document.addEventListener("click", (e) => {
+  const img = e.target.closest("[data-receipt-lightbox]");
+  if (!img) return;
+  openImageLightbox(img.dataset.receiptLightbox, "영수증");
+});
 
 document.getElementById("dateLabel").textContent = formatDateLabel(todayStr());
 document.getElementById("logoutBtn").addEventListener("click", logout);
@@ -91,6 +98,17 @@ const recentDates = Array.from({ length: 7 }, (_, i) => dateStrDaysAgo(i));
 const chipCounts = {};
 let cartDate = date;
 let cartItems = [];
+// 발주 트렌드 — 최근 7일간 요청된 자재를 이름별로 세어 많이 요청된 순으로
+// 보여준다. 나중에 계절별 추이나 실제 판매 데이터 연동으로 확장할 여지를
+// 남겨두려고 담은 목록 탭에 독립된 오버레이로 뒀다.
+let showTrendOverlay = false;
+let trendLoading = false;
+let trendData = []; // [{ name, count }] — count 내림차순
+
+// ---- 사장님이 첨부한 영수증 보기 (담은 목록 탭) ----
+let showOwnerReceiptsOverlay = false;
+let ownerReceiptsLoading = false;
+let ownerDayReceiptPhotos = []; // 지금 보고 있는 cartDate의 "전체 영수증" — 필요할 때만 한 번 불러온다
 // Cart item ids currently showing the inline "다른 상태로 바꾸기" picker.
 const statusPickerFor = new Set();
 
@@ -121,6 +139,13 @@ function loadPending() {
 }
 function savePending() {
   localStorage.setItem(PENDING_KEY, JSON.stringify(pending));
+}
+
+// 옛 발주 항목은 photoUrl(단수) 하나였고, 지금은 여러 장을 담는
+// photoUrls(배열)로 바뀌었다 — 어느 쪽으로 저장됐든 한 번에 뽑아 쓴다.
+function materialPhotoUrlsOf(it) {
+  if (it.photoUrls && it.photoUrls.length > 0) return it.photoUrls;
+  return it.photoUrl ? [it.photoUrl] : [];
 }
 
 function effectiveState(id) {
@@ -192,6 +217,21 @@ function updateBottomTabActive() {
   document.querySelectorAll(".bottom-tab[data-nav]").forEach((el) => {
     el.classList.toggle("active", el.dataset.nav === activeKey);
   });
+  syncViewToUrl();
+}
+
+// 새로고침(버튼이든 스와이프든)해도 지금 보던 탭에 그대로 있도록, 현재
+// view를 주소창 쿼리에 남겨둔다 — main()이 시작할 때 알림 딥링크와 똑같은
+// 방식으로 이 값을 다시 읽어서 그 탭으로 바로 연다. render()가 호출될 때마다
+// 함께 불려서, view가 바뀌는 모든 곳을 일일이 손대지 않아도 항상 최신
+// 상태로 맞춰진다.
+function syncViewToUrl() {
+  const linkable = { cart: "cart", share: "share", register: "register", payroll: "payroll" }[view] || null;
+  const url = new URL(location.href);
+  if (url.searchParams.get("view") === linkable) return;
+  if (linkable) url.searchParams.set("view", linkable);
+  else url.searchParams.delete("view");
+  history.replaceState(null, "", url);
 }
 
 document.querySelectorAll(".bottom-tab[data-nav]").forEach((btn) => {
@@ -256,6 +296,155 @@ function loadAllChipCounts() {
   });
 }
 
+async function loadOrderTrend() {
+  trendLoading = true;
+  render();
+  // 횟수만으로는 "하루에 몰아서 여러 개 담았다"와 "매일 꾸준히 나간다"를
+  // 구분할 수 없어서, 요청된 날짜 수(dayCount)와 긴급/품절로 요청된 횟수도
+  // 같이 센다 — 인사이트 문장을 만드는 재료가 된다.
+  const stats = new Map(); // name -> { count, days:Set, urgentCount }
+  await Promise.all(
+    recentDates.map(async (d) => {
+      try {
+        const snap = await getDocs(collection(db, "checks", d, "items"));
+        snap.forEach((doc) => {
+          const data = doc.data();
+          const name = data.materialName;
+          if (!name) return;
+          if (!stats.has(name)) stats.set(name, { count: 0, days: new Set(), urgentCount: 0 });
+          const s = stats.get(name);
+          s.count += 1;
+          s.days.add(d);
+          if (data.urgency === "urgent" || data.urgency === "soldout") s.urgentCount += 1;
+        });
+      } catch (e) {
+        // 그 날짜에 담긴 기록이 없으면 건너뛴다.
+      }
+    })
+  );
+  trendData = [...stats.entries()]
+    .map(([name, s]) => ({ name, count: s.count, dayCount: s.days.size, urgentCount: s.urgentCount }))
+    .sort((a, b) => b.count - a.count);
+  trendLoading = false;
+  render();
+}
+
+// 순위 목록만으로는 "그래서 뭘 어떻게 하라는 건지"가 안 보여서, 데이터에서
+// 뽑아낼 수 있는 짧은 인사이트 문장 몇 개를 추가로 만든다 — 아직 1주일치
+// 데이터라 꺾은선 그래프로 보여주기엔 너무 들쭉날쭉해서, 지금은 이 정도가
+// 적당하다고 판단했다. 나중에 몇 달치가 쌓이면 그때 계절별 추이나 실제
+// 판매 데이터 연동까지 붙여서 제대로 된 차트로 확장하면 된다.
+function trendInsightsHtml() {
+  if (trendData.length === 0) return "";
+  const insights = [];
+  const top = trendData[0];
+  insights.push(`가장 자주 요청된 자재는 <strong>${escapeHtml(top.name)}</strong>이에요 (최근 7일간 ${top.count}회, ${top.dayCount}일에 걸쳐 요청).`);
+
+  const daily = trendData.filter((t) => t.dayCount >= recentDates.length - 1);
+  if (daily.length > 0) {
+    insights.push(`<strong>${daily.map((t) => escapeHtml(t.name)).join(", ")}</strong>${daily.length === 1 ? "은" : "는"} 거의 매일 요청되고 있어요 — 재고를 넉넉히 준비해두면 좋을 것 같아요.`);
+  }
+
+  const urgent = [...trendData].filter((t) => t.urgentCount > 0).sort((a, b) => b.urgentCount - a.urgentCount);
+  if (urgent.length > 0) {
+    insights.push(`<strong>${urgent.slice(0, 3).map((t) => escapeHtml(t.name)).join(", ")}</strong>${urgent.length === 1 ? "은" : "는"} 긴급/품절로 요청된 적이 있어요 — 재고 소진 주기를 한번 확인해보세요.`);
+  }
+
+  const burst = trendData.filter((t) => t.count >= 3 && t.dayCount === 1);
+  if (burst.length > 0) {
+    insights.push(`<strong>${burst.slice(0, 3).map((t) => escapeHtml(t.name)).join(", ")}</strong>${burst.length === 1 ? "은" : "는"} 하루에 몰아서 여러 번 요청됐어요 — 한 번에 더 넉넉히 시켜두면 반복 요청을 줄일 수 있어요.`);
+  }
+
+  return `
+    <div class="trend-insight-card">
+      <div class="trend-insight-title">💡 이번 주 인사이트</div>
+      <ul class="trend-insight-list">
+        ${insights.map((i) => `<li>${i}</li>`).join("")}
+      </ul>
+    </div>`;
+}
+
+function openOrderTrend() {
+  showTrendOverlay = true;
+  loadOrderTrend();
+  render();
+}
+
+function closeOrderTrend() {
+  showTrendOverlay = false;
+  render();
+}
+
+function orderTrendOverlayHtml() {
+  const maxCount = trendData.length > 0 ? trendData[0].count : 0;
+  return `
+    <div class="payroll-form-overlay" id="trendOverlay">
+      <div class="payroll-form-sheet">
+        <div class="row-between">
+          <div style="font-weight:800; font-size:16px;">📊 발주 트렌드</div>
+          <button class="payroll-form-close-btn" id="trendCloseBtn" aria-label="닫기">✕</button>
+        </div>
+        <div style="font-size:12px; color:var(--muted); margin:6px 0 14px;">최근 7일 동안 요청된 자재 기준</div>
+        ${trendLoading ? `<div class="empty">불러오는 중...</div>` : trendData.length === 0 ? `<div class="empty">최근 7일간 요청 기록이 없어요.</div>` : `
+        ${trendInsightsHtml()}
+        <div class="trend-list">
+          ${trendData.map((t, i) => `
+            <div class="trend-row">
+              <div class="trend-rank">${i + 1}</div>
+              <div class="trend-info">
+                <div class="trend-name">${escapeHtml(t.name)}${t.urgentCount > 0 ? " 🚨" : ""}</div>
+                <div class="trend-bar-track"><div class="trend-bar-fill" style="width:${maxCount ? Math.round((t.count / maxCount) * 100) : 0}%"></div></div>
+              </div>
+              <div class="trend-count">${t.count}회${t.dayCount > 1 ? ` · ${t.dayCount}일` : ""}</div>
+            </div>`).join("")}
+        </div>`}
+      </div>
+    </div>`;
+}
+
+// 사장님이 "전체 영수증"으로 첨부한 건 checks/{date} 문서에, 특정 자재 하나를
+// 콕 집어 첨부한 건 그 자재 항목 자체(ownerAttachedPhotos)에 따로 있어서,
+// 한 군데서 다 보려면 모아줘야 한다. 자주 바뀌는 live 데이터가 아니라 "눌러서
+// 확인하는" 용도라 overlay를 열 때 한 번만 불러온다.
+async function openOwnerReceiptsOverlay() {
+  showOwnerReceiptsOverlay = true;
+  ownerReceiptsLoading = true;
+  render();
+  try {
+    const snap = await getDoc(doc(db, "checks", cartDate));
+    ownerDayReceiptPhotos = (snap.exists() && snap.data().receiptPhotos) || [];
+  } catch (e) {
+    ownerDayReceiptPhotos = [];
+  }
+  ownerReceiptsLoading = false;
+  render();
+}
+
+function closeOwnerReceiptsOverlay() {
+  showOwnerReceiptsOverlay = false;
+  render();
+}
+
+function ownerReceiptsOverlayHtml() {
+  // 특정 자재 하나에만 콕 집어 첨부한 영수증(ownerAttachedPhotos)은 여기
+  // 모아보기 대상이 아니다 — 그건 그 자재 카드 안에 댓글처럼 바로 붙어있으니
+  // 거기서 보면 되고, 여긴 "전체 영수증"만 모아서 보여준다.
+  const overallUrls = ownerDayReceiptPhotos;
+  const empty = overallUrls.length === 0;
+  return `
+    <div class="payroll-form-overlay" id="ownerReceiptsOverlay">
+      <div class="payroll-form-sheet">
+        <div class="row-between">
+          <div style="font-weight:800; font-size:16px;">📎 사장님이 첨부한 영수증</div>
+          <button class="payroll-form-close-btn" id="ownerReceiptsCloseBtn" aria-label="닫기">✕</button>
+        </div>
+        ${ownerReceiptsLoading ? `<div class="empty" style="margin-top:12px;">불러오는 중...</div>` : empty ? `<div class="empty" style="margin-top:12px;">아직 첨부된 전체 영수증이 없어요.</div>` : `
+          <div class="receipt-photo-row" style="margin-top:12px;">${overallUrls.map((url) => `<img src="${url}" class="receipt-photo-thumb" data-receipt-lightbox="${url}" alt="영수증" />`).join("")}</div>
+        `}
+      </div>
+    </div>`;
+}
+
 // One-time lookup of yesterday's requests so the item screen can hint
 // "이미 어제 요청했던 자재예요" / 주문완료 여부 — doc IDs match the material's
 // own catalog ID, so this is a direct id -> data map.
@@ -310,8 +499,21 @@ function updateCartNavBadge() {
 }
 
 function render() {
+  // staff.html의 인라인 스크립트가 새로고침 순간 기본(자재선택) 탭이 한
+  // 프레임 보이는 걸 막으려고 #screen을 미리 숨겨두는 경우가 있다 — 실제
+  // 렌더가 일어나는 지금, 그 숨김을 확실히 풀어준다.
+  screenEl.style.display = "";
   updateBottomTabActive();
   updateCartNavBadge();
+  // 홈(자재선택)에서만 계정 카드(아바타/로그아웃/출근도장/인류애 버튼)를
+  // 보여주고, 다른 탭들은 바로 그 탭의 내용으로 들어가게 한다 — 바텀탭을
+  // 누르면 이미 자기 홈(여기서는 자재선택)으로 갈 수 있으니 매 탭마다
+  // 계정 카드를 반복해서 보여줄 필요가 없다.
+  const profileCard = document.getElementById("profileCard");
+  const isHomeView = view === "main" || view === "sub" || view === "items";
+  if (profileCard) profileCard.style.display = isHomeView ? "" : "none";
+  const monthEndBanner = document.getElementById("monthEndBanner");
+  if (monthEndBanner) monthEndBanner.style.display = (isHomeView && isLastDayOfMonth()) ? "block" : "none";
   if (view === "main") return renderMain();
   if (view === "sub") return renderSub();
   if (view === "items") return renderItems();
@@ -319,6 +521,11 @@ function render() {
   if (view === "share") return renderShare();
   if (view === "register") return renderRegister();
   if (view === "payroll") return renderPayroll();
+}
+
+function isLastDayOfMonth() {
+  const today = new Date();
+  return today.getDate() === new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
 }
 
 function renderMain() {
@@ -354,7 +561,6 @@ function renderSub() {
 
   let html = `
     <div class="breadcrumb">
-      <button class="back-btn" id="backHome">‹ 처음으로</button>
       <span class="step-label">${escapeHtml(chosenMain)}</span>
     </div>`;
 
@@ -383,7 +589,6 @@ function renderSub() {
     </button>`;
 
   screenEl.innerHTML = html;
-  document.getElementById("backHome").addEventListener("click", () => { view = "main"; render(); });
   document.getElementById("submitFromSub").addEventListener("click", () => submitCategory(chosenMain));
   screenEl.querySelectorAll("[data-sub]").forEach((el) => {
     el.addEventListener("click", () => {
@@ -442,13 +647,14 @@ function renderItems() {
                 <button class="order-qty-btn" data-id="${m.id}" data-qty-delta="1" ${isLocked ? "disabled" : ""}>+</button>
               </div>
             </div>
-            <div class="photo-attach-row">
-              <input type="file" accept="image/*" data-photo-input="${m.id}" style="display:none;" />
-              ${state.photoUrl ? `
+            <div class="photo-attach-row" style="flex-wrap:wrap;">
+              <input type="file" accept="image/*" data-photo-input="${m.id}" multiple style="display:none;" />
+              ${(state.photoUrls || []).map((url, i) => `
                 <div class="photo-preview">
-                  <a href="${state.photoUrl}" target="_blank" rel="noopener"><img src="${state.photoUrl}" alt="첨부 사진" /></a>
-                  ${!isLocked ? `<button class="photo-remove-btn" data-photo-remove="${m.id}">✕</button>` : ""}
-                </div>` : (!isLocked ? `<button class="photo-add-btn" data-photo-trigger="${m.id}">📷 사진 첨부</button>` : "")}
+                  <a href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="첨부 사진" /></a>
+                  ${!isLocked ? `<button class="photo-remove-btn" data-photo-remove="${m.id}" data-photo-remove-index="${i}">✕</button>` : ""}
+                </div>`).join("")}
+              ${!isLocked ? `<button class="photo-add-btn" data-photo-trigger="${m.id}">📷 사진 첨부</button>` : ""}
             </div>` : ""}
         </div>`;
     }
@@ -499,10 +705,13 @@ function renderItems() {
     });
   });
   screenEl.querySelectorAll("[data-photo-input]").forEach((el) => {
-    el.addEventListener("change", (e) => onPhotoSelected(el.dataset.photoInput, e.target.files[0]));
+    el.addEventListener("change", (e) => {
+      onPhotosSelected(el.dataset.photoInput, Array.from(e.target.files || []));
+      e.target.value = "";
+    });
   });
   screenEl.querySelectorAll("[data-photo-remove]").forEach((el) => {
-    el.addEventListener("click", () => onPhotoRemove(el.dataset.photoRemove));
+    el.addEventListener("click", () => onPhotoRemove(el.dataset.photoRemove, Number(el.dataset.photoRemoveIndex)));
   });
 }
 
@@ -510,7 +719,7 @@ function renderCart() {
   const isTodayCart = cartDate === date;
   let html = `
     <div class="breadcrumb">
-      <button class="back-btn" id="backHome2">‹ 처음으로</button>
+      <button class="back-btn" id="backHome2">‹ 자재 선택</button>
       <span class="step-label">담은 목록</span>
     </div>
     <div class="card">
@@ -519,10 +728,17 @@ function renderCart() {
         <div class="day-chip-row" id="cartDayChips"></div>
       </div>
     </div>
-    ${isTodayCart ? `<button class="btn secondary block" id="addMoreBtn" style="margin-bottom:14px;">장바구니 더 담기</button>` : ""}`;
+    ${isTodayCart ? `
+    <div style="display:flex; gap:8px; margin-bottom:14px;">
+      <button class="btn secondary" id="addMoreBtn" style="flex:1;">장바구니 더 담기</button>
+      <button class="btn secondary" id="orderTrendBtn" style="white-space:nowrap;">📊 발주 트렌드</button>
+    </div>` : `<button class="btn secondary block" id="orderTrendBtn" style="margin-bottom:14px;">📊 발주 트렌드</button>`}
+    <button class="btn secondary block" id="ownerReceiptsBtn" style="margin-bottom:14px;">📎 ${isTodayCart ? "오늘 " : ""}사장님이 첨부한 영수증 보기</button>`;
 
   if (cartItems.length === 0) {
     html += `<div class="card"><div class="cart-empty">이 날짜엔 담긴 자재가 없어요.</div></div>`;
+    if (showTrendOverlay) html += orderTrendOverlayHtml();
+    if (showOwnerReceiptsOverlay) html += ownerReceiptsOverlayHtml();
     screenEl.innerHTML = html;
     wireCartNav();
     return;
@@ -537,7 +753,16 @@ function renderCart() {
         <div style="flex:1">
           <div class="name"><span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${showSub && it.subCategory ? `<span class="subcat-inline-tag">${escapeHtml(it.subCategory)}</span>` : ""}${it.autoAdded ? `<span class="subcat-inline-tag">2일마다 자동</span>` : ""}${it.qty ? `<span class="qty-pill">${escapeHtml(it.qty)} 남음</span>` : ""}${it.orderQty && it.orderQty > 1 ? `<span class="qty-pill">요청 ${it.orderQty}개</span>` : ""}</div>
           ${it.note ? `<div class="note">${escapeHtml(it.note)}</div>` : ""}
-          ${it.photoUrl ? `<a href="${it.photoUrl}" target="_blank" rel="noopener"><img src="${it.photoUrl}" class="note-photo-thumb" alt="첨부 사진" /></a>` : ""}
+          ${materialPhotoUrlsOf(it).map((url) => `<a href="${url}" target="_blank" rel="noopener"><img src="${url}" class="note-photo-thumb" alt="첨부 사진" /></a>`).join("")}
+          ${it.ordered && it.receiptPhotos && it.receiptPhotos.length > 0 ? `
+          <div class="receipt-photo-row" style="margin-top:4px;">
+            ${it.receiptPhotos.map((url) => `<img src="${url}" class="receipt-photo-thumb" data-receipt-lightbox="${url}" alt="사장님 결제 영수증" />`).join("")}
+          </div>` : ""}
+          ${!it.ordered && it.ownerAttachedPhotos && it.ownerAttachedPhotos.length > 0 ? `
+          <div class="owner-receipt-comment">
+            <div class="owner-receipt-comment-label">📎 사장님이 첨부한 영수증</div>
+            <div class="receipt-photo-row">${it.ownerAttachedPhotos.map((url) => `<img src="${url}" class="receipt-photo-thumb" data-receipt-lightbox="${url}" alt="영수증" />`).join("")}</div>
+          </div>` : ""}
           ${it.staffName ? `<div class="who">${escapeHtml(it.staffName)}님${formatTimeLabel(it.updatedAt) ? ` · ${formatTimeLabel(it.updatedAt)}` : ""}</div>` : ""}
           ${isTodayCart && !it.submitted ? `
             <div class="order-qty-row" style="margin-top:6px;">
@@ -622,6 +847,8 @@ function renderCart() {
     }
   }
 
+  if (showTrendOverlay) html += orderTrendOverlayHtml();
+  if (showOwnerReceiptsOverlay) html += ownerReceiptsOverlayHtml();
   screenEl.innerHTML = html;
   wireCartNav();
 }
@@ -643,33 +870,27 @@ async function changeCartItemUrgency(id, newUrgency) {
 function renderShare() {
   screenEl.innerHTML = `
     <div class="breadcrumb">
-      <button class="back-btn" id="backHomeShare">‹ 처음으로</button>
       <span class="step-label">공유하기</span>
     </div>
     <div id="shareBoardRoot"></div>`;
-  document.getElementById("backHomeShare").addEventListener("click", () => { view = "main"; render(); });
   mountShareBoard(document.getElementById("shareBoardRoot"), { name: staffName, phone: staffPhone });
 }
 
 function renderRegister() {
   screenEl.innerHTML = `
     <div class="breadcrumb">
-      <button class="back-btn" id="backHomeRegister">‹ 처음으로</button>
       <span class="step-label">등록해요</span>
     </div>
     <div id="registerBoardRoot"></div>`;
-  document.getElementById("backHomeRegister").addEventListener("click", () => { view = "main"; render(); });
   mountRegisterBoard(document.getElementById("registerBoardRoot"), { name: staffName, phone: staffPhone, role: staffRole });
 }
 
 function renderPayroll() {
   screenEl.innerHTML = `
     <div class="breadcrumb">
-      <button class="back-btn" id="backHomePayroll">‹ 처음으로</button>
       <span class="step-label">${staffRole === "owner" ? "직원 급여 제출함" : "출근기록"}</span>
     </div>
     <div id="payrollBoardRoot"></div>`;
-  document.getElementById("backHomePayroll").addEventListener("click", () => { view = "main"; render(); });
   mountPayrollBoard(document.getElementById("payrollBoardRoot"), { name: staffName, phone: staffPhone, role: staffRole });
 }
 
@@ -677,6 +898,20 @@ function wireCartNav() {
   document.getElementById("backHome2").addEventListener("click", () => { view = "main"; render(); });
   const addMoreBtn = document.getElementById("addMoreBtn");
   if (addMoreBtn) addMoreBtn.addEventListener("click", () => { view = "main"; render(); });
+  const trendBtn = document.getElementById("orderTrendBtn");
+  if (trendBtn) trendBtn.addEventListener("click", openOrderTrend);
+  const trendOverlay = document.getElementById("trendOverlay");
+  if (trendOverlay) {
+    trendOverlay.addEventListener("click", (e) => { if (e.target === trendOverlay) closeOrderTrend(); });
+    document.getElementById("trendCloseBtn").addEventListener("click", closeOrderTrend);
+  }
+  const ownerReceiptsBtn = document.getElementById("ownerReceiptsBtn");
+  if (ownerReceiptsBtn) ownerReceiptsBtn.addEventListener("click", openOwnerReceiptsOverlay);
+  const ownerReceiptsOverlay = document.getElementById("ownerReceiptsOverlay");
+  if (ownerReceiptsOverlay) {
+    ownerReceiptsOverlay.addEventListener("click", (e) => { if (e.target === ownerReceiptsOverlay) closeOwnerReceiptsOverlay(); });
+    document.getElementById("ownerReceiptsCloseBtn").addEventListener("click", closeOwnerReceiptsOverlay);
+  }
 
   const chipsEl = document.getElementById("cartDayChips");
   chipsEl.innerHTML = recentDates
@@ -817,27 +1052,31 @@ function upsertDraft(id, overrides) {
     note: current.note || "",
     qty: current.qty || "",
     orderQty: current.orderQty || 1,
-    photoUrl: current.photoUrl || "",
+    photoUrls: current.photoUrls || [],
     staffName,
     ...overrides,
   };
 }
 
-async function onPhotoSelected(id, file) {
-  if (!file) return;
+async function onPhotosSelected(id, files) {
+  if (!files || files.length === 0) return;
   if (synced[id]) return; // locked, ignore
-  if (!effectiveState(id)) {
+  const current = effectiveState(id);
+  if (!current) {
     toast("먼저 긴급도를 선택해주세요");
     return;
   }
-  toast("사진 업로드 중...");
+  toast(files.length > 1 ? `사진 ${files.length}장 업로드 중...` : "사진 업로드 중...");
   try {
-    const blob = await resizeImageFile(file);
-    const path = `notePhotos/${date}/${staffPhone}_${id}_${Date.now()}.jpg`;
-    const fileRef = ref(storage, path);
-    await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
-    const url = await getDownloadURL(fileRef);
-    upsertDraft(id, { photoUrl: url });
+    const urls = [];
+    for (const file of files) {
+      const blob = await resizeImageFile(file);
+      const path = `notePhotos/${date}/${staffPhone}_${id}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
+      const fileRef = ref(storage, path);
+      await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
+      urls.push(await getDownloadURL(fileRef));
+    }
+    upsertDraft(id, { photoUrls: [...(current.photoUrls || []), ...urls] });
     render();
     toast("사진을 첨부했어요");
   } catch (e) {
@@ -846,10 +1085,13 @@ async function onPhotoSelected(id, file) {
   }
 }
 
-function onPhotoRemove(id) {
+function onPhotoRemove(id, index) {
   if (synced[id]) return; // locked, ignore
-  if (!effectiveState(id)) return;
-  upsertDraft(id, { photoUrl: "" });
+  const current = effectiveState(id);
+  if (!current) return;
+  const urls = [...(current.photoUrls || [])];
+  urls.splice(index, 1);
+  upsertDraft(id, { photoUrls: urls });
   render();
 }
 
@@ -912,7 +1154,7 @@ async function submitCategory(main) {
         note: p.note || "",
         qty: p.qty || "",
         orderQty: p.orderQty || 1,
-        photoUrl: p.photoUrl || "",
+        photoUrls: p.photoUrls || [],
         ordered: false,
         staffName,
         staffPhone,
@@ -933,7 +1175,7 @@ async function submitCategory(main) {
       note: a.note || "",
       qty: a.qty || "",
       orderQty: a.orderQty || 1,
-      photoUrl: a.photoUrl || "",
+      photoUrls: a.photoUrls || [],
       ordered: false,
       staffName,
       staffPhone,
@@ -954,6 +1196,10 @@ async function submitCategory(main) {
       itemCount: addedCount,
       createdAt: serverTimestamp(),
     });
+    // 먹이는 이제 요청한 사람의 계정에만 개인적으로 쌓인다(mascot.js 참고)
+    // — 사장이 "내가 직접 발주 요청하기"로 자재를 요청해도 사장 본인
+    // 화면에만 뜨고 다른 직원 화면엔 영향이 없으니, 역할과 상관없이
+    // 요청한 사람에게 적립해주면 된다.
     earnFood(main === "기본자재" ? "checkberry" : "onigiri");
   }
   if (view === "cart") cartItems = buildTodayCartItems();
@@ -973,6 +1219,7 @@ async function main() {
   const isOwnerVisiting = account.role === "owner";
   wireAccountHeaderAvatar(document.getElementById("accountName"), account, isOwnerVisiting ? "사장님 계정 (발주 화면)" : "직원 계정");
   if (isOwnerVisiting) document.getElementById("backToOwnerBtn").style.display = "block";
+  mountHumanityTrigger(document.getElementById("humanityBtn"), document.getElementById("humanityOverlayRoot"), account);
 
   // Deep-linked here from a push notification (see functions/index.js's
   // `link` field) — land straight on the relevant tab instead of always
@@ -991,7 +1238,7 @@ async function main() {
 
   watchForegroundPush();
   watchAppBadgeClear();
-  mountMascotWidget();
+  mountMascotWidget(staffPhone);
   if (!isOwnerVisiting) mountClockWidget(document.getElementById("clockWidgetRoot"), { name: staffName, phone: staffPhone });
   if (Notification.permission === "granted") registerPushToken(staffPhone);
 
