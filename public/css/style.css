@@ -183,6 +183,123 @@ header.topbar .sub {
   opacity: .4;
 }
 
+.notify-bell-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.notify-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--urgent);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 800;
+  pointer-events: none;
+  border: 1.5px solid var(--card);
+}
+
+/* ---- 알림내역 패널 (종 아이콘 탭하면 뜨는 바텀시트) ---- */
+.notif-panel {
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.notif-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 2px 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.notif-panel-title-text {
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.notif-panel-push-toggle {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--cream);
+  border: none;
+  border-radius: 999px;
+  padding: 5px 10px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.notif-panel-list {
+  overflow-y: auto;
+  flex: 1;
+}
+
+.notif-panel-date-header {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--muted);
+  padding: 10px 2px 4px;
+}
+
+.notif-panel-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--border);
+  padding: 8px 2px;
+}
+
+.notif-panel-row:first-child,
+.notif-panel-date-header + .notif-panel-row { border-top: none; }
+
+.notif-panel-row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.notif-panel-row-type {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--gold);
+  white-space: nowrap;
+}
+
+.notif-panel-row-time {
+  font-size: 10.5px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.notif-panel-row-title {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text);
+  margin-top: 3px;
+}
+
+.notif-panel-row-body {
+  font-size: 12.5px;
+  color: var(--text);
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
 #pullRefreshIndicator {
   position: fixed;
   top: 0;
@@ -449,6 +566,12 @@ button {
   background: var(--gold-soft);
   color: #8a5636;
   box-shadow: none;
+}
+
+.btn.muted {
+  background: linear-gradient(180deg, #6b6b67 0%, var(--soldout) 100%);
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(90,90,86,.3);
 }
 
 .btn.block { width: 100%; }
@@ -897,6 +1020,45 @@ button {
   margin-bottom: 12px;
 }
 
+.sub-list-hint {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--sky);
+  background: var(--sky-soft);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
+.sub-search-wrap {
+  margin-bottom: 10px;
+}
+
+.sub-search-input {
+  /* 베이스 input[type="text"] 규칙이 속성 선택자라 특이도가 더 높아서,
+     여기서 !important 없이는 돋보기 배경이 그냥 var(--card) 단색으로
+     덮여 사라진다. */
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238a8a86' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'%3E%3C/circle%3E%3Cline x1='21' y1='21' x2='16.65' y2='16.65'%3E%3C/line%3E%3C/svg%3E") no-repeat 13px center / 16px, var(--card) !important;
+  padding-left: 38px !important;
+}
+
+.search-result-tag {
+  color: var(--gold) !important;
+  background: var(--gold-soft) !important;
+}
+
+/* 검색 결과를 눌러 들어왔을 때, 수많은 카드들 중 어떤 걸 찾아왔는지
+   바로 보이도록 잠깐 골드색 테두리를 두르고 사라진다 — 긴급도는 여기서
+   안 건드린다. 선택 여부를 정하는 건 어디까지나 직원의 몫. */
+.material-card-highlight {
+  animation: materialCardHighlight 1.6s ease;
+}
+
+@keyframes materialCardHighlight {
+  0%, 60% { box-shadow: 0 0 0 3px var(--gold); }
+  100% { box-shadow: 0 0 0 0px transparent; }
+}
+
 .back-btn {
   border: none;
   background: linear-gradient(180deg, #2c2c2c 0%, var(--hero-dark) 100%);
@@ -1151,6 +1313,36 @@ button {
 
 .note-box.show { display: block; }
 
+.qty-input-wrap {
+  position: relative;
+}
+
+.qty-input-wrap .qty-input {
+  width: 100%;
+  padding-right: 22px;
+}
+
+.qty-input-wrap .required-asterisk {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--urgent);
+  font-weight: 800;
+  pointer-events: none;
+}
+
+.qty-none-btn {
+  display: inline-block;
+  border: 1px solid var(--urgent);
+  background: var(--urgent-soft);
+  color: var(--urgent);
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+
 .empty {
   text-align: center;
   color: var(--muted);
@@ -1180,6 +1372,32 @@ button {
 }
 
 .toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.top-banner {
+  position: fixed;
+  top: max(16px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%) translateY(-140%);
+  background: var(--toggle-blue-soft);
+  color: var(--toggle-blue);
+  border: 1px solid var(--toggle-blue);
+  padding: 10px 18px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+  opacity: 0;
+  transition: transform .3s cubic-bezier(.2, .8, .3, 1), opacity .3s;
+  pointer-events: none;
+  z-index: 200;
+  max-width: 86vw;
+  box-shadow: 0 4px 16px rgba(51,102,230,.18);
+}
+
+.top-banner.show {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
 }
@@ -1572,15 +1790,15 @@ button {
 
 .post-top-row {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .post-top-row .who {
-  margin-top: 1px;
+  margin-top: 0;
   white-space: nowrap;
   flex-shrink: 0;
+  align-self: flex-end;
 }
 
 .post-delete-btn {
@@ -1695,11 +1913,7 @@ img.avatar-circle {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.82);
-  display: flex;
-  align-items: center;
-  justify-content: center;
   z-index: 9999;
-  padding: 24px;
   animation: avatarLightboxIn 0.15s ease-out;
 }
 
@@ -1708,12 +1922,47 @@ img.avatar-circle {
   to { opacity: 1; }
 }
 
+/* 사진이 여러 장이면(묶음) 가로로 쭉 이어붙여서 옆으로 스와이프해 넘겨보게
+   한다 — 사진 한 장짜리는 슬라이드가 하나뿐이라 지금까지와 똑같이 보인다. */
+.img-lightbox-track {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+}
+
+.img-lightbox-slide {
+  flex: 0 0 100%;
+  width: 100%;
+  height: 100%;
+  scroll-snap-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
 .img-lightbox-img {
   max-width: min(90vw, 480px);
   max-height: 80vh;
   border-radius: 16px;
   object-fit: contain;
   background: var(--gold-soft);
+}
+
+.img-lightbox-count {
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 5px 14px;
+  border-radius: 999px;
 }
 
 .img-lightbox-close {
@@ -1997,6 +2246,20 @@ img.avatar-circle {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
+}
+
+/* 공유해요 글/답글/레시피는 모바일 화면폭이 좁아서, 사진을 여러 장
+   첨부하면 줄바꿈되며 세로로 쌓이는 것처럼 보였다 — 줄바꿈 대신 한 줄로
+   유지하고 옆으로 스크롤해서 보게 한다. 확대해서 보는 용도라 썸네일
+   자체는 꽉 안 보여도 상관없다. */
+.note-photo-row {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.note-photo-row img {
+  flex-shrink: 0;
 }
 
 .receipt-photo-thumb {
@@ -2639,6 +2902,16 @@ pre.share-preview {
 .cash-summary strong { color: var(--gold); }
 .cash-summary.empty { color: var(--muted); }
 
+.cash-carryover-hint {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--sky);
+  background: var(--sky-soft);
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin-bottom: 10px;
+}
+
 .cash-bill-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -2882,6 +3155,14 @@ pre.share-preview {
   border: none;
 }
 
+/* 출근도장 같은 "공식 업무" 버튼과 한 줄에 나란히 있으면 동급의 핵심
+   기능처럼 보여서, 홈 화면 맨 아래로 떨어뜨리고 크기/존재감도 낮췄다. */
+.humanity-banner-btn {
+  margin-top: 14px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+}
+
 .humanity-badge-wrap {
   display: inline-flex;
   align-items: center;
@@ -3061,6 +3342,11 @@ pre.share-preview {
   border: none;
   border-radius: 999px;
   padding: 5px 12px;
+  user-select: none;
+  -webkit-user-select: none;
+  /* 꾹 눌러서 수정/삭제 메뉴를 띄우는 제스처라, iOS의 텍스트 선택 돋보기 +
+     복사 콜아웃이 끼어들지 않게 막는다 (drag-handle과 동일한 이유). */
+  -webkit-touch-callout: none;
 }
 
 .topup-name-chip.add-new {
@@ -3253,8 +3539,13 @@ pre.share-preview {
   display: flex;
   align-items: center;
   gap: 10px;
+  padding-top: 10px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--border);
+}
+
+.payroll-shift-row:first-child {
+  padding-top: 0;
 }
 
 .payroll-shift-row:last-child {
@@ -3326,6 +3617,149 @@ pre.share-preview {
   padding: 20px 18px calc(20px + env(safe-area-inset-bottom));
 }
 
+/* 블로커(와 그 자식인 말풍선)가 스포트라이트 요소의 거대한 box-shadow보다
+   항상 위에 그려져야 한다 — 둘 다 fixed/relative + z-index로 각자 스태킹
+   컨텍스트를 만들기 때문에, 블로커 쪽 z-index가 스포트라이트(301)보다
+   낮으면 블로커의 자식인 말풍선까지 통째로 그 그림자 밑에 깔려서 어둡게
+   보인다. */
+.onboarding-blocker {
+  position: fixed;
+  inset: 0;
+  z-index: 310;
+}
+
+.onboarding-blocker-dim {
+  background: rgba(0,0,0,.45);
+  display: flex;
+  align-items: flex-end;
+}
+
+/* 실제 탭/카드 위에 씌우는 스포트라이트 — box-shadow를 뷰포트보다 훨씬
+   크게 둘러서 "그 요소만 뚫린 어두운 화면" 효과를 낸다. 투명 블로커(z-index
+   300)보다 위로 올려야 실제로 밝게 보이고, pointer-events는 꺼서 투어
+   도중에 실수로 그 탭이 눌리지 않게 한다. 기본자재/식자재 카드처럼 원래
+   배경이 어두운 요소는 그냥 어둡게 깔면 주변 딤 처리랑 구분이 안 가서,
+   골드색 테두리 링을 같이 둘러 "여기가 강조된 부분"이라는 걸 배경색과
+   상관없이 또렷하게 보여준다. */
+.onboarding-spotlight {
+  position: relative;
+  z-index: 301;
+  box-shadow: 0 0 0 3px var(--gold), 0 0 0 9999px rgba(0,0,0,.6);
+  border-radius: 14px;
+  pointer-events: none;
+}
+
+.onboarding-tooltip {
+  position: fixed;
+  z-index: 302;
+  width: min(300px, calc(100vw - 24px));
+  background: var(--card);
+  border-radius: 16px;
+  padding: 16px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.25);
+}
+
+.onboarding-tooltip-skip {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: none;
+  background: var(--cream);
+  color: var(--text);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.onboarding-tooltip-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding-right: 20px;
+}
+
+.onboarding-tooltip-mascot {
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.onboarding-tooltip-text {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--ink);
+  text-align: left;
+  padding-top: 2px;
+}
+
+.onboarding-tooltip .onboarding-dots { margin: 14px 0 12px; }
+
+.onboarding-arrow {
+  position: absolute;
+  width: 0;
+  height: 0;
+  border-left: 9px solid transparent;
+  border-right: 9px solid transparent;
+}
+
+.onboarding-arrow.up {
+  top: -10px;
+  border-bottom: 11px solid var(--card);
+}
+
+.onboarding-arrow.down {
+  bottom: -10px;
+  border-top: 11px solid var(--card);
+}
+
+.onboarding-sheet {
+  position: relative;
+  text-align: center;
+  padding-top: 28px;
+}
+
+.onboarding-mascot-img {
+  width: 108px;
+  height: 108px;
+  object-fit: contain;
+  margin: 0 auto 14px;
+}
+
+.onboarding-bubble {
+  background: var(--cream);
+  border-radius: 14px;
+  padding: 16px 18px;
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.55;
+  color: var(--ink);
+  text-align: left;
+}
+
+.onboarding-dots {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin: 16px 0 18px;
+}
+
+.onboarding-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.onboarding-dot.active {
+  background: var(--gold);
+}
+
 .payroll-date-grid {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
@@ -3387,6 +3821,21 @@ pre.share-preview {
 .payroll-payslip-line {
   margin-top: 8px;
   font-size: 13.5px;
+}
+
+.bank-copy-btn {
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--sky-soft);
+  color: var(--sky);
+  white-space: nowrap;
+}
+
+.bank-copy-btn:active {
+  opacity: 0.7;
 }
 
 .payroll-payslip-sub {
@@ -3893,12 +4342,6 @@ pre.share-preview {
   border-top: 1px dashed var(--border);
 }
 
-.clock-humanity-row {
-  display: flex;
-  gap: 8px;
-  align-items: flex-end;
-  margin-top: 10px;
-}
 
 .clock-widget {
   margin-top: 0;
@@ -3987,11 +4430,7 @@ pre.share-preview {
 }
 
 .soldout-resolved-highlight {
-  background: var(--normal-soft);
-  color: var(--normal);
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-weight: 700;
+  color: var(--soldout);
   text-decoration: line-through;
   text-decoration-thickness: 1.5px;
 }
@@ -4135,12 +4574,39 @@ pre.share-preview {
 }
 
 .recipe-status-badge.discontinued {
-  background: var(--urgent-soft);
-  color: var(--urgent);
+  background: var(--soldout-soft);
+  color: var(--soldout);
 }
 
+/* 상위 세그먼트(공유해요/품절공유/레시피)와 똑같은 박스형 탭 모양이라
+   "레시피 안의 또 다른 탭"이라는 게 한눈에 안 들어왔다 — 하위 탭은 박스를
+   없애고 밑줄 인디케이터만 쓰는 가벼운 모양으로 분리해서, 위/아래 단계가
+   시각적으로 다른 급이라는 걸 바로 알 수 있게 했다. */
 .recipe-sub-seg {
-  margin-bottom: 10px;
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+  gap: 4px;
+}
+
+.recipe-sub-seg button {
+  flex: none;
+  border-right: none;
+  background: none;
+  padding: 7px 4px;
+  margin-right: 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+}
+
+.recipe-sub-seg button.active {
+  background: none;
+  color: var(--ink);
+  border-bottom-color: var(--gold);
 }
 
 .recipe-edit-form .field {

@@ -8,8 +8,8 @@
 //      주문 등) 기록 — 시재와 같은 날짜 범위를 공유한다.
 //   3. 선결제 충전 등록 — 손님이 충전할 때마다 남기는 기록. 차감/잔액 개념 없이
 //      "누가 언제 얼마 냈는지"만 쌓이는 로그이며, 같은 손님 이름으로 계속 쌓인다.
-import { db, collection, doc, addDoc, updateDoc, deleteDoc, getDocs, setDoc, arrayUnion, onSnapshot, query, orderBy, serverTimestamp, runTransaction, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
-import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, resizeImageFile, dayAccentClass, openImageLightbox } from "./util.js";
+import { db, collection, doc, addDoc, updateDoc, deleteDoc, getDocs, setDoc, arrayUnion, writeBatch, onSnapshot, query, orderBy, serverTimestamp, runTransaction, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
+import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, resizeImageFile, dayAccentClass, openImageLightbox, showActionSheet, MULTIPLE_FILE_ATTR } from "./util.js";
 import { avatarHtml, watchAccounts } from "./avatar.js";
 
 const date = todayStr();
@@ -70,13 +70,40 @@ function cashDraftTotal() {
 function primeCashDraftFromLatest() {
   if (cashDraftDirty) return;
   const latest = latestEntry(cashEntriesToday);
-  const b = (latest && latest.breakdown) || {};
-  cashDraft = {
-    50000: b[50000] || 0,
-    10000: b[10000] || 0,
-    5000: b[5000] || 0,
-    1000: b[1000] || 0,
-  };
+  if (latest) {
+    const b = latest.breakdown || {};
+    cashDraft = {
+      50000: b[50000] || 0,
+      10000: b[10000] || 0,
+      5000: b[5000] || 0,
+      1000: b[1000] || 0,
+    };
+    return;
+  }
+  // 오늘 아직 아무도 등록을 안 했으면 — 마감 근무자가 어제 마지막으로 센
+  // 시재를 오늘 오픈 근무자가 그대로 이어받아서(이월) 달라진 권종만
+  // +/-로 조정하면 되도록, 어제의 마지막 등록값을 시작점으로 삼는다.
+  primeCashDraftFromYesterday();
+}
+
+async function primeCashDraftFromYesterday() {
+  if (cashDraftDirty || cashEntriesToday.length > 0) return;
+  try {
+    const snap = await getDocs(collection(db, "cashRegister", dateStrDaysAgo(1), "entries"));
+    if (cashDraftDirty || cashEntriesToday.length > 0) return; // 그 사이 상황이 바뀌었으면 건너뜀
+    const latest = latestEntry(snap.docs.map((d) => d.data()));
+    if (!latest) return;
+    const b = latest.breakdown || {};
+    cashDraft = {
+      50000: b[50000] || 0,
+      10000: b[10000] || 0,
+      5000: b[5000] || 0,
+      1000: b[1000] || 0,
+    };
+    render();
+  } catch (e) {
+    // 조용히 포기 — 기본값(0)부터 직접 세는 기존 방식으로 돌아간다.
+  }
 }
 
 function tsMillisDesc(ts) {
@@ -216,8 +243,10 @@ function cashCardHtml(isToday) {
     ? `<div class="cash-summary">최근 등록 <strong>${(latest.total || 0).toLocaleString()}원</strong>${latest.staffName ? ` · ${escapeHtml(latest.staffName)}님` : ""}${formatTimeLabel(latest.createdAt) ? ` (${formatTimeLabel(latest.createdAt)})` : ""}</div>`
     : `<div class="cash-summary empty">${isToday ? "아직 오늘 시재를 등록하지 않았어요." : "등록된 시재가 없어요."}</div>`;
 
+  const carriedOver = isToday && !latest && cashDraftTotal() > 0;
   const form = isToday
     ? `
+      ${carriedOver ? `<div class="cash-carryover-hint">어제 마감 시재에서 이어왔어요 · 달라진 권종만 조정하세요</div>` : ""}
       <div class="cash-bill-grid">
         ${BILL_DENOMS.map((denom) => `
           <div class="cash-bill-cell">
@@ -438,7 +467,7 @@ function expenseCardHtml(isToday) {
         <input type="number" id="expenseAmountInput" placeholder="금액" inputmode="numeric" value="${escapeHtml(expenseAmountDraft)}" />
       </div>
       <div class="photo-attach-row" style="flex-wrap:wrap;">
-        <input type="file" accept="image/*" id="expenseReceiptInput" multiple style="display:none;" />
+        <input type="file" accept="image/*" id="expenseReceiptInput" ${MULTIPLE_FILE_ATTR} style="display:none;" />
         ${expenseReceiptUrls.map((url, i) => `
           <div class="photo-preview">
             <img src="${url}" alt="영수증" class="expense-receipt-preview-img" data-expense-photo="${url}" />
@@ -454,7 +483,7 @@ function expenseCardHtml(isToday) {
     <div class="card section-expense">
       <div class="expense-hint">돈통에서 현금으로 급하게 쓴 비용을 남겨주세요 (예: 편의점 우유 구매, 얼음 주문)</div>
       ${form}
-      <input type="file" accept="image/*" id="expenseRowReceiptInput" multiple style="display:none;" />
+      <input type="file" accept="image/*" id="expenseRowReceiptInput" ${MULTIPLE_FILE_ATTR} style="display:none;" />
       ${expenseListHtml(cashExpenses)}
     </div>`;
 }
@@ -468,6 +497,7 @@ const KNOWN_CUSTOMERS = ["다온주얼리", "퍼펙트환전소", "태극", "금
 
 let topups = []; // 전체 기간, live — 날짜 무관하게 이름 칩을 항상 채우는 데 쓴다
 let customTopupNames = []; // 직원이 직접 추가한 손님 이름(config/topupCustomers) — live, 전 직원 공유
+let topupHiddenNames = []; // 더 이상 칩으로 안 보이게 숨긴 손님 이름(config/topupCustomers.hiddenNames) — live, 전 직원 공유
 let topupSelectedName = null; // null이면 손님 목록, 이름이 있으면 그 손님의 전체 충전 내역을 본다
 let topupAmountDraft = "";
 
@@ -499,9 +529,90 @@ function topupChipNames() {
   customTopupNames.forEach((name) => {
     if (!byName.has(name)) byName.set(name, { name, lastAt: -1 });
   });
+  topupHiddenNames.forEach((name) => byName.delete(name));
   return [...byName.values()]
     .sort((a, b) => (b.lastAt ?? -1) - (a.lastAt ?? -1))
     .map((g) => g.name);
+}
+
+// 더 이상 충전 안 하는 손님을 칩 목록에서 치운다 — 과거 충전 기록(topups
+// 문서)은 그대로 둔다. KNOWN_CUSTOMERS(코드에 박힌 목록)든 직접 추가한
+// 이름이든 실제 충전 이력이 있는 이름이든 전부 이 방식 하나로 처리된다.
+async function hideTopupCustomer(name) {
+  if (!confirm(`${name}님을 손님 목록에서 삭제할까요?\n(지금까지의 충전 기록은 그대로 남아있어요)`)) return;
+  await setDoc(doc(db, "config", "topupCustomers"), { hiddenNames: arrayUnion(name) }, { merge: true });
+  if (topupSelectedName === name) topupSelectedName = null;
+  toast(`${name}님을 목록에서 삭제했어요`);
+}
+
+// 이름을 바꾸면 지금까지 그 이름으로 쌓인 충전 기록도 전부 새 이름으로
+// 옮겨서(batch), 한 손님의 누적 충전 내역이 중간에 끊기지 않고 새 이름
+// 밑으로 그대로 이어지게 한다. 옛 이름은 hiddenNames에 넣어 따로 칩이
+// 남지 않게 한다.
+async function renameTopupCustomer(oldName) {
+  const newName = (window.prompt("새 이름을 입력하세요", oldName) || "").trim();
+  if (!newName || newName === oldName) return;
+  const matching = topups.filter((t) => (t.customerName || "").trim() === oldName);
+  const batch = writeBatch(db);
+  matching.forEach((t) => batch.update(doc(db, "topups", t.id), { customerName: newName }));
+  batch.set(
+    doc(db, "config", "topupCustomers"),
+    { names: arrayUnion(newName), hiddenNames: arrayUnion(oldName) },
+    { merge: true }
+  );
+  await batch.commit();
+  if (topupSelectedName === oldName) topupSelectedName = newName;
+  toast(`${oldName} → ${newName}(으)로 이름을 바꿨어요`);
+}
+
+async function openTopupChipMenu(name) {
+  const choice = await showActionSheet([
+    { label: "✏️ 이름 수정" },
+    { label: "🗑️ 삭제", danger: true },
+  ]);
+  if (choice === 0) renameTopupCustomer(name);
+  else if (choice === 1) hideTopupCustomer(name);
+}
+
+// 손님 이름 칩을 꾹 누르면(길게 누르기) 위 메뉴가 뜬다 — 누르는 중 손가락이
+// 조금이라도 움직이면(스크롤 의도로 보고) 취소되고, 길게 누르기가 실제로
+// 발동했으면 그 뒤에 따라오는 click(= 해당 손님 선택)은 막는다.
+function wireTopupChipLongPress() {
+  rootEl.querySelectorAll("[data-topup-select]").forEach((chip) => {
+    const name = chip.dataset.topupSelect;
+    let holdTimer = null;
+    let firedLongPress = false;
+    let startX = 0;
+    let startY = 0;
+    const cancelHold = () => clearTimeout(holdTimer);
+
+    chip.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      startX = e.clientX;
+      startY = e.clientY;
+      firedLongPress = false;
+      holdTimer = setTimeout(() => {
+        firedLongPress = true;
+        if (navigator.vibrate) navigator.vibrate(15);
+        openTopupChipMenu(name);
+      }, 450);
+    });
+    chip.addEventListener("pointermove", (e) => {
+      if (Math.abs(e.clientX - startX) > 8 || Math.abs(e.clientY - startY) > 8) cancelHold();
+    });
+    chip.addEventListener("pointerup", cancelHold);
+    chip.addEventListener("pointercancel", cancelHold);
+    chip.addEventListener(
+      "click",
+      (e) => {
+        if (!firedLongPress) return;
+        e.preventDefault();
+        e.stopPropagation();
+        firedLongPress = false;
+      },
+      true
+    );
+  });
 }
 
 // 손님 이름은 여러 직원이 함께 쓰는 공용 명단이라 config 문서에 저장해서
@@ -722,6 +833,7 @@ function render() {
       render();
     });
   });
+  wireTopupChipLongPress();
   rootEl.querySelectorAll("[data-topup-delete]").forEach((el) => {
     el.addEventListener("click", () => deleteTopupEntry(el.dataset.topupDelete));
   });
@@ -749,7 +861,9 @@ function ensureStarted() {
     render();
   });
   onSnapshot(doc(db, "config", "topupCustomers"), (snap) => {
-    customTopupNames = (snap.exists() && snap.data().names) || [];
+    const d = snap.exists() ? snap.data() : {};
+    customTopupNames = d.names || [];
+    topupHiddenNames = d.hiddenNames || [];
     render();
   });
   loadAllCashChipTotals();

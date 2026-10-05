@@ -7,7 +7,7 @@
 // 게 아니라, 직원들이 월급날 제출한 급여 요청(payrollRequests)을 직원별로
 // 모아 보여주는 수신함 역할만 한다.
 import { db, collection, collectionGroup, doc, addDoc, updateDoc, deleteDoc, getDocs, onSnapshot, query, orderBy, where, serverTimestamp } from "./firebase-init.js";
-import { toast, escapeHtml } from "./util.js";
+import { toast, escapeHtml, copyText, showTopBanner } from "./util.js";
 import { avatarHtml } from "./avatar.js";
 
 let rootEl = null;
@@ -131,7 +131,11 @@ function shiftMinutes(startTime, endTime, breakMinutes) {
   return Math.max(0, mins - (breakMinutes || 0));
 }
 
-function computeShiftPay(s, wage) {
+// 공휴일에 혼자 근무하는 날처럼, 특정 날만 기본 시급과 다르게 받는 경우가
+// 있어서 — 그 날의 shift 문서에 wageOverride가 있으면 계정의 기본
+// 시급(defaultWage) 대신 그 값을 쓴다.
+function computeShiftPay(s, defaultWage) {
+  const wage = s.wageOverride || defaultWage;
   const mins = shiftMinutes(s.startTime, s.endTime, s.breakMinutes);
   const hours = mins / 60;
   const base = wage * hours;
@@ -139,7 +143,7 @@ function computeShiftPay(s, wage) {
   const overtime = base * (s.overtimePct || 0) / 100;
   const holiday = base * (s.holidayPct || 0) / 100;
   const extra = s.extraAllowance || 0;
-  return { mins, hours, base, night, overtime, holiday, extra, total: base + night + overtime + holiday + extra };
+  return { mins, hours, base, night, overtime, holiday, extra, total: base + night + overtime + holiday + extra, wage };
 }
 
 function shiftsInCycle(start, end) {
@@ -258,12 +262,22 @@ async function submitForm() {
     toast("시급을 입력해주세요");
     return;
   }
-  const accountUpdates = {};
-  if (wage !== hourlyWage) accountUpdates.hourlyWage = wage;
-  if (formInsuranceType !== insuranceType) accountUpdates.insuranceType = formInsuranceType;
-  if (Object.keys(accountUpdates).length > 0) {
-    await updateDoc(doc(db, "accounts", account.phone), accountUpdates);
-    hourlyWage = wage;
+  // 시급이 평소(기본 시급)와 다르면, 앞으로 쭉 쓸 기본 시급 자체를 바꾸는
+  // 건지 이번에 고른 날짜(들)만 특별히 다른 건지 매번 물어서 고르게 한다
+  // — 안 그러면 공휴일 하루만 다르게 등록하려다 기본 시급이 통째로 바뀌어
+  // 이미 등록해둔 다른 모든 날까지 그 시급으로 고정되는 사고가 난다. 처음
+  // 등록(기본 시급이 아직 없을 때)은 물어볼 필요 없이 그 값을 기본으로 삼는다.
+  let wageOverride = null;
+  if (wage !== hourlyWage) {
+    if (hourlyWage > 0 && !confirm(`이 시급(${wage.toLocaleString()}원)을 앞으로 기본 시급으로 바꿀까요?\n취소하면 이번에 고른 날짜에만 적용돼요.`)) {
+      wageOverride = wage;
+    } else {
+      await updateDoc(doc(db, "accounts", account.phone), { hourlyWage: wage });
+      hourlyWage = wage;
+    }
+  }
+  if (formInsuranceType !== insuranceType) {
+    await updateDoc(doc(db, "accounts", account.phone), { insuranceType: formInsuranceType });
     insuranceType = formInsuranceType;
   }
   const breakMinutes = parseInt(formBreak, 10) || 0;
@@ -279,6 +293,7 @@ async function submitForm() {
         overtimePct: formOvertimePct,
         holidayPct: formHolidayPct,
         extraAllowance,
+        wageOverride,
         createdAt: serverTimestamp(),
       })
     )
@@ -303,6 +318,7 @@ let editStartMin = "";
 let editEndHour = "";
 let editEndMin = "";
 let editBreak = 0;
+let editWage = ""; // 비워두면 기본 시급 적용, 채우면 이 날만 그 시급으로
 let editShowDatePicker = false;
 let editCalYear = 0;
 let editCalMonth = 0;
@@ -318,6 +334,7 @@ function openEditShift(shift) {
   editEndHour = eh !== undefined && eh !== "" ? String(Number(eh)) : "";
   editEndMin = em !== undefined && em !== "" ? String(Number(em)) : "";
   editBreak = shift.breakMinutes || 0;
+  editWage = shift.wageOverride ? String(shift.wageOverride) : "";
   editShowDatePicker = false;
   const [y, m, d] = shift.date.split("-").map(Number);
   editCalYear = y;
@@ -344,22 +361,28 @@ async function saveEditShift() {
     return;
   }
   const breakMinutes = parseInt(editBreak, 10) || 0;
+  // 비워두면 기본 시급을 그대로 쓴다(null) — 기본 시급과 같은 값을 적어도
+  // 마찬가지로 null 처리해서, 나중에 기본 시급이 바뀌면 이 날도 자동으로
+  // 같이 따라간다. 실제로 "다른" 날에만 wageOverride를 남긴다.
+  const wageRaw = parseInt(editWage, 10);
+  const wageOverride = Number.isFinite(wageRaw) && wageRaw > 0 && wageRaw !== hourlyWage ? wageRaw : null;
 
   const dateChanged = newDate !== editOriginal.date;
-  const timeChanged =
+  const fieldsChanged =
     startTime !== editOriginal.startTime ||
     endTime !== editOriginal.endTime ||
-    breakMinutes !== (editOriginal.breakMinutes || 0);
+    breakMinutes !== (editOriginal.breakMinutes || 0) ||
+    wageOverride !== (editOriginal.wageOverride || null);
 
-  if (!dateChanged && !timeChanged) {
+  if (!dateChanged && !fieldsChanged) {
     closeEditShift();
     return;
   }
 
   if (dateChanged) {
     if (!confirm("날짜를 변경하면 기존 근무 기록은 삭제되고 새 날짜로 저장돼요. 변경하시겠습니까?")) return;
-  } else if (timeChanged) {
-    if (!confirm("변경한 시간으로 저장할까요?")) return;
+  } else if (fieldsChanged) {
+    if (!confirm("변경한 내용으로 저장할까요?")) return;
   }
 
   await updateDoc(doc(db, "accounts", account.phone, "shifts", editingShiftId), {
@@ -367,6 +390,7 @@ async function saveEditShift() {
     startTime,
     endTime,
     breakMinutes,
+    wageOverride,
   });
   toast("수정했어요");
   closeEditShift();
@@ -380,6 +404,10 @@ function editShiftHtml() {
         <div class="row-between">
           <div style="font-weight:800; font-size:16px;">근무 수정</div>
           <button class="payroll-form-close-btn" id="payrollEditCloseBtn" aria-label="닫기">✕</button>
+        </div>
+        <div class="field">
+          <label>시급</label>
+          <input type="number" id="payrollEditWage" inputmode="numeric" value="${editWage || ""}" />
         </div>
         <div class="field">
           <label>근무일</label>
@@ -447,6 +475,7 @@ async function submitPayrollRequest() {
       overtimePct: s.overtimePct || 0,
       holidayPct: s.holidayPct || 0,
       extraAllowance: s.extraAllowance || 0,
+      wageOverride: s.wageOverride || null,
       pay: Math.round(computeShiftPay(s, hourlyWage).total),
     })),
     createdAt: serverTimestamp(),
@@ -739,7 +768,7 @@ function shiftCalDayOverlayHtml() {
             return `
             <div class="payroll-shift-row">
               <div class="payroll-shift-info">
-                <div class="payroll-shift-date">${s.startTime}~${s.endTime}</div>
+                <div class="payroll-shift-date">${s.startTime}~${s.endTime}${s.wageOverride ? `<span class="qty-pill">시급 ${s.wageOverride.toLocaleString()}원</span>` : ""}</div>
                 <div class="payroll-shift-time">${Math.round(pay.total).toLocaleString()}원</div>
               </div>
               <button class="payroll-shift-edit-btn" data-shift-cal-edit="${s.id}">수정</button>
@@ -766,6 +795,10 @@ function payslipTotals(cycleShifts) {
   const deduction = computeDeduction(gross, insuranceType);
   const net = gross - deduction.total;
   return { totals, gross, deduction, net };
+}
+
+function bankCopyBtnHtml(accountNumber) {
+  return `<span class="bank-copy-btn" data-copy-account="${escapeHtml(accountNumber)}" title="계좌번호 복사">복사</span>`;
 }
 
 function sumIcon(kind) {
@@ -804,7 +837,7 @@ function payslipHtml(cycleShifts, cycleLabel) {
           <div class="payroll-admin-shift-header">근무 내역</div>
           ${(existing.shifts || []).map((s) => `
             <div class="row-between payroll-admin-shift-line">
-              <span>${formatShiftDateLabel(s.date)} ${s.startTime}~${s.endTime}</span>
+              <span>${formatShiftDateLabel(s.date)} ${s.startTime}~${s.endTime}${s.wageOverride ? `<span class="qty-pill">시급 ${s.wageOverride.toLocaleString()}원</span>` : ""}</span>
               <span>${(s.pay || 0).toLocaleString()}원</span>
             </div>`).join("")}
         </div>` : ""}
@@ -830,7 +863,15 @@ function payslipHtml(cycleShifts, cycleLabel) {
     <div class="card">
       <div class="row-between"><strong>${sumIcon("plus")}지급 합계</strong><strong>${Math.round(gross).toLocaleString()}원</strong></div>
       ${row("근무 수당", totals.base)}
-      <div class="payroll-payslip-sub">${(hourlyWage || 0).toLocaleString()}원 × ${totals.hours.toFixed(1)}시간(${cycleShifts.length}일)</div>
+      <div class="payroll-admin-shift-header">근무 내역</div>
+      ${cycleShifts.map((s) => {
+        const p = computeShiftPay(s, hourlyWage);
+        return `
+        <div class="row-between payroll-admin-shift-line">
+          <span>${formatShiftDateLabel(s.date)} ${s.startTime}~${s.endTime}${s.wageOverride ? `<span class="qty-pill">시급 ${s.wageOverride.toLocaleString()}원</span>` : ""}</span>
+          <span>${Math.round(p.total).toLocaleString()}원</span>
+        </div>`;
+      }).join("")}
       ${row("야간 수당", totals.night)}
       ${row("연장 수당", totals.overtime)}
       ${row("휴일 수당", totals.holiday)}
@@ -1057,6 +1098,7 @@ function render() {
     document.getElementById("payrollEditEndHour").addEventListener("change", (e) => { editEndHour = e.target.value; });
     document.getElementById("payrollEditEndMin").addEventListener("change", (e) => { editEndMin = e.target.value; });
     document.getElementById("payrollEditBreak").addEventListener("input", (e) => { editBreak = e.target.value; });
+    document.getElementById("payrollEditWage").addEventListener("input", (e) => { editWage = e.target.value; });
     document.getElementById("payrollEditSaveBtn").addEventListener("click", saveEditShift);
   }
 }
@@ -1312,7 +1354,7 @@ function renderAdmin() {
               ${avatarHtml(g.phone, g.name, 28)}
               <div>
                 <strong>${escapeHtml(g.name)}</strong>
-                ${g.requests[0].bankName && g.requests[0].bankAccountNumber ? `<div style="font-size:11px; color:var(--muted);">🏦 ${escapeHtml(g.requests[0].bankName)} ${escapeHtml(g.requests[0].bankAccountNumber)}</div>` : ""}
+                ${g.requests[0].bankName && g.requests[0].bankAccountNumber ? `<div style="font-size:11px; color:var(--muted); display:flex; align-items:center; gap:4px;">🏦 ${escapeHtml(g.requests[0].bankName)} ${escapeHtml(g.requests[0].bankAccountNumber)} ${bankCopyBtnHtml(g.requests[0].bankAccountNumber)}</div>` : ""}
               </div>
             </span>
             <span style="font-size:12px; color:var(--muted);">제출 ${g.requests.length}건 ${open ? "︿" : "⌄"}</span>
@@ -1327,13 +1369,13 @@ function renderAdmin() {
                 <div style="font-weight:800; color:var(--gold);">${(r.net || 0).toLocaleString()}원</div>
               </div>
               <div class="payroll-admin-detail">
-                ${r.bankName && r.bankAccountNumber ? `<div class="row-between payroll-payslip-line"><span>🏦 입금 계좌</span><span>${escapeHtml(r.bankName)} ${escapeHtml(r.bankAccountNumber)}</span></div>` : ""}
+                ${r.bankName && r.bankAccountNumber ? `<div class="row-between payroll-payslip-line"><span>🏦 입금 계좌</span><span style="display:flex; align-items:center; gap:6px;">${escapeHtml(r.bankName)} ${escapeHtml(r.bankAccountNumber)} ${bankCopyBtnHtml(r.bankAccountNumber)}</span></div>` : ""}
                 <div class="row-between payroll-payslip-line"><span>${sumIcon("plus")}지급 합계</span><span>${(r.gross || 0).toLocaleString()}원</span></div>
                 <div class="row-between payroll-payslip-line"><span>${sumIcon("minus")}공제 합계</span><span>${(r.deductionTotal || 0).toLocaleString()}원</span></div>
                 <div class="payroll-admin-shift-header">근무 내역</div>
                 ${(r.shifts || []).map((s) => `
                   <div class="row-between payroll-admin-shift-line">
-                    <span>${formatShiftDateLabel(s.date)} ${s.startTime}~${s.endTime}${s.breakMinutes ? ` (휴게 ${s.breakMinutes}분)` : ""}${s.extraAllowance ? ` · 추가수당 ${s.extraAllowance.toLocaleString()}원` : ""}</span>
+                    <span>${formatShiftDateLabel(s.date)} ${s.startTime}~${s.endTime}${s.breakMinutes ? ` (휴게 ${s.breakMinutes}분)` : ""}${s.wageOverride ? `<span class="qty-pill">시급 ${s.wageOverride.toLocaleString()}원</span>` : ""}${s.extraAllowance ? ` · 추가수당 ${s.extraAllowance.toLocaleString()}원` : ""}</span>
                     <span>${(s.pay || 0).toLocaleString()}원</span>
                   </div>`).join("")}
                 <div style="display:flex; gap:8px; margin-top:8px;">
@@ -1352,6 +1394,12 @@ function renderAdmin() {
       const phone = el.dataset.adminGroupToggle;
       adminOpenGroup = adminOpenGroup === phone ? null : phone;
       renderAdmin();
+    });
+  });
+  rootEl.querySelectorAll("[data-copy-account]").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      copyText(el.dataset.copyAccount, "계좌번호를 복사했어요");
     });
   });
   rootEl.querySelectorAll("[data-admin-request-delete]").forEach((el) => {
@@ -1442,7 +1490,7 @@ function downloadPayrollImage(req) {
   shifts.forEach((s) => {
     ctx.textAlign = "left";
     ctx.fillStyle = "#1f1f1f";
-    ctx.fillText(`${formatShiftDateLabel(s.date)} ${s.startTime}~${s.endTime}`, padding, y);
+    ctx.fillText(`${formatShiftDateLabel(s.date)} ${s.startTime}~${s.endTime}${s.wageOverride ? ` (시급 ${s.wageOverride.toLocaleString()}원)` : ""}`, padding, y);
     ctx.textAlign = "right";
     ctx.fillText(`${(s.pay || 0).toLocaleString()}원`, width - padding, y);
     y += lineHeight;
@@ -1499,16 +1547,64 @@ let clockAccount = { name: "", phone: "" };
 let clockStarted = false;
 let lastClockType = null; // "in" | "out" | null — 버튼을 출근/퇴근 중 뭘 보여줄지만 결정
 let clockSubmitting = false; // 저장 중 연타로 도장이 중복 찍히는 걸 막는 잠금
+let clockScheduleToday = []; // 오늘 날짜의 내 근무 스케줄 — live
+let clockTickTimer = null; // 매분 다시 그려서 잠금이 풀리는 순간 자동 반영
 
 function timeNowStr() {
   const d = new Date();
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
+function timeStrToMinutes(hhmm) {
+  const [h, m] = (hhmm || "").split(":").map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  return h * 60 + m;
+}
+
+function minutesToTimeLabel(mins) {
+  const m = ((Math.round(mins) % 1440) + 1440) % 1440;
+  return `${pad2(Math.floor(m / 60))}:${pad2(m % 60)}`;
+}
+
+function nowMinutes() {
+  const d = new Date();
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+// 출근 도장은 스케줄상 가장 이른 출근 시각 30분 전부터, 퇴근 도장은 가장
+// 늦은 퇴근 시각 10분 전부터 열린다 — 잠결에 실수로 누르는 것 같은 사고를
+// 막기 위한 잠금. 돌발 근무가 없는 매장이라, 오늘 등록된 스케줄이 아예
+// 없으면(= 오늘 근무가 아님) 출근 도장은 시각과 상관없이 계속 잠가둔다.
+// 다만 퇴근 도장은 예외 — 이미 출근 중인 사람이 스케줄 삭제 등 어떤
+// 이유로든 오늘 스케줄을 못 찾게 되면, 영영 퇴근을 못 찍게 갇히는 사고를
+// 막기 위해 그 경우엔 잠그지 않는다.
+function clockLockInfo(type) {
+  if (clockScheduleToday.length === 0) return type === "in" ? { locked: true, noSchedule: true } : { locked: false };
+  const field = type === "in" ? "startTime" : "endTime";
+  const offset = type === "in" ? -30 : -10;
+  const pick = type === "in" ? Math.min : Math.max;
+  const values = clockScheduleToday.map((s) => timeStrToMinutes(s[field])).filter((n) => n !== null);
+  if (values.length === 0) return type === "in" ? { locked: true, noSchedule: true } : { locked: false };
+  const unlockAt = pick(...values) + offset;
+  if (nowMinutes() >= unlockAt) return { locked: false };
+  return { locked: true, unlockAt };
+}
+
+function lockHintText(lock, type) {
+  const label = type === "in" ? "출근" : "퇴근";
+  if (lock.noSchedule) return `오늘은 등록된 근무 스케줄이 없어요`;
+  return `${minutesToTimeLabel(lock.unlockAt)}부터 ${label} 도장을 찍을 수 있어요`;
+}
+
 async function recordAttendanceStamp(type) {
   // 저장 중엔 버튼이 바로 안 바뀌어서(서버 응답 대기), 반응이 없다고 여러 번
   // 연타하면 도장이 그만큼 중복으로 찍혔다 — 저장이 끝날 때까지 잠가서 막는다.
   if (clockSubmitting) return;
+  const lock = clockLockInfo(type);
+  if (lock.locked) {
+    toast(lockHintText(lock, type));
+    return;
+  }
   clockSubmitting = true;
   renderClockWidget();
   try {
@@ -1523,6 +1619,11 @@ async function recordAttendanceStamp(type) {
     });
     await updateDoc(doc(db, "accounts", clockAccount.phone), { lastClockType: type });
     toast(`${time} ${type === "in" ? "출근" : "퇴근"} 도장 찍었어요`);
+    showTopBanner(
+      type === "in"
+        ? `${clockAccount.name}님, 오늘도 화이팅! 💪`
+        : `${clockAccount.name}님, 오늘도 정말 고생 많았어요 🙌`
+    );
   } finally {
     clockSubmitting = false;
     renderClockWidget();
@@ -1531,17 +1632,21 @@ async function recordAttendanceStamp(type) {
 
 function renderClockWidget() {
   if (!clockRootEl) return;
-  const disabledAttr = clockSubmitting ? "disabled" : "";
-  clockRootEl.innerHTML = lastClockType === "in"
-    ? `
+  // 잠겨있어도 버튼 자체는 평소처럼 눌리게 둔다 — 눌렀을 때 recordAttendanceStamp가
+  // lockHintText를 토스트로 띄워서 알려주는 쪽이, 버튼 위에 항상 안내 문구를
+  // 깔아두는 것보다 깔끔하다는 판단.
+  if (lastClockType === "in") {
+    clockRootEl.innerHTML = `
       <div class="clock-widget">
         <div class="clock-widget-status">🟢 출근 중</div>
-        <button class="btn urgent block" id="clockOutBtn" ${disabledAttr}>${clockSubmitting ? "저장 중..." : "🔴 퇴근 도장 찍기"}</button>
-      </div>`
-    : `
-      <div class="clock-widget">
-        <button class="btn normal block" id="clockInBtn" ${disabledAttr}>${clockSubmitting ? "저장 중..." : "🕐 출근 도장 찍기"}</button>
+        <button class="btn urgent block" id="clockOutBtn" ${clockSubmitting ? "disabled" : ""}>${clockSubmitting ? "저장 중..." : "🔴 퇴근 도장 찍기"}</button>
       </div>`;
+  } else {
+    clockRootEl.innerHTML = `
+      <div class="clock-widget">
+        <button class="btn normal block" id="clockInBtn" ${clockSubmitting ? "disabled" : ""}>${clockSubmitting ? "저장 중..." : "🕐 출근 도장 찍기"}</button>
+      </div>`;
+  }
   const inBtn = clockRootEl.querySelector("#clockInBtn");
   const outBtn = clockRootEl.querySelector("#clockOutBtn");
   if (inBtn) inBtn.addEventListener("click", () => recordAttendanceStamp("in"));
@@ -1556,6 +1661,16 @@ function ensureClockStarted() {
     lastClockType = data.lastClockType || null;
     renderClockWidget();
   });
+  onSnapshot(
+    query(collection(db, "schedules"), where("date", "==", ymd(new Date())), where("staffPhone", "==", clockAccount.phone)),
+    (snap) => {
+      clockScheduleToday = snap.docs.map((d) => d.data());
+      renderClockWidget();
+    }
+  );
+  // 잠금이 시간 경계를 넘는 순간(30분 전/10분 전) 새로고침 없이도 자동으로
+  // 풀리도록 매분 다시 그린다.
+  if (!clockTickTimer) clockTickTimer = setInterval(renderClockWidget, 60 * 1000);
 }
 
 export function mountClockWidget(el, acc) {

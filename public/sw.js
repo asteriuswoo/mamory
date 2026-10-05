@@ -94,15 +94,38 @@ async function bumpAppBadge() {
   }
 }
 
-const CACHE_NAME = "cafe-order-v22";
+const CACHE_NAME = "cafe-order-v25";
 const APP_SHELL = [
   "index.html",
   "staff.html",
   "owner.html",
   "admin.html",
   "share.html",
+  "payroll.html",
+  "register.html",
   "css/style.css",
   "manifest.json",
+  "js/admin.js",
+  "js/app-shell.js",
+  "js/auth.js",
+  "js/avatar.js",
+  "js/badge.js",
+  "js/firebase-config.js",
+  "js/firebase-init.js",
+  "js/humanityboard.js",
+  "js/login.js",
+  "js/mascot.js",
+  "js/owner.js",
+  "js/payroll.js",
+  "js/payrollpage.js",
+  "js/push.js",
+  "js/register-sw.js",
+  "js/register.js",
+  "js/registerboard.js",
+  "js/share.js",
+  "js/shareboard.js",
+  "js/staff.js",
+  "js/util.js",
 ];
 
 self.addEventListener("install", (event) => {
@@ -126,18 +149,30 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return; // let Firebase/CDN requests pass through
 
+  // Stale-while-revalidate: 캐시가 있으면 그걸로 즉시 응답해서 네트워크가
+  // 느리거나 끊겨도 "빈 껍데기"로 기다리는 일 없이 바로 뜨고, 동시에
+  // 백그라운드에서 최신 버전을 받아 캐시를 갱신해둔다 (이전의 network-first
+  // 방식은 매번 네트워크 응답을 기다려야 해서, 네트워크가 느릴 때 가끔
+  // 빈 화면으로 한참 멈춰 있었다).
+  //
+  // 배포 직후에도 새로고침을 두 번 할 필요는 없다 — sw.js 자체가 바뀌면
+  // (CACHE_NAME 변경) 브라우저가 새 서비스워커를 설치하면서 APP_SHELL을
+  // 전부 새로 받아 캐시해두고, skipWaiting()/clients.claim()으로 즉시
+  // activate시킨 뒤 register-sw.js의 controllerchange 리스너가 그 순간
+  // 페이지를 한 번 자동으로 새로고침해서 이미 새로 캐시된 최신 버전을
+  // 바로 보여주기 때문이다.
   event.respondWith(
-    // "no-cache" (not "no-store"): always revalidate with the server before
-    // using anything, so a new deploy is still picked up immediately — but
-    // unlike no-store, an unchanged file gets a cheap 304 back instead of a
-    // full re-download every time, which is what was making cold opens
-    // (e.g. tapping a push notification) feel slower than they need to be.
-    fetch(event.request, { cache: "no-cache" })
-      .then((res) => {
-        const resClone = res.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, resClone));
-        return res;
-      })
-      .catch(() => caches.match(event.request))
+    caches.match(event.request).then((cached) => {
+      const network = fetch(event.request)
+        .then((res) => {
+          if (res && res.ok) {
+            const resClone = res.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, resClone));
+          }
+          return res;
+        })
+        .catch(() => cached);
+      return cached || network;
+    })
   );
 });

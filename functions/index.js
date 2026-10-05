@@ -79,12 +79,49 @@ async function sendToTokens(tokens, notification) {
   }
 }
 
+// 실제 기기에 푸시가 도착했는지와 별개로, 받을 사람 계정마다 "이런 알림이
+// 왔었다"는 기록을 accounts/{phone}/notifications 에 남긴다 — 권한/서비스
+// 워커 문제로 푸시가 조용히 안 갈 때도(이번에 겪은 것처럼) 앱을 열면
+// 알림 패널에서 놓친 내용을 볼 수 있게 하기 위해서다. 토큰이 하나도 없는
+// 계정도 기록만큼은 남겨서(push가 아예 안 가더라도) 나중에라도 확인할 수
+// 있다. 3일 지난 기록은 cleanupOldNotifications가 매일 정리한다.
+async function notify(phones, tokens, notification) {
+  const phoneList = [...new Set((Array.isArray(phones) ? phones : [phones]).filter(Boolean))];
+  const jobs = [];
+  if (phoneList.length > 0) {
+    const batch = db.batch();
+    phoneList.forEach((phone) => {
+      const ref = db.collection("accounts").doc(phone).collection("notifications").doc();
+      batch.set(ref, {
+        title: notification.title,
+        body: notification.body,
+        link: notification.link || "/",
+        type: notification.type || "general",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+    jobs.push(batch.commit());
+  }
+  if (tokens && tokens.length > 0) jobs.push(sendToTokens(tokens, notification));
+  await Promise.all(jobs);
+}
+
 // The share board lives at a different URL depending on the viewer's role
 // (owner-side app-shell has a real share.html; staff.html has an in-page
 // "share" view instead) — so a single "공유해요" event's recipients need
-// per-role links, not one link for everybody.
-function shareLinkForRole(role) {
-  return role === "owner" ? "/share.html" : "/staff.html?view=share";
+// per-role links, not one link for everybody. tab(옵션)을 주면 알림을 눌렀을
+// 때 공유하기 화면만 열리는 게 아니라 해당 세그먼트 탭(소통해요/품절공유/
+// 메뉴공유)까지 바로 넘어가도록 쿼리스트링에 stab을 함께 싣는다 —
+// shareboard.js의 setInitialShareTab이 이 값을 읽어 적용한다. dateStr(옵션)은
+// 그 글이 올라온 날짜("YYYY-MM-DD") — 오늘 글이 아니면(품절은 해제 전까지
+// 이월되니 특히 자주 있다) 날짜칩도 그 날짜로 같이 옮겨가야 바로 보인다.
+function shareLinkForRole(role, tab, dateStr) {
+  const base = role === "owner" ? "/share.html" : "/staff.html?view=share";
+  const params = [];
+  if (tab) params.push(`stab=${tab}`);
+  if (dateStr) params.push(`sdate=${dateStr}`);
+  if (params.length === 0) return base;
+  return `${base}${base.includes("?") ? "&" : "?"}${params.join("&")}`;
 }
 
 // 새 발주 요청이 제출되면 사장님(들)에게 알림. 직원이 "발주 요청하기"를 한 번
@@ -95,12 +132,14 @@ function shareLinkForRole(role) {
 exports.notifyOwnerOnNewRequest = onDocumentCreated("checks/{date}/requestBatches/{batchId}", async (event) => {
   const batch = event.data.data();
   const ownersSnap = await db.collection("accounts").where("role", "==", "owner").get();
+  const phones = [];
   const tokens = [];
-  ownersSnap.forEach((doc) => tokens.push(...tokensOf(doc.data().fcmTokens)));
-  await sendToTokens(tokens, {
+  ownersSnap.forEach((doc) => { phones.push(doc.id); tokens.push(...tokensOf(doc.data().fcmTokens)); });
+  await notify(phones, tokens, {
     title: "자재발주 요청",
     body: `${batch.staffName ? batch.staffName + "님이 " : ""}자재 발주 요청을 보냈습니다`,
     link: "/owner.html",
+    type: "request",
   });
 });
 
@@ -115,10 +154,11 @@ exports.notifyStaffOnOrdered = onDocumentCreated("checks/{date}/orderBatches/{ba
   const accSnap = await db.collection("accounts").doc(batch.staffPhone).get();
   if (!accSnap.exists) return;
   const tokens = tokensOf(accSnap.data().fcmTokens);
-  await sendToTokens(tokens, {
+  await notify([batch.staffPhone], tokens, {
     title: "사장님의 주문완료 알림",
     body: "사장님이 자재 주문을 완료했습니다",
     link: "/staff.html?view=cart",
+    type: "order",
   });
 });
 
@@ -126,29 +166,60 @@ exports.notifyStaffOnOrdered = onDocumentCreated("checks/{date}/orderBatches/{ba
 // 모두에게 알림. 받는 사람의 역할(사장/직원)에 따라 열어줄 페이지가 다르고,
 // @멘션된 사람에게는 "이미 모두에게 가는 일반 알림"을 중복으로 또 보내는
 // 대신 제목만 "~님이 회원님을 언급했어요"로 바꿔서 구분되게 보낸다.
+// 댓글(notifyOnNewReply)과 같은 규칙: @멘션이 있으면 멘션된 사람에게만,
+// 없으면 작성자를 뺀 전원에게 알림이 간다.
 exports.notifyOnNewShareNote = onDocumentCreated("shares/{date}/items/{itemId}", async (event) => {
+  const itemDate = event.params.date;
   const item = event.data.data();
   if (item.type !== "note" && item.type !== "soldout") return;
-  const accSnap = await db.collection("accounts").get();
   const isSoldout = item.type === "soldout";
-  const defaultTitle = isSoldout ? "품절 공유 알림" : "공유해요 알림";
+  const defaultTitle = isSoldout ? "품절 공유 알림" : "소통해요 알림";
   const body = `${item.staffName ? item.staffName + "님: " : ""}${item.content || ""}${isSoldout ? " 품절됐어요" : ""}`;
   const mentionedPhones = new Set(item.mentions || []);
+  const hasMention = !isSoldout && (item.mentionsAll || mentionedPhones.size > 0);
+
+  const accSnap = await db.collection("accounts").get();
   const sends = [];
   accSnap.forEach((docSnap) => {
     if (docSnap.id === item.staffPhone) return;
-    const data = docSnap.data();
-    const tokens = tokensOf(data.fcmTokens);
-    if (tokens.length === 0) return;
-    const role = data.role === "owner" ? "owner" : "staff";
     const mentioned = !isSoldout && (item.mentionsAll || mentionedPhones.has(docSnap.id));
-    sends.push(sendToTokens(tokens, {
+    if (hasMention && !mentioned) return;
+    const data = docSnap.data();
+    const role = data.role === "owner" ? "owner" : "staff";
+    sends.push(notify([docSnap.id], tokensOf(data.fcmTokens), {
       title: mentioned ? `${item.staffName ? item.staffName + "님이 " : ""}회원님을 언급했어요` : defaultTitle,
       body,
-      link: shareLinkForRole(role),
+      link: shareLinkForRole(role, isSoldout ? "soldout" : "note", itemDate),
+      type: isSoldout ? "soldout" : "share",
     }));
   });
   await Promise.all(sends);
+});
+
+// 품절이 해제되면(resolved: false/없음 -> true) 처리한 사람을 제외한 모두에게
+// 알림 — 품절 등록 때(notifyOnNewShareNote)와 짝을 이루는 알림이라, 자재가
+// 다시 들어온 걸 다들 바로 알 수 있게 한다. 이미 해제된 항목의 문구만 다시
+// 고치는 경우(resolved가 이미 true)는 제외 — 그때는 다시 알릴 내용이 없다.
+exports.notifyOnSoldoutResolved = onDocumentUpdated("shares/{date}/items/{itemId}", async (event) => {
+  const itemDate = event.params.date;
+  const before = event.data.before.data();
+  const after = event.data.after.data();
+  if (after.type !== "soldout" || before.resolved || !after.resolved) return;
+
+  const body = `${after.resolvedByName ? after.resolvedByName + "님: " : ""}${after.content || ""} 해제됐어요`;
+  const accSnap = await db.collection("accounts").get();
+  const byRole = { owner: { phones: [], tokens: [] }, staff: { phones: [], tokens: [] } };
+  accSnap.forEach((docSnap) => {
+    if (docSnap.id === after.resolvedByPhone) return;
+    const role = docSnap.data().role === "owner" ? "owner" : "staff";
+    byRole[role].phones.push(docSnap.id);
+    byRole[role].tokens.push(...tokensOf(docSnap.data().fcmTokens));
+  });
+  await Promise.all(
+    Object.keys(byRole).map((role) =>
+      notify(byRole[role].phones, byRole[role].tokens, { title: "품절 해제 알림", body, link: shareLinkForRole(role, "soldout", itemDate), type: "soldout" })
+    )
+  );
 });
 
 // 공유하기 > 레시피(레시피변경/단종)에 새 글이 올라오면 작성자를 제외한
@@ -160,15 +231,18 @@ exports.notifyOnNewRecipe = onDocumentCreated("recipes/{recipeId}", async (event
   const title = isDisco ? "🔴 메뉴 단종 알림" : "📖 레시피 등록 알림";
   const body = `${recipe.staffName ? recipe.staffName + "님: " : ""}${recipe.menuName || ""}${isDisco ? " 단종됐어요" : " 레시피가 등록됐어요"}`;
   const accSnap = await db.collection("accounts").get();
-  const sends = [];
+  const byRole = { owner: { phones: [], tokens: [] }, staff: { phones: [], tokens: [] } };
   accSnap.forEach((docSnap) => {
     if (docSnap.id === recipe.staffPhone) return;
-    const tokens = tokensOf(docSnap.data().fcmTokens);
-    if (tokens.length === 0) return;
     const role = docSnap.data().role === "owner" ? "owner" : "staff";
-    sends.push(sendToTokens(tokens, { title, body, link: shareLinkForRole(role) }));
+    byRole[role].phones.push(docSnap.id);
+    byRole[role].tokens.push(...tokensOf(docSnap.data().fcmTokens));
   });
-  await Promise.all(sends);
+  await Promise.all(
+    Object.keys(byRole).map((role) =>
+      notify(byRole[role].phones, byRole[role].tokens, { title, body, link: shareLinkForRole(role, "recipe"), type: isDisco ? "discontinued" : "recipe" })
+    )
+  );
 });
 
 // 등록해요 > 시재 등록에 새 기록이 쌓이면 등록한 사람을 제외한 모두에게
@@ -180,16 +254,17 @@ function registerLinkForRole(role) {
 exports.notifyOnNewCashEntry = onDocumentCreated("cashRegister/{date}/entries/{entryId}", async (event) => {
   const entry = event.data.data();
   const accSnap = await db.collection("accounts").get();
-  const tokensByRole = { owner: [], staff: [] };
+  const byRole = { owner: { phones: [], tokens: [] }, staff: { phones: [], tokens: [] } };
   accSnap.forEach((doc) => {
     if (doc.id === entry.staffPhone) return;
     const role = doc.data().role === "owner" ? "owner" : "staff";
-    tokensByRole[role].push(...tokensOf(doc.data().fcmTokens));
+    byRole[role].phones.push(doc.id);
+    byRole[role].tokens.push(...tokensOf(doc.data().fcmTokens));
   });
   const body = `${entry.staffName ? entry.staffName + "님이 " : ""}시재 ${(entry.total || 0).toLocaleString()}원을 등록했습니다`;
   await Promise.all(
-    Object.keys(tokensByRole).map((role) =>
-      sendToTokens(tokensByRole[role], { title: "시재 등록 알림", body, link: registerLinkForRole(role) })
+    Object.keys(byRole).map((role) =>
+      notify(byRole[role].phones, byRole[role].tokens, { title: "시재 등록 알림", body, link: registerLinkForRole(role), type: "cash" })
     )
   );
 });
@@ -199,12 +274,14 @@ exports.notifyOnNewCashEntry = onDocumentCreated("cashRegister/{date}/entries/{e
 exports.notifyOwnerOnPayrollRequest = onDocumentCreated("payrollRequests/{requestId}", async (event) => {
   const req = event.data.data();
   const ownersSnap = await db.collection("accounts").where("role", "==", "owner").get();
+  const phones = [];
   const tokens = [];
-  ownersSnap.forEach((doc) => tokens.push(...tokensOf(doc.data().fcmTokens)));
-  await sendToTokens(tokens, {
+  ownersSnap.forEach((doc) => { phones.push(doc.id); tokens.push(...tokensOf(doc.data().fcmTokens)); });
+  await notify(phones, tokens, {
     title: "급여 제출 알림",
     body: `${req.staffName ? req.staffName + "님이 " : ""}${req.cycleLabel || ""} 급여를 제출했습니다`,
     link: "/staff.html?view=payroll",
+    type: "payroll",
   });
 });
 
@@ -215,16 +292,19 @@ exports.notifyOwnerOnAttendanceStamp = onDocumentCreated("accounts/{phone}/atten
   const stamp = event.data.data();
   const phone = event.params.phone;
   const ownersSnap = await db.collection("accounts").where("role", "==", "owner").get();
+  const phones = [];
   const tokens = [];
   ownersSnap.forEach((doc) => {
     if (doc.id === phone) return;
+    phones.push(doc.id);
     tokens.push(...tokensOf(doc.data().fcmTokens));
   });
   const label = stamp.type === "in" ? "출근" : "퇴근";
-  await sendToTokens(tokens, {
+  await notify(phones, tokens, {
     title: "출퇴근 알림",
     body: `${stamp.staffName ? stamp.staffName + "님이 " : ""}${stamp.time || ""} ${label} 도장을 찍었습니다`,
     link: "/staff.html?view=payroll",
+    type: "attendance",
   });
 });
 
@@ -238,6 +318,7 @@ exports.notifyOwnerOnAttendanceStamp = onDocumentCreated("accounts/{phone}/atten
 // 쓴 일반 댓글은 작성자를 뺀 전원에게 알림이 간다(원글 작성자만 받던
 // 예전 방식에서 확장됨).
 exports.notifyOnNewReply = onDocumentUpdated("shares/{date}/items/{itemId}", async (event) => {
+  const itemDate = event.params.date;
   const before = event.data.before.data();
   const after = event.data.after.data();
   const beforeReplies = before.replies || [];
@@ -257,13 +338,12 @@ exports.notifyOnNewReply = onDocumentUpdated("shares/{date}/items/{itemId}", asy
     const mentioned = newReply.mentionsAll || mentionedPhones.has(docSnap.id);
     if (hasMention && !mentioned) return;
     const data = docSnap.data();
-    const tokens = tokensOf(data.fcmTokens);
-    if (tokens.length === 0) return;
     const role = data.role === "owner" ? "owner" : "staff";
-    sends.push(sendToTokens(tokens, {
-      title: mentioned ? `${newReply.staffName ? newReply.staffName + "님이 " : ""}회원님을 언급했어요` : "공유해요 알림",
+    sends.push(notify([docSnap.id], tokensOf(data.fcmTokens), {
+      title: mentioned ? `${newReply.staffName ? newReply.staffName + "님이 " : ""}회원님을 언급했어요` : "소통해요 알림",
       body,
-      link: shareLinkForRole(role),
+      link: shareLinkForRole(role, "note", itemDate),
+      type: "share",
     }));
   });
   await Promise.all(sends);
@@ -325,6 +405,7 @@ exports.awardHoneyOnOrderBatch = onDocumentCreated("checks/{date}/orderBatches/{
 });
 
 exports.notifyOnNewReaction = onDocumentUpdated("shares/{date}/items/{itemId}", async (event) => {
+  const itemDate = event.params.date;
   const before = event.data.before.data();
   const after = event.data.after.data();
   const beforeReactions = before.reactions || {};
@@ -350,10 +431,11 @@ exports.notifyOnNewReaction = onDocumentUpdated("shares/{date}/items/{itemId}", 
   if (!authorAccSnap.exists) return;
   const tokens = tokensOf(authorAccSnap.data().fcmTokens);
   const label = REACTION_LABELS[reactionKey] || "리액션";
-  await sendToTokens(tokens, {
-    title: "공유해요 알림",
+  await notify([after.staffPhone], tokens, {
+    title: "소통해요 알림",
     body: `${reactorName}님이 ${withEulReul(label)} 눌렀습니다`,
-    link: shareLinkForRole(authorAccSnap.data().role),
+    link: shareLinkForRole(authorAccSnap.data().role, "note", itemDate),
+    type: "share",
   });
 });
 
@@ -381,7 +463,7 @@ exports.notifyPayday = onSchedule({ schedule: "0 9 * * *", timeZone: "Asia/Seoul
   accSnap.forEach((docSnap) => {
     const data = docSnap.data();
     if (data.role === "owner") {
-      owners.push(data);
+      owners.push({ phone: docSnap.id, fcmTokens: data.fcmTokens });
       return;
     }
     if (data.paydayOfMonth && data.paydayOfMonth === todayDay) {
@@ -390,22 +472,25 @@ exports.notifyPayday = onSchedule({ schedule: "0 9 * * *", timeZone: "Asia/Seoul
   });
   if (staffOnPayday.length === 0) return;
 
+  const ownerPhones = owners.map((o) => o.phone);
   const ownerTokens = [];
   owners.forEach((o) => ownerTokens.push(...tokensOf(o.fcmTokens)));
 
   await Promise.all([
     ...staffOnPayday.map((s) =>
-      sendToTokens(tokensOf(s.fcmTokens), {
+      notify([s.phone], tokensOf(s.fcmTokens), {
         title: "월급날 알림",
         body: "오늘은 월급날이에요! 사장님께 급여내역을 제출해보세요",
         link: "/staff.html?view=payroll",
+        type: "payroll",
       })
     ),
     ...staffOnPayday.map((s) =>
-      sendToTokens(ownerTokens, {
+      notify(ownerPhones, ownerTokens, {
         title: "급여 지급일 알림",
         body: `${s.name || "직원"}님 급여 지급날입니다!`,
         link: "/staff.html?view=payroll",
+        type: "payroll",
       })
     ),
   ]);
@@ -480,10 +565,11 @@ async function notifyScheduledCashReminder(hour) {
       .filter((s) => s.exists)
       .map((s) => {
         const data = s.data();
-        return sendToTokens(tokensOf(data.fcmTokens), {
+        return notify([s.id], tokensOf(data.fcmTokens), {
           title: "시재 등록 알림",
           body: `${timeStr} 시재를 등록해주세요`,
           link: registerLinkForRole(data.role),
+          type: "cash",
         });
       })
   );
@@ -507,32 +593,73 @@ exports.notifyTomorrowShift = onSchedule({ schedule: "0 21 * * *", timeZone: "As
       const accSnap = await db.collection("accounts").doc(d.staffPhone).get();
       if (!accSnap.exists) return;
       const tokens = tokensOf(accSnap.data().fcmTokens);
-      await sendToTokens(tokens, {
+      await notify([d.staffPhone], tokens, {
         title: "내일 근무 알림",
         body: `내일 ${d.shiftType || ""} ${d.startTime || ""}~${d.endTime || ""} 근무예요`,
         link: "/staff.html?view=payroll",
+        type: "schedule",
       });
     })
   );
 });
 
-// ---- 인류애 바사삭 등록 알림 ----
+// ---- 극한직업 일지 등록 알림 ----
 // 가볍게 공감하고 넘기는 게 목적인 기능이라, 작성자 본인을 뺀 전 직원(+사장님)
 // 에게 바로 알림을 보낸다 — 공유해요처럼 역할별로 열어줄 페이지가 다를 필요가
 // 없는 단일 화면 기능이라 링크도 /staff.html 하나로 고정.
 exports.notifyOnHumanityCrack = onDocumentCreated("humanityCracks/{crackId}", async (event) => {
   const crack = event.data.data();
   const accSnap = await db.collection("accounts").get();
+  const phones = [];
   const tokens = [];
   accSnap.forEach((doc) => {
     if (doc.id === crack.staffPhone) return;
+    phones.push(doc.id);
     tokens.push(...tokensOf(doc.data().fcmTokens));
   });
-  await sendToTokens(tokens, {
-    title: "💢 인류애 바사삭",
+  await notify(phones, tokens, {
+    title: "💢 극한직업 일지",
     body: `${crack.staffName ? crack.staffName + "님: " : ""}${crack.reason || ""}`,
     link: "/staff.html",
+    type: "humanity",
   });
+});
+
+// ---- 단종 메뉴 공지 자동 정리 (매일 새벽 4시) ----
+// 단종 소식은 "이제 안 만드는 메뉴" 공지라 직원들이 한 달 정도 보고 나면
+// 더 들고 있을 필요가 없다 — 레시피 탭이 오래된 단종 공지로 계속 쌓이지
+// 않도록, 등록된 지 30일 지난 status:"discontinued" 문서를 매일 정리한다.
+// 변경(신메뉴/기존메뉴) 레시피는 계속 참고할 자료라 대상이 아니다.
+exports.cleanupOldDiscontinuedRecipes = onSchedule({ schedule: "0 4 * * *", timeZone: "Asia/Seoul" }, async () => {
+  const cutoff = admin.firestore.Timestamp.fromMillis(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const snap = await db
+    .collection("recipes")
+    .where("status", "==", "discontinued")
+    .where("createdAt", "<", cutoff)
+    .get();
+  if (snap.empty) return;
+  const batch = db.batch();
+  snap.docs.forEach((docSnap) => batch.delete(docSnap.ref));
+  await batch.commit();
+});
+
+// ---- 알림내역 자동 정리 (매일 새벽 4시) ----
+// 알림 패널은 "최근 3일"만 보여주면 충분한 용도라(최근에 뭘 놓쳤는지 확인
+// 하는 게 목적이지 전체 이력 보관이 목적이 아니다), 3일 지난 기록은
+// collectionGroup으로 모든 계정을 한 번에 훑어 지운다. Admin SDK라 보안
+// 규칙과 무관하게 전체를 조회할 수 있다.
+exports.cleanupOldNotifications = onSchedule({ schedule: "0 4 * * *", timeZone: "Asia/Seoul" }, async () => {
+  const cutoff = admin.firestore.Timestamp.fromMillis(Date.now() - 3 * 24 * 60 * 60 * 1000);
+  const snap = await db.collectionGroup("notifications").where("createdAt", "<", cutoff).get();
+  if (snap.empty) return;
+  // batch는 최대 500건이라, 혹시 한 번에 넘치면 여러 배치로 나눠 처리한다.
+  const chunks = [];
+  for (let i = 0; i < snap.docs.length; i += 450) chunks.push(snap.docs.slice(i, i + 450));
+  for (const chunk of chunks) {
+    const batch = db.batch();
+    chunk.forEach((docSnap) => batch.delete(docSnap.ref));
+    await batch.commit();
+  }
 });
 
 // ---- 사진 저장(다운로드) 프록시 ----

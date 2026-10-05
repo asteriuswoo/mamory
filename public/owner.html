@@ -2,16 +2,17 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
 <meta name="theme-color" content="#fbf3e6" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="MAMORY" />
 <link rel="manifest" href="manifest.json" />
 <link rel="apple-touch-icon" href="icons/icon-192.png?v=4" />
 <link rel="icon" href="icons/icon-192.png?v=4" />
 <title>발주 리스트 - MAMORY</title>
-<link rel="stylesheet" href="css/style.css?v=80" />
+<style>html,body{background:#f7f7f5}</style>
+<link rel="stylesheet" href="css/style.css?v=119" />
 </head>
 <body class="has-bottom-tabs">
 <header class="topbar">
@@ -35,13 +36,16 @@
         <div id="accountName">-</div>
       </div>
       <div style="display:flex; gap:8px;">
-        <button class="notify-icon-btn" id="notifyBtn" aria-label="알림 설정">🔔</button>
+        <span class="notify-bell-wrap">
+          <button class="notify-icon-btn" id="notifyBtn" aria-label="알림">🔔</button>
+          <span class="notify-badge" id="notifyBadge" style="display:none;"></span>
+        </span>
         <button class="logout-btn" id="refreshBtn">새로고침</button>
         <button class="logout-btn" id="logoutBtn">로그아웃</button>
       </div>
     </div>
     <a href="staff.html" class="btn soft block" style="margin-top:10px;">내가 직접 발주 요청하기</a>
-    <button type="button" class="btn block humanity-trigger-btn" id="humanityBtn" style="margin-top:10px;">😠 직원들의 인류애 챙기기</button>
+    <button type="button" class="btn block humanity-trigger-btn" id="humanityBtn" style="margin-top:10px;">😠 직원들 극한직업 일지 보기</button>
   </div>
 
   <div id="humanityOverlayRoot"></div>

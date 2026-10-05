@@ -4,14 +4,14 @@
 // stays loaded across tab switches instead of being torn down by a full
 // page reload each time.
 import { db, storage, ref, uploadBytes, getDownloadURL, STORE_NAME, QUICK_ORDER_LINKS, collection, doc, addDoc, updateDoc, setDoc, onSnapshot, getDocs, serverTimestamp } from "./firebase-init.js";
-import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, escapeHtml, resizeImageFile, openImageLightbox, URGENCY_LABEL, URGENCY_GROUP_CAPTION, sortMaterials, dayAccentClass, NOTIFY_BELL_ON, NOTIFY_BELL_OFF } from "./util.js";
-import { isPushDisabled, disablePushToken, enablePushToken } from "./push.js";
+import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, escapeHtml, resizeImageFile, openImageLightbox, URGENCY_LABEL, URGENCY_GROUP_CAPTION, sortMaterials, dayAccentClass, NOTIFY_BELL_ON, qtyRemainingLabel, MULTIPLE_FILE_ATTR } from "./util.js";
+import { watchNotificationBadge, openNotificationPanel } from "./push.js";
 import { recordSubmitToday } from "./mascot.js";
 import { mountHumanityTrigger } from "./humanityboard.js";
 
 let myOwnerPhone = "";
 
-let datePick, todayBtn, dayChips, orderList, newRequestCard, newRequestText, urgentCount, shareBtn, previewCard, sharePreview, copyBtn, notifyBtn, quickOrderLinksEl, pageSub;
+let datePick, todayBtn, dayChips, orderList, newRequestCard, newRequestText, urgentCount, shareBtn, previewCard, sharePreview, copyBtn, notifyBtn, notifyBadgeEl, quickOrderLinksEl, pageSub;
 
 let items = []; // {id, ...data}
 let unsub = null;
@@ -105,6 +105,7 @@ function subscribe() {
     // Once an item comes back from Firestore as ordered, it's locked — drop
     // any local pending mark for it (it's already shared and confirmed).
     items.forEach((it) => { if (it.ordered) orderedPending.delete(it.id); });
+    reconcileOrderedPending();
     chipCounts[datePick.value] = items.length;
     chipUnordered[datePick.value] = items.some((it) => !it.ordered);
     render();
@@ -115,7 +116,14 @@ function subscribe() {
   receiptPhotos = [];
   receiptUnsub = onSnapshot(doc(db, "checks", datePick.value), (snap) => {
     receiptPhotos = (snap.exists() && snap.data().receiptPhotos) || [];
+    // 영수증이 막 첨부/해제되면 그 사실 자체가 발주 목록의 체크박스
+    // 잠금(hasReceiptFor) 여부를 바꾸는데, render()를 안 부르면 이미 그려진
+    // #orderList는 예전 disabled 상태 그대로 남는다 — renderReceiptCard()
+    // 만으로는 영수증 카드만 다시 그려질 뿐 체크박스 쪽엔 반영 안 됐었다.
+    reconcileOrderedPending();
+    render();
     renderReceiptCard();
+    renderMyReceiptsOverlay();
   });
 }
 
@@ -179,7 +187,13 @@ async function submitReceiptAttachment() {
     }
     toast("첨부완료");
     resetReceiptDraft();
+    render();
     renderReceiptCard();
+    // 버튼 문구가 "첨부하고 체크하러 가기"니까, 첨부가 끝나면 그 약속대로
+    // 방금 풀린 체크리스트까지 바로 스크롤해서 눈앞에 보이게 한다 — 안
+    // 그러면 영수증 카드는 위쪽에 있어서 첨부해도 뭐가 바뀌었는지 안 보일
+    // 수 있다.
+    orderList.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (e) {
     console.error(e);
     toast("사진 업로드에 실패했어요");
@@ -233,9 +247,9 @@ function receiptCardHtml() {
       ${previewHtml}
       <label class="btn secondary block receipt-upload-btn" style="margin-top:8px;">
         📷 영수증 사진 추가
-        <input type="file" accept="image/*" id="receiptPhotoInput" multiple style="display:none;" />
+        <input type="file" accept="image/*" id="receiptPhotoInput" ${MULTIPLE_FILE_ATTR} style="display:none;" />
       </label>
-      <button type="button" class="btn gold block" id="receiptAttachSubmitBtn" style="margin-top:8px;">첨부하기${receiptPendingFiles.length > 0 ? ` (${receiptPendingFiles.length})` : ""}</button>
+      <button type="button" class="btn normal block" id="receiptAttachSubmitBtn" style="margin-top:8px;">첨부하고 체크하러 가기${receiptPendingFiles.length > 0 ? ` (${receiptPendingFiles.length})` : ""}</button>
       <button type="button" class="btn secondary block" id="myReceiptsBtn" style="margin-top:8px;">📎 ${isToday ? "오늘 " : ""}내가 첨부한 영수증 보기</button>
     </div>`;
 }
@@ -318,7 +332,11 @@ function myReceiptsOverlayHtml() {
           <button class="payroll-form-close-btn" id="myReceiptsCloseBtn" aria-label="닫기">✕</button>
         </div>
         ${empty ? `<div class="empty" style="margin-top:12px;">아직 첨부된 전체 영수증이 없어요.</div>` : `
-          <div class="receipt-photo-row" style="margin-top:12px;">${overallUrls.map((url) => `<img src="${url}" class="receipt-photo-thumb" data-receipt-lightbox="${url}" alt="영수증" />`).join("")}</div>
+          <div class="receipt-photo-row" style="margin-top:12px;">${overallUrls.map((url) => `
+            <div class="photo-preview">
+              <img src="${url}" class="receipt-photo-thumb" data-receipt-lightbox="${url}" alt="영수증" />
+              <button type="button" class="photo-remove-btn" data-my-receipt-delete="${url}">✕</button>
+            </div>`).join("")}</div>
         `}
       </div>
     </div>`;
@@ -333,6 +351,9 @@ function renderMyReceiptsOverlay() {
   document.getElementById("myReceiptsCloseBtn").addEventListener("click", closeMyReceiptsOverlay);
   overlay.querySelectorAll("[data-receipt-lightbox]").forEach((el) => {
     el.addEventListener("click", () => openImageLightbox(el.dataset.receiptLightbox, "영수증"));
+  });
+  overlay.querySelectorAll("[data-my-receipt-delete]").forEach((el) => {
+    el.addEventListener("click", () => deleteOverallReceiptPhoto(el.dataset.myReceiptDelete));
   });
 }
 
@@ -353,6 +374,31 @@ function sortItems(list) {
 
 function hasReceiptFor(it) {
   return receiptPhotos.length > 0 || !!(it && it.ownerAttachedPhotos && it.ownerAttachedPhotos.length > 0);
+}
+
+// 이미 첨부해둔 영수증 사진을 지우면, 아직 공유 전(orderedPending)으로
+// 체크만 해둔 상태였던 항목은 그 체크의 근거가 사라진 거라 다시 잠겨야
+// 한다 — 지우자마자 여기서 바로 떨어내서 체크박스가 눈에 보이게 재잠금된다.
+function reconcileOrderedPending() {
+  for (const id of [...orderedPending]) {
+    const it = items.find((x) => x.id === id);
+    if (!it || !hasReceiptFor(it)) orderedPending.delete(id);
+  }
+}
+
+async function deleteOverallReceiptPhoto(url) {
+  if (!confirm("삭제하면 아직 공유 전인 발주들은 체크를 다시 해야 해요. 삭제할까요?")) return;
+  await setDoc(doc(db, "checks", datePick.value), { receiptPhotos: receiptPhotos.filter((u) => u !== url) }, { merge: true });
+  toast("삭제완료");
+}
+
+async function deleteItemReceiptPhoto(itemId, url) {
+  if (!confirm("삭제하면 이 자재의 주문완료 체크가 다시 잠겨요. 삭제할까요?")) return;
+  const it = items.find((x) => x.id === itemId);
+  if (!it) return;
+  const next = (it.ownerAttachedPhotos || []).filter((u) => u !== url);
+  await updateDoc(doc(db, "checks", datePick.value, "items", itemId), { ownerAttachedPhotos: next });
+  toast("삭제완료");
 }
 
 function toggleOrderedLocal(id, checked) {
@@ -452,13 +498,18 @@ function render() {
     return `
       <div class="item-row ${isChecked ? "ordered" : ""}">
         <div style="flex:1">
-          <div class="name">${!it.ordered && !orderedPending.has(it.id) ? `<span class="tag new">NEW</span>` : ""}<span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${showSub && it.subCategory ? `<span class="subcat-inline-tag">${escapeHtml(it.subCategory)}</span>` : ""}${it.qty ? `<span class="qty-pill">${escapeHtml(it.qty)} 남음</span>` : ""}${it.orderQty && it.orderQty > 1 ? `<span class="qty-pill">요청 ${it.orderQty}개</span>` : ""}</div>
+          <div class="name">${!it.ordered && !orderedPending.has(it.id) ? `<span class="tag new">NEW</span>` : ""}<span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${showSub && it.subCategory ? `<span class="subcat-inline-tag">${escapeHtml(it.subCategory)}</span>` : ""}${it.qty ? `<span class="qty-pill">${escapeHtml(qtyRemainingLabel(it.qty))}</span>` : ""}${it.orderQty && it.orderQty > 1 ? `<span class="qty-pill">요청 ${it.orderQty}개</span>` : ""}</div>
           ${it.note ? `<div class="note">${escapeHtml(it.note)}</div>` : ""}
-          ${materialPhotoUrlsOf(it).map((url) => `<a href="${url}" target="_blank" rel="noopener"><img src="${url}" class="note-photo-thumb" alt="첨부 사진" /></a>`).join("")}
+          ${materialPhotoUrlsOf(it).map((url) => `<img src="${url}" class="note-photo-thumb" data-receipt-lightbox="${url}" alt="첨부 사진" />`).join("")}
           ${it.ownerAttachedPhotos && it.ownerAttachedPhotos.length > 0 ? `
           <div class="owner-receipt-comment">
             <div class="owner-receipt-comment-label">📎 내가 첨부한 영수증</div>
-            <div class="receipt-photo-row">${it.ownerAttachedPhotos.map((url) => `<img src="${url}" class="receipt-photo-thumb" data-receipt-lightbox="${url}" alt="영수증" />`).join("")}</div>
+            <div class="receipt-photo-row">${it.ownerAttachedPhotos.map((url) => isLocked
+              ? `<img src="${url}" class="receipt-photo-thumb" data-receipt-lightbox="${url}" alt="영수증" />`
+              : `<div class="photo-preview">
+                   <img src="${url}" class="receipt-photo-thumb" data-receipt-lightbox="${url}" alt="영수증" />
+                   <button type="button" class="photo-remove-btn" data-item-receipt-delete-id="${it.id}" data-item-receipt-delete-url="${url}">✕</button>
+                 </div>`).join("")}</div>
           </div>` : ""}
           <div class="who">${it.staffName ? escapeHtml(it.staffName) + "님" : ""}${formatTimeLabel(it.updatedAt) ? ` · ${formatTimeLabel(it.updatedAt)}` : ""}</div>
         </div>
@@ -540,6 +591,9 @@ function render() {
   orderList.querySelectorAll("[data-receipt-lightbox]").forEach((el) => {
     el.addEventListener("click", () => openImageLightbox(el.dataset.receiptLightbox, "영수증"));
   });
+  orderList.querySelectorAll("[data-item-receipt-delete-id]").forEach((el) => {
+    el.addEventListener("click", () => deleteItemReceiptPhoto(el.dataset.itemReceiptDeleteId, el.dataset.itemReceiptDeleteUrl));
+  });
   renderStickyShareBar();
 }
 
@@ -563,7 +617,7 @@ function buildShareText() {
     text += `\n■ ${main}\n`;
     for (const it of sortItems(byMain[main])) {
       const tag = it.urgency === "urgent" ? "[긴급] " : it.urgency === "soldout" ? "[품절] " : "";
-      const qtyText = it.qty ? ` (${it.qty} 남음)` : "";
+      const qtyText = it.qty ? ` (${qtyRemainingLabel(it.qty)})` : "";
       const orderQtyText = it.orderQty && it.orderQty > 1 ? ` [요청 ${it.orderQty}개]` : "";
       text += `- ${tag}${it.materialName}${qtyText}${orderQtyText}${it.note ? ` : ${it.note}` : ""}\n`;
     }
@@ -626,41 +680,11 @@ async function onCopyBtnClick() {
   }
 }
 
-function updateNotifyBtn() {
-  if (!("Notification" in window)) {
-    notifyBtn.innerHTML = NOTIFY_BELL_OFF;
-    notifyBtn.title = "알림 미지원 기기";
-    notifyBtn.disabled = true;
-    return;
-  }
-  if (Notification.permission === "denied") {
-    notifyBtn.innerHTML = NOTIFY_BELL_OFF;
-    notifyBtn.title = "알림 차단됨 (기기 설정에서 허용 필요)";
-  } else if (Notification.permission === "granted" && !isPushDisabled()) {
-    notifyBtn.innerHTML = NOTIFY_BELL_ON;
-    notifyBtn.title = "알림 켜짐 (탭하면 끄기)";
-  } else {
-    notifyBtn.innerHTML = NOTIFY_BELL_OFF;
-    notifyBtn.title = "알림 설정하려면 탭하세요";
-  }
-}
-
-async function onNotifyBtnClick() {
-  if (!("Notification" in window)) return;
-  if (Notification.permission === "granted") {
-    if (isPushDisabled()) {
-      if (myOwnerPhone) await enablePushToken(myOwnerPhone);
-      toast("알림을 켰어요");
-    } else {
-      if (myOwnerPhone) await disablePushToken(myOwnerPhone);
-      toast("알림을 껐어요");
-    }
-    updateNotifyBtn();
-    return;
-  }
-  const perm = await Notification.requestPermission();
-  updateNotifyBtn();
-  if (perm === "granted" && myOwnerPhone) enablePushToken(myOwnerPhone);
+// 종 아이콘은 이제 켜짐/꺼짐을 자기가 보여주지 않는다 — 탭하면 뜨는
+// 알림내역 패널 안에 푸시 on/off 토글이 있고, 종 자체는 고정 아이콘 +
+// 안 읽은 알림 개수 배지만 보여준다(push.js의 watchNotificationBadge).
+function onNotifyBtnClick() {
+  openNotificationPanel(myOwnerPhone);
 }
 
 function isLastDayOfMonth() {
@@ -688,6 +712,8 @@ export function mount(account) {
   sharePreview = document.getElementById("sharePreview");
   copyBtn = document.getElementById("copyBtn");
   notifyBtn = document.getElementById("notifyBtn");
+  notifyBadgeEl = document.getElementById("notifyBadge");
+  notifyBtn.innerHTML = NOTIFY_BELL_ON;
   quickOrderLinksEl = document.getElementById("quickOrderLinks");
   receiptCardEl = document.getElementById("receiptCard");
   stickyShareBarEl = document.getElementById("stickyShareBar");
@@ -705,7 +731,7 @@ export function mount(account) {
   shareBtn.addEventListener("click", onShareBtnClick);
   copyBtn.addEventListener("click", onCopyBtnClick);
   notifyBtn.addEventListener("click", onNotifyBtnClick);
-  updateNotifyBtn();
+  watchNotificationBadge(notifyBadgeEl, myOwnerPhone);
 
   renderChips();
   subscribe();

@@ -1,3 +1,9 @@
+// standalone PWA에서 사진첨부가 안 되던 건 multiple 속성 때문이 아니라
+// 그 iOS 버전 자체의 WebKit 버그였다(iOS 업데이트로 해결 확인됨) — 그래서
+// standalone일 때만 multiple을 빼던 임시 우회 로직은 제거하고, 항상 다중
+// 선택을 허용한다.
+export const MULTIPLE_FILE_ATTR = "multiple";
+
 const STORE_TIMEZONE = "Asia/Seoul";
 
 // Always compute "today" (and any date-shift) in the store's timezone, not the
@@ -38,13 +44,32 @@ const KR_FIXED_HOLIDAYS = new Set([
   "12-25", // 성탄절
 ]);
 
+// 고정 공휴일이 토/일과 겹치면 다음 평일이 대체공휴일로 지정된다(2026년
+// 10월 3일 개천절이 토요일이라 10월 5일 월요일이 대체공휴일인 것처럼) —
+// 날짜 자체가 평일로 거슬러 올라가며 바로 전 주말 구간에 고정 공휴일이
+// 있었는지만 보면 되고, 해마다 날짜가 바뀌는 음력 공휴일과 달리 이 규칙
+// 자체는 매년 똑같아서 손으로 갱신할 필요가 없다.
+function isSubstituteHoliday(dateStr) {
+  const dow = new Date(dateStr + "T00:00:00").getDay();
+  if (dow === 0 || dow === 6) return false;
+  for (let back = 1; back <= 2; back++) {
+    const d = new Date(dateStr + "T00:00:00");
+    d.setDate(d.getDate() - back);
+    if (d.getDay() !== 0 && d.getDay() !== 6) break; // 주말 구간을 벗어나면 그만
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    if (KR_FIXED_HOLIDAYS.has(`${mm}-${dd}`)) return true;
+  }
+  return false;
+}
+
 // 날짜 탭에 요일별 색을 입히기 위한 분류 — 평일은 "weekday", 주말·공휴일은
 // "weekend"로 묶어서 같은 빨간 표시를 쓴다.
 export function dayAccentClass(dateStr) {
   const [, m, d] = dateStr.split("-");
   const dow = new Date(dateStr + "T00:00:00").getDay(); // 0=일 ~ 6=토
   const isWeekend = dow === 0 || dow === 6;
-  const isHoliday = KR_FIXED_HOLIDAYS.has(`${m}-${d}`);
+  const isHoliday = KR_FIXED_HOLIDAYS.has(`${m}-${d}`) || isSubstituteHoliday(dateStr);
   return isWeekend || isHoliday ? "weekend" : "weekday";
 }
 
@@ -93,6 +118,41 @@ export function formatTimeLabel(ts) {
   }).format(date);
 }
 
+// navigator.clipboard.writeText() throws in a bunch of real-world mobile
+// situations (PWA standalone context, a stale/lost document focus, older
+// WebViews) even though copying itself is perfectly possible there — so on
+// any failure, fall back to the old select-a-hidden-textarea + execCommand
+// approach before actually telling the user it failed.
+function legacyCopy(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.top = "-9999px";
+  ta.style.left = "-9999px";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch (e) {
+    ok = false;
+  }
+  document.body.removeChild(ta);
+  return ok;
+}
+
+export async function copyText(text, successMsg = "복사했어요") {
+  try {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("no clipboard api");
+    await navigator.clipboard.writeText(text);
+    toast(successMsg);
+  } catch (e) {
+    if (legacyCopy(text)) toast(successMsg);
+    else toast("복사에 실패했어요. 직접 선택해서 복사해주세요");
+  }
+}
+
 let toastTimer = null;
 export function toast(msg) {
   let el = document.getElementById("toast");
@@ -108,8 +168,34 @@ export function toast(msg) {
   toastTimer = setTimeout(() => el.classList.remove("show"), 1800);
 }
 
+// 기존 toast()는 하단에서 올라오는 짧은 확인용 알림이고, 이건 그와 별개로
+// 화면 상단에서 아래로 내려오는 응원 메시지용 배너(출퇴근 도장 등, 좀 더
+// 눈에 띄고 머무는 시간도 긴 메시지에 쓴다).
+let topBannerTimer = null;
+export function showTopBanner(msg, duration = 2600) {
+  let el = document.getElementById("topBanner");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "topBanner";
+    el.className = "top-banner";
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.classList.add("show");
+  clearTimeout(topBannerTimer);
+  topBannerTimer = setTimeout(() => el.classList.remove("show"), duration);
+}
+
 // Bottom action-sheet with a list of option buttons + a cancel button.
 // Resolves with the clicked option's index, or -1 if dismissed/cancelled.
+// An option can also carry an `onClick` callback, which fires synchronously
+// inside that button's own click handler — before the backdrop is even
+// removed, with no Promise/await hop in between. That matters specifically
+// for options that call `someFileInput.click()` to open the native photo
+// picker: iOS (especially inside a standalone/home-screen PWA) can fail to
+// treat a `.click()` called after an `await` as a trusted user gesture, so
+// callers that need to open a native picker should do it from `onClick`
+// rather than from the resolved index.
 export function showActionSheet(options) {
   return new Promise((resolve) => {
     const backdrop = document.createElement("div");
@@ -127,7 +213,12 @@ export function showActionSheet(options) {
     backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(-1); });
     backdrop.querySelector("[data-cancel]").addEventListener("click", () => close(-1));
     backdrop.querySelectorAll("[data-idx]").forEach((btn) => {
-      btn.addEventListener("click", () => close(Number(btn.dataset.idx)));
+      btn.addEventListener("click", () => {
+        const idx = Number(btn.dataset.idx);
+        backdrop.remove();
+        if (options[idx].onClick) options[idx].onClick();
+        resolve(idx);
+      });
     });
   });
 }
@@ -159,20 +250,50 @@ export function confirmModal(message, yesLabel, noLabel) {
 // In-page enlarged photo viewer — used for avatars, share-board post photos,
 // etc. wherever a photo would otherwise open in a new tab. One overlay at a
 // time; tapping the backdrop or the ✕ closes it.
-export function openImageLightbox(src, alt) {
+//
+// Accepts either a single image (openImageLightbox(src, alt), the original
+// signature — every existing single-photo caller keeps working unchanged)
+// or a swipeable group (openImageLightbox([{src,alt}, ...], startIndex)) —
+// used when a post/reply has several photos, so viewers can swipe between
+// them inside the lightbox instead of closing and reopening one at a time.
+export function openImageLightbox(srcOrGroup, altOrIndex) {
+  const group = Array.isArray(srcOrGroup) ? srcOrGroup : [{ src: srcOrGroup, alt: altOrIndex }];
+  const startIndex = Math.max(0, Math.min(Array.isArray(srcOrGroup) ? (altOrIndex || 0) : 0, group.length - 1));
+
   const overlay = document.createElement("div");
   overlay.className = "img-lightbox-overlay";
   overlay.innerHTML = `
     <button class="img-lightbox-close" aria-label="닫기">✕</button>
-    <img src="${src}" alt="${escapeHtml(alt || "")}" class="img-lightbox-img" />
+    ${group.length > 1 ? `<div class="img-lightbox-count">${startIndex + 1} / ${group.length}</div>` : ""}
+    <div class="img-lightbox-track">
+      ${group.map((g) => `<div class="img-lightbox-slide"><img src="${g.src}" alt="${escapeHtml(g.alt || "")}" class="img-lightbox-img" /></div>`).join("")}
+    </div>
     <button class="img-lightbox-save" type="button">💾 저장</button>
   `;
   const close = () => overlay.remove();
   overlay.addEventListener("click", (e) => {
-    if (e.target === overlay || e.target.closest(".img-lightbox-close")) close();
+    if (e.target === overlay || e.target.closest(".img-lightbox-close") || e.target.classList.contains("img-lightbox-track") || e.target.classList.contains("img-lightbox-slide")) close();
   });
-  overlay.querySelector(".img-lightbox-save").addEventListener("click", () => saveImageToDevice(src));
+
+  const track = overlay.querySelector(".img-lightbox-track");
+  const countEl = overlay.querySelector(".img-lightbox-count");
+  const saveBtn = overlay.querySelector(".img-lightbox-save");
+  let currentIndex = startIndex;
+  const setSaveTarget = () => { saveBtn.onclick = () => saveImageToDevice(group[currentIndex].src); };
+  setSaveTarget();
+
+  if (group.length > 1) {
+    track.addEventListener("scroll", () => {
+      const idx = Math.round(track.scrollLeft / track.clientWidth);
+      if (idx === currentIndex || idx < 0 || idx >= group.length) return;
+      currentIndex = idx;
+      countEl.textContent = `${currentIndex + 1} / ${group.length}`;
+      setSaveTarget();
+    }, { passive: true });
+  }
+
   document.body.appendChild(overlay);
+  if (startIndex > 0) track.scrollLeft = startIndex * track.clientWidth; // 애니메이션 없이 바로 그 장으로
 }
 
 // Storage 버킷에 CORS 설정이 없어서, 사진 URL을 브라우저에서 바로 fetch()하면
@@ -229,6 +350,13 @@ export function escapeHtml(str) {
     '"': "&quot;",
     "'": "&#39;",
   }[c]));
+}
+
+// 남은 예비 수량 라벨 — "없음"일 땐 "없음 남음"처럼 어색하게 붙이지 않고
+// "예비 없음" 그대로, 그 외엔 "{수량} 남음" 형태로 표시한다.
+export function qtyRemainingLabel(qty) {
+  if (!qty) return "";
+  return qty === "없음" ? "예비 없음" : `${qty} 남음`;
 }
 
 // 시스템 기본 🔔/🔕 이모지 대신, 앱의 골드/크림 톤과 둥근 느낌에 맞춘

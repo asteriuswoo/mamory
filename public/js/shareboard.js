@@ -1,13 +1,12 @@
 // 공유하기 (품절 공유 / 공유해요) — 직원 화면(staff.js)과 사장님 화면(share.js)에서
 // 공통으로 쓰는 렌더링/데이터 모듈. mountShareBoard(el, account)로 붙여 쓴다.
 import { db, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, getDocs, query, orderBy, serverTimestamp, arrayUnion, arrayRemove, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
-import { todayStr, dateStrDaysAgo, dateStrOf, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, escapeHtml, resizeImageFile, dayAccentClass, openImageLightbox } from "./util.js";
+import { todayStr, dateStrDaysAgo, dateStrOf, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, escapeHtml, resizeImageFile, dayAccentClass, openImageLightbox, MULTIPLE_FILE_ATTR } from "./util.js";
 import { avatarHtml, watchAccounts, allAccounts } from "./avatar.js";
 
 const date = todayStr();
 const recentDates = Array.from({ length: 7 }, (_, i) => dateStrDaysAgo(i));
 const carryoverDates = Array.from({ length: 4 }, (_, i) => dateStrDaysAgo(i));
-const soldoutSuggestDates = Array.from({ length: 3 }, (_, i) => dateStrDaysAgo(i));
 
 // 품절공유/공유해요/레시피를 한 화면에 세로로 다 쌓아두면 댓글이 많이 달린
 // 쪽이 길어질수록 다른 섹션이 점점 아래로 밀려서 찾기 어려워진다 — 세그먼트
@@ -30,6 +29,16 @@ function saveShareTab() {
   }
 }
 let shareTab = loadShareTab(); // "soldout" | "note" | "recipe"
+
+// 알림을 눌러 들어왔을 때(functions/index.js가 링크에 실어 보낸 ?stab=…)
+// 저장된 탭 대신 그 알림이 가리키는 탭으로 바로 열리게 한다 — mountShareBoard
+// 호출 전에 한 번만 불러 쓴다(staff.js/share.js).
+export function setInitialShareTab(tab) {
+  if (tab === "soldout" || tab === "note" || tab === "recipe") {
+    shareTab = tab;
+    saveShareTab();
+  }
+}
 
 // 탭마다 "내가 마지막으로 그 탭을 본 시각" 이후 새 글/답글/레시피가
 // 올라왔으면 N배지를 띄운다 — 기기(localStorage)에 계정별로 저장해서
@@ -107,7 +116,13 @@ function ensurePhotoLightboxWired() {
   document.addEventListener("click", (e) => {
     const img = e.target.closest("img.share-photo-trigger");
     if (!img) return;
-    openImageLightbox(img.src, img.alt);
+    // 같은 사진묶음(게시글 본문/답글/레시피 등 .receipt-photo-row 하나) 안의
+    // 다른 사진들도 같이 모아서 넘겨주면, 라이트박스 안에서 닫았다 다시
+    // 여는 것 없이 옆으로 스와이프해서 묶음 전체를 볼 수 있다.
+    const group = Array.from(img.closest(".receipt-photo-row")?.querySelectorAll("img.share-photo-trigger") || [img]);
+    const urls = group.map((el) => ({ src: el.src, alt: el.alt }));
+    const startIndex = group.indexOf(img);
+    openImageLightbox(urls, startIndex);
   });
 }
 ensurePhotoLightboxWired();
@@ -282,7 +297,7 @@ const replyMentionState = new Map(); // itemId -> { active, startIndex, query }
 
 function replyPhotosHtml(photoUrls) {
   if (!photoUrls || photoUrls.length === 0) return "";
-  return `<div class="receipt-photo-row" style="margin-top:4px;">${photoUrls.map((url) => `<img src="${url}" class="note-photo-thumb share-photo-trigger" alt="답글 사진" style="width:72px; height:72px;" />`).join("")}</div>`;
+  return `<div class="receipt-photo-row note-photo-row" style="margin-top:4px;">${photoUrls.map((url) => `<img src="${url}" class="note-photo-thumb share-photo-trigger" alt="답글 사진" style="width:72px; height:72px;" />`).join("")}</div>`;
 }
 
 function repliesHtml(it) {
@@ -328,7 +343,7 @@ function repliesHtml(it) {
       </div>
       <div class="mention-suggest-box" data-reply-mention-box="${it.id}"></div>
       <div class="photo-attach-row" style="flex-wrap:wrap; margin-top:4px;">
-        <input type="file" accept="image/*" data-reply-photo-input="${it.id}" multiple style="display:none;" />
+        <input type="file" accept="image/*" data-reply-photo-input="${it.id}" ${MULTIPLE_FILE_ATTR} style="display:none;" />
         ${pendingPhotos.map((url, i) => `
           <div class="photo-preview">
             <img src="${url}" alt="첨부 사진" class="share-photo-trigger" />
@@ -470,6 +485,25 @@ let account = { name: "", phone: "" };
 let started = false;
 
 let shareDate = date;
+
+// 알림이 가리키는 글이 오늘 게 아니라 며칠 전 거면(품절은 해제 전까지
+// 계속 이월되니까 특히), 날짜칩도 그 날짜로 같이 옮겨가야 글이 바로
+// 보인다 — "최근 7일" 안에 있는 날짜만 인정하고, 범위 밖이면 무시하고
+// 오늘 날짜 그대로 둔다(그보다 오래된 글은 날짜칩 자체가 없으므로).
+// started는 이미 watchUnseenCount()가 더 일찍 true로 만들어놔서(배지를
+// 실시간으로 켜두려고 공유하기 탭을 열기 전부터 호출됨), mountShareBoard
+// 쪽에서 "started였나"로는 첫 마운트를 구분 못 한다 — 그래서 따로 플래그를
+// 둔다. shareDate는 여기서 바로 바꿔서 날짜칩이 처음부터 맞게 그려지고,
+// 실제 데이터는 pendingDateLoad를 통해 mountShareBoard가 rootEl을 가진
+// 뒤에 loadShareDate로 불러온다.
+let pendingDateLoad = null;
+export function setInitialShareDate(d) {
+  if (d && recentDates.includes(d)) {
+    shareDate = d;
+    pendingDateLoad = d;
+  }
+}
+
 let shareItems = [];
 let shareTodayItems = []; // always-live today's items, independent of which day is being browsed
 const chipCounts = {};
@@ -616,7 +650,7 @@ function soldoutTabHtml(soldoutListAll, isToday) {
 
 function noteTabHtml(noteList, isToday) {
   let html = `
-    <div class="category-title section-title-note">💬 공유해요<span class="sub">${noteList.length}건</span></div>
+    <div class="category-title section-title-note">💬 소통해요<span class="sub">${noteList.length}건</span></div>
     <div class="card section-note">`;
   if (noteList.length === 0) {
     html += `<div class="empty">공유된 특이사항이 없어요.</div>`;
@@ -633,7 +667,7 @@ function noteTabHtml(noteList, isToday) {
           </div>
           <div class="post-body">
             ${sharePhotoUrlsOf(it).length > 0 ? `
-            <div class="receipt-photo-row">
+            <div class="receipt-photo-row note-photo-row">
               ${sharePhotoUrlsOf(it).map((url) => `<img src="${url}" class="note-photo-thumb share-photo-trigger" alt="첨부 사진" />`).join("")}
             </div>` : ""}
             ${reactionRow(it, postActionsHtml(it))}
@@ -652,7 +686,7 @@ function noteTabHtml(noteList, isToday) {
         <textarea id="noteInput" rows="3" placeholder="근무 중이 아닌 직원도 볼 수 있게 특이사항을 남겨주세요 (@이름으로 멘션할 수 있어요)" style="width:100%;">${escapeHtml(noteDraftText)}</textarea>
         <div id="mentionSuggestBox" class="mention-suggest-box"></div>
         <div class="photo-attach-row" style="flex-wrap:wrap;">
-          <input type="file" accept="image/*" id="noteImageInput" multiple style="display:none;" />
+          <input type="file" accept="image/*" id="noteImageInput" ${MULTIPLE_FILE_ATTR} style="display:none;" />
           ${notePhotoUrls.map((url, i) => `
             <div class="photo-preview">
               <img src="${url}" alt="첨부 사진" class="share-photo-trigger" />
@@ -671,7 +705,9 @@ function render() {
   if (!rootEl) return;
   const isToday = shareDate === date;
   const soldoutListAll = sortByTime(shareItems.filter((it) => it.type === "soldout"));
-  const noteListAll = sortByTime(shareItems.filter((it) => it.type === "note"));
+  // 최신 글이 바로 눈에 보여야 매번 스크롤을 안 내려도 되니까, 오래된 순
+  // 정렬(sortByTime)을 뒤집어서 최신 글이 위로 오게 한다.
+  const noteListAll = sortByTime(shareItems.filter((it) => it.type === "note")).reverse();
   const noteList = [...noteListAll.filter((it) => it.isNotice), ...noteListAll.filter((it) => !it.isNotice)];
 
   markSeen(shareItems, shareDate);
@@ -685,9 +721,9 @@ function render() {
 
   let html = `
     <div class="seg share-tab-seg">
-      <button type="button" class="${shareTab === "note" ? "active" : ""}" data-share-tab="note">💬 공유해요${tabNBadgeHtml("note")}</button>
+      <button type="button" class="${shareTab === "note" ? "active" : ""}" data-share-tab="note">💬 소통해요${tabNBadgeHtml("note")}</button>
       <button type="button" class="${shareTab === "soldout" ? "active" : ""}" data-share-tab="soldout">📦 품절공유${tabNBadgeHtml("soldout")}</button>
-      <button type="button" class="${shareTab === "recipe" ? "active" : ""}" data-share-tab="recipe">📖 레시피${tabNBadgeHtml("recipe")}</button>
+      <button type="button" class="${shareTab === "recipe" ? "active" : ""}" data-share-tab="recipe">📖 메뉴공유${tabNBadgeHtml("recipe")}</button>
     </div>`;
 
   if (shareTab !== "recipe") {
@@ -1149,27 +1185,28 @@ async function deleteShareItem(id) {
   toast("삭제했어요");
 }
 
-// 품절 공유 입력창 자동완성용 — 아무 자재나 다 띄우면 너무 많으니, 최근
-// 3일 안에 발주 요청된(=지금도 실제로 쓰는) 자재 이름만 후보로 끌어온다.
+// 품절 공유 입력창 자동완성용 — 자재선택 화면 검색과 같은 자재명을 써야
+// 하니, 최근 발주 이력이 아니라 등록된 자재 목록 전체에서 이름을 끌어온다.
 let recentMaterialNames = [];
 
 async function loadRecentMaterialNames() {
-  const names = new Set();
-  await Promise.all(
-    soldoutSuggestDates.map(async (d) => {
-      try {
-        const snap = await getDocs(collection(db, "checks", d, "items"));
-        snap.forEach((doc) => {
-          const n = doc.data().materialName;
-          if (n) names.add(n);
-        });
-      } catch (e) {
-        // 그 날짜에 발주 기록이 없으면 건너뛴다.
-      }
-    })
-  );
-  recentMaterialNames = [...names].sort();
-  render();
+  try {
+    const snap = await getDocs(collection(db, "materials"));
+    const labels = new Set();
+    snap.forEach((doc) => {
+      const m = doc.data();
+      if (!m.name) return;
+      // "레몬" 하나로 레몬베이스/레몬밤시럽이 다 걸리는데 datalist 후보엔
+      // 자재명만 떠서 뭐가 뭔지 구분이 안 됐다 — 소분류를 이름 뒤에 바로
+      // 묶어서 보여주면, 고를 때도 소분류가 같이 보이고 고른 뒤 입력창에도
+      // 그대로 남아서 따로 덧붙여 적을 필요가 없다.
+      labels.add(m.subCategory ? `${m.name} (${m.subCategory})` : m.name);
+    });
+    recentMaterialNames = [...labels].sort();
+    render();
+  } catch (e) {
+    // 못 가져와도 품절 공유 자체는 직접 타이핑해서 쓸 수 있으니 조용히 넘어간다.
+  }
 }
 
 const badgeListeners = [];
@@ -1199,6 +1236,16 @@ export function mountShareBoard(el, acc) {
   account = acc;
   ensureStarted();
   watchAccounts(render);
+  // setInitialShareDate()는 main()이 끝나기 한참 전, rootEl도 아직 없을 때
+  // 불려서 shareDate 변수만 미리 바꿔두고 render()는 조용히 no-op된다 —
+  // 그 뒤 rootEl이 생긴 지금, pendingDateLoad가 남아있으면 그 날짜 데이터를
+  // 실제로 불러온다(단순 재렌더가 아니라 Firestore에서 읽어와야 글이
+  // 보인다). 한 번 쓰고 비워서 재렌더마다 중복 호출되지 않는다.
+  if (pendingDateLoad) {
+    const d = pendingDateLoad;
+    pendingDateLoad = null;
+    loadShareDate(d);
+  }
 }
 
 // For pages that only want the "공유하기" nav tab's small unread-count badge
@@ -1467,7 +1514,7 @@ function recipeCardHtml(r, idx) {
           <textarea id="editRecipeInstructionsInput" rows="${isDisco ? 2 : 4}" placeholder="${isDisco ? "단종 사유 등 (선택)" : ""}">${escapeHtml(editRecipeDraft.instructions)}</textarea>
         </div>
         <div class="photo-attach-row" style="flex-wrap:wrap;">
-          <input type="file" accept="image/*" id="editRecipePhotoInput" multiple style="display:none;" />
+          <input type="file" accept="image/*" id="editRecipePhotoInput" ${MULTIPLE_FILE_ATTR} style="display:none;" />
           ${editRecipeDraft.photoUrls.map((url, i) => `
             <div class="photo-preview">
               <img src="${url}" alt="첨부 사진" class="share-photo-trigger" />
@@ -1495,7 +1542,7 @@ function recipeCardHtml(r, idx) {
       </div>
       ${r.instructions ? `<div class="recipe-instructions">${escapeHtml(r.instructions).replace(/\n/g, "<br>")}</div>` : ""}
       ${(r.photoUrls || []).length > 0 ? `
-      <div class="receipt-photo-row" style="margin-top:8px;">
+      <div class="receipt-photo-row note-photo-row" style="margin-top:8px;">
         ${r.photoUrls.map((url) => `<img src="${url}" class="note-photo-thumb share-photo-trigger" alt="레시피 사진" />`).join("")}
       </div>` : ""}
       ${r.staffPhone === account.phone ? `
@@ -1524,7 +1571,7 @@ function recipeChangeTabHtml() {
         <textarea id="recipeInstructionsInput" rows="4" placeholder="순서대로 적어주세요">${escapeHtml(recipeDraftInstructions)}</textarea>
       </div>
       <div class="photo-attach-row" style="flex-wrap:wrap;">
-        <input type="file" accept="image/*" id="recipePhotoInput" multiple style="display:none;" />
+        <input type="file" accept="image/*" id="recipePhotoInput" ${MULTIPLE_FILE_ATTR} style="display:none;" />
         ${recipePhotoUrls.map((url, i) => `
           <div class="photo-preview">
             <img src="${url}" alt="첨부 사진" class="share-photo-trigger" />
@@ -1550,7 +1597,7 @@ function recipeChangeTabHtml() {
 function recipeDiscontinuedTabHtml() {
   const list = recipeList.filter((r) => r.status === "discontinued");
   let html = `
-    <div class="category-title section-title-recipe">🔴 단종<span class="sub">${list.length}건</span></div>
+    <div class="category-title section-title-recipe"><span class="dot soldout"></span>단종<span class="sub">${list.length}건</span></div>
     <div class="card section-recipe">
       <div class="field">
         <label>메뉴 이름</label>
@@ -1561,7 +1608,7 @@ function recipeDiscontinuedTabHtml() {
         <textarea id="discoNoteInput" rows="2" placeholder="단종 사유 등 (선택)">${escapeHtml(discoDraftNote)}</textarea>
       </div>
       <div class="photo-attach-row" style="flex-wrap:wrap;">
-        <input type="file" accept="image/*" id="discoPhotoInput" multiple style="display:none;" />
+        <input type="file" accept="image/*" id="discoPhotoInput" ${MULTIPLE_FILE_ATTR} style="display:none;" />
         ${discoPhotoUrls.map((url, i) => `
           <div class="photo-preview">
             <img src="${url}" alt="첨부 사진" class="share-photo-trigger" />
@@ -1569,7 +1616,7 @@ function recipeDiscontinuedTabHtml() {
           </div>`).join("")}
         <button class="photo-add-btn" id="discoPhotoAddBtn">📷 사진 첨부</button>
       </div>
-      <button class="btn gold block" id="discoSubmitBtn" style="margin-top:8px;">단종 등록</button>
+      <button class="btn muted block" id="discoSubmitBtn" style="margin-top:8px;">단종 등록</button>
     </div>`;
 
   if (list.length === 0) {

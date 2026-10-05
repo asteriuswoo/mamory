@@ -133,13 +133,11 @@ export function wireAccountHeaderAvatar(el, account, roleLabel) {
       // the browser's generic file picker, which also offers a "Choose File"
       // (Files app) option we don't want here.
       const choice = await showActionSheet([
-        { label: "📷 사진 찍기" },
-        { label: "🖼️ 갤러리에서 선택" },
+        { label: "📷 사진 찍기", onClick: () => cameraInput.click() },
+        { label: "🖼️ 갤러리에서 선택", onClick: () => galleryInput.click() },
         { label: "기본 이미지로 변경하기", danger: true },
       ]);
-      if (choice === 0) cameraInput.click();
-      else if (choice === 1) galleryInput.click();
-      else if (choice === 2) resetAvatarToDefault(account.phone);
+      if (choice === 2) resetAvatarToDefault(account.phone);
     });
     cameraInput.addEventListener("change", (e) => uploadAvatar(account.phone, e.target.files[0]));
     galleryInput.addEventListener("change", (e) => uploadAvatar(account.phone, e.target.files[0]));

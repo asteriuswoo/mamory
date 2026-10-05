@@ -1,10 +1,10 @@
 import { db, collection, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, getDocs, query, orderBy, serverTimestamp, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
 import { requireAccount, logout } from "./auth.js";
-import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, openImageLightbox, URGENCY_LABEL, URGENCY_HINT, URGENCY_ORDER, URGENCY_GROUP_CAPTION, sortMaterials, sortByOrder, resizeImageFile, confirmModal, dayAccentClass, NOTIFY_BELL_ON, NOTIFY_BELL_OFF } from "./util.js";
-import { mountShareBoard, getTodayUnseenCount, watchUnseenCount } from "./shareboard.js";
+import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, openImageLightbox, URGENCY_LABEL, URGENCY_HINT, URGENCY_ORDER, URGENCY_GROUP_CAPTION, sortMaterials, sortByOrder, resizeImageFile, confirmModal, dayAccentClass, NOTIFY_BELL_ON, qtyRemainingLabel, MULTIPLE_FILE_ATTR } from "./util.js";
+import { mountShareBoard, getTodayUnseenCount, watchUnseenCount, setInitialShareTab, setInitialShareDate } from "./shareboard.js";
 import { mountRegisterBoard } from "./registerboard.js";
 import { mountPayrollBoard, mountClockWidget } from "./payroll.js";
-import { registerPushToken, watchForegroundPush, isPushDisabled, disablePushToken, enablePushToken } from "./push.js";
+import { registerPushToken, watchForegroundPush, watchNotificationBadge, openNotificationPanel } from "./push.js";
 import { wireAccountHeaderAvatar } from "./avatar.js";
 import { watchAppBadgeClear } from "./badge.js";
 import { mountMascotWidget, earnFood } from "./mascot.js";
@@ -27,44 +27,13 @@ document.getElementById("deleteAccountBtn").addEventListener("click", async () =
   logout();
 });
 
+// 종 아이콘은 이제 켜짐/꺼짐을 자기가 보여주지 않는다 — 탭하면 뜨는
+// 알림내역 패널 안에 푸시 on/off 토글이 있고, 종 자체는 고정 아이콘 +
+// 안 읽은 알림 개수 배지만 보여준다(push.js의 watchNotificationBadge).
 const notifyBtn = document.getElementById("notifyBtn");
-
-function updateNotifyBtn() {
-  if (!("Notification" in window)) {
-    notifyBtn.innerHTML = NOTIFY_BELL_OFF;
-    notifyBtn.title = "알림 미지원 기기";
-    notifyBtn.disabled = true;
-    return;
-  }
-  if (Notification.permission === "denied") {
-    notifyBtn.innerHTML = NOTIFY_BELL_OFF;
-    notifyBtn.title = "알림 차단됨 (기기 설정에서 허용 필요)";
-  } else if (Notification.permission === "granted" && !isPushDisabled()) {
-    notifyBtn.innerHTML = NOTIFY_BELL_ON;
-    notifyBtn.title = "알림 켜짐 (탭하면 끄기)";
-  } else {
-    notifyBtn.innerHTML = NOTIFY_BELL_OFF;
-    notifyBtn.title = "알림 설정하려면 탭하세요";
-  }
-}
-
-notifyBtn.addEventListener("click", async () => {
-  if (!("Notification" in window)) return;
-  if (Notification.permission === "granted") {
-    if (isPushDisabled()) {
-      if (staffPhone) await enablePushToken(staffPhone);
-      toast("알림을 켰어요");
-    } else {
-      if (staffPhone) await disablePushToken(staffPhone);
-      toast("알림을 껐어요");
-    }
-    updateNotifyBtn();
-    return;
-  }
-  const perm = await Notification.requestPermission();
-  updateNotifyBtn();
-  if (perm === "granted" && staffPhone) enablePushToken(staffPhone);
-});
+const notifyBadgeEl = document.getElementById("notifyBadge");
+notifyBtn.innerHTML = NOTIFY_BELL_ON;
+notifyBtn.addEventListener("click", () => openNotificationPanel(staffPhone));
 
 const screenEl = document.getElementById("screen");
 
@@ -92,6 +61,8 @@ let staffRole = "staff";
 let view = "main"; // main | sub | items | cart | share
 let chosenMain = null;
 let chosenSub = null;
+let subSearchQuery = ""; // 소분류 목록 화면의 자재명 검색어
+let highlightMaterialId = null; // 검색 결과 선택 직후, 그 자재 카드로 스크롤+하이라이트하기 위한 1회용 표시
 
 // history (cart) state
 const recentDates = Array.from({ length: 7 }, (_, i) => dateStrDaysAgo(i));
@@ -505,7 +476,7 @@ function render() {
   screenEl.style.display = "";
   updateBottomTabActive();
   updateCartNavBadge();
-  // 홈(자재선택)에서만 계정 카드(아바타/로그아웃/출근도장/인류애 버튼)를
+  // 홈(자재선택)에서만 계정 카드(아바타/로그아웃/출근도장/극한직업 버튼)를
   // 보여주고, 다른 탭들은 바로 그 탭의 내용으로 들어가게 한다 — 바텀탭을
   // 누르면 이미 자기 홈(여기서는 자재선택)으로 갈 수 있으니 매 탭마다
   // 계정 카드를 반복해서 보여줄 필요가 없다.
@@ -514,6 +485,8 @@ function render() {
   if (profileCard) profileCard.style.display = isHomeView ? "" : "none";
   const monthEndBanner = document.getElementById("monthEndBanner");
   if (monthEndBanner) monthEndBanner.style.display = (isHomeView && isLastDayOfMonth()) ? "block" : "none";
+  const humanityBtn = document.getElementById("humanityBtn");
+  if (humanityBtn) humanityBtn.style.display = isHomeView ? "" : "none";
   if (view === "main") return renderMain();
   if (view === "sub") return renderSub();
   if (view === "items") return renderItems();
@@ -547,7 +520,49 @@ function renderMain() {
   screenEl.querySelectorAll("[data-main]").forEach((el) => {
     el.addEventListener("click", () => {
       chosenMain = el.dataset.main;
+      subSearchQuery = "";
       view = "sub";
+      render();
+    });
+  });
+}
+
+function matchingMaterialsInMain(query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  return sortMaterials(materials.filter((m) => m.mainCategory === chosenMain && m.name.toLowerCase().includes(q)));
+}
+
+function subSearchResultsHtml(query) {
+  const results = matchingMaterialsInMain(query);
+  if (results.length === 0) {
+    return `<div class="card"><div class="empty">"${escapeHtml(query)}"와 일치하는 자재가 없어요.</div></div>`;
+  }
+  return `
+    <div class="card choice-list">
+      ${results.map((m) => `
+        <button class="choice-row" data-search-result="${m.id}">
+          <span class="label">${escapeHtml(m.name)}</span>
+          <span class="right">
+            <span class="subcat-inline-tag search-result-tag">${escapeHtml(m.subCategory)}</span>
+            <span class="arrow">›</span>
+          </span>
+        </button>`).join("")}
+    </div>`;
+}
+
+function wireSubSearchResults() {
+  const resultsEl = document.getElementById("subSearchResults");
+  if (!resultsEl) return;
+  resultsEl.querySelectorAll("[data-search-result]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const m = materials.find((x) => x.id === el.dataset.searchResult);
+      if (!m) return;
+      chosenSub = m.subCategory;
+      subSearchQuery = "";
+      highlightMaterialId = m.id;
+      view = "items";
+      discardDraft();
       render();
     });
   });
@@ -558,11 +573,18 @@ function renderSub() {
     [...new Set(materials.filter((m) => m.mainCategory === chosenMain).map((m) => m.subCategory))],
     subcategoryOrder[chosenMain]
   );
+  const searching = !!subSearchQuery.trim();
 
   let html = `
     <div class="breadcrumb">
       <span class="step-label">${escapeHtml(chosenMain)}</span>
-    </div>`;
+    </div>
+    <div class="sub-search-wrap">
+      <input type="text" id="subSearchInput" class="sub-search-input" placeholder="자재 이름으로 검색" value="${escapeHtml(subSearchQuery)}" />
+    </div>
+    <div class="sub-list-hint">지금 사용하는 분 제외하고 예비 여분의 수량만 기입해주세요</div>
+    <div id="subSearchResults" style="display:${searching ? "block" : "none"};">${searching ? subSearchResultsHtml(subSearchQuery) : ""}</div>
+    <div id="subCategoryGrid" style="display:${searching ? "none" : "block"};">`;
 
   if (subs.length === 0) {
     html += `<div class="card"><div class="empty">이 분류에 등록된 자재가 없어요.</div></div>`;
@@ -581,6 +603,7 @@ function renderSub() {
     }
     html += `</div>`;
   }
+  html += `</div>`;
 
   const pendingN = pendingCountInMain(chosenMain);
   html += `
@@ -590,6 +613,16 @@ function renderSub() {
 
   screenEl.innerHTML = html;
   document.getElementById("submitFromSub").addEventListener("click", () => submitCategory(chosenMain));
+  const subSearchInput = document.getElementById("subSearchInput");
+  subSearchInput.addEventListener("input", (e) => {
+    subSearchQuery = e.target.value;
+    const stillSearching = !!subSearchQuery.trim();
+    document.getElementById("subSearchResults").style.display = stillSearching ? "block" : "none";
+    document.getElementById("subCategoryGrid").style.display = stillSearching ? "none" : "block";
+    document.getElementById("subSearchResults").innerHTML = stillSearching ? subSearchResultsHtml(subSearchQuery) : "";
+    wireSubSearchResults();
+  });
+  wireSubSearchResults();
   screenEl.querySelectorAll("[data-sub]").forEach((el) => {
     el.addEventListener("click", () => {
       chosenSub = el.dataset.sub;
@@ -618,7 +651,7 @@ function renderItems() {
       const selected = !!state.urgency;
       const ordered = isLocked && synced[m.id].ordered;
       html += `
-        <div class="item-card ${selected ? "selected" : ""} ${isLocked ? "locked" : ""}">
+        <div class="item-card ${selected ? "selected" : ""} ${isLocked ? "locked" : ""}" data-material-card="${m.id}">
           ${selected && !isLocked ? `<button class="cart-remove-btn" data-cart-remove="${m.id}">장바구니에서 빼기</button>` : ""}
           <div class="name">${escapeHtml(m.name)}</div>
           ${renderOrderCriteriaHint(m.name)}
@@ -635,23 +668,33 @@ function renderItems() {
             </div>
             ${ordered ? `<div class="tag ordered" style="margin-top:4px;">✓ 사장님이 주문 완료 처리했어요${formatTimestampLabel(synced[m.id].orderedAt) ? ` (${formatTimestampLabel(synced[m.id].orderedAt)})` : ""}</div>` : ""}
             <div style="font-size:11px; color:var(--muted); margin-top:6px;">${yesterdayStatusLabel(m.id)}</div>
-            <div class="note-box show" style="display:flex; gap:8px;">
-              <input type="text" placeholder="남은수량 (예: 2개)" data-id="${m.id}" class="qty-input" value="${escapeHtml(state.qty || "")}" ${isLocked ? "readonly" : ""} style="flex:1;" />
-              <input type="text" placeholder="메모" data-id="${m.id}" class="note-input" value="${escapeHtml(state.note || "")}" ${isLocked ? "readonly" : ""} style="flex:1;" />
-            </div>
-            <div class="order-qty-row">
-              <span class="order-qty-label">요청 수량</span>
-              <div class="order-qty-stepper">
-                <button class="order-qty-btn" data-id="${m.id}" data-qty-delta="-1" ${isLocked ? "disabled" : ""}>−</button>
-                <span class="order-qty-value">${state.orderQty || 1}개</span>
-                <button class="order-qty-btn" data-id="${m.id}" data-qty-delta="1" ${isLocked ? "disabled" : ""}>+</button>
+            <div class="note-box show">
+              <div style="display:flex; gap:8px;">
+                <div class="qty-input-wrap" style="flex:1;">
+                  <input type="text" placeholder="${m.subCategory === "비품" ? "남은수량 (예: 2개)" : "남은 예비 수량 (예: 2개)"}" data-id="${m.id}" class="qty-input" value="${escapeHtml(state.qty || "")}" ${isLocked ? "readonly" : ""} />
+                  ${m.subCategory === "비품" ? "" : `<span class="required-asterisk">*</span>`}
+                </div>
+                <input type="text" placeholder="메모" data-id="${m.id}" class="note-input" value="${escapeHtml(state.note || "")}" ${isLocked ? "readonly" : ""} style="flex:1;" />
+              </div>
+              <div style="display:flex; gap:8px; align-items:center; margin-top:6px;">
+                <div style="flex:1;">
+                  ${m.subCategory === "비품" ? "" : `<button type="button" class="qty-none-btn" data-qty-none="${m.id}" ${isLocked ? "disabled" : ""}>예비 없음</button>`}
+                </div>
+                <div class="order-qty-row" style="flex:1; margin-top:0;">
+                  <span class="order-qty-label">요청 수량</span>
+                  <div class="order-qty-stepper">
+                    <button class="order-qty-btn" data-id="${m.id}" data-qty-delta="-1" ${isLocked ? "disabled" : ""}>−</button>
+                    <span class="order-qty-value">${state.orderQty || 1}개</span>
+                    <button class="order-qty-btn" data-id="${m.id}" data-qty-delta="1" ${isLocked ? "disabled" : ""}>+</button>
+                  </div>
+                </div>
               </div>
             </div>
             <div class="photo-attach-row" style="flex-wrap:wrap;">
-              <input type="file" accept="image/*" data-photo-input="${m.id}" multiple style="display:none;" />
+              <input type="file" accept="image/*" data-photo-input="${m.id}" ${MULTIPLE_FILE_ATTR} style="display:none;" />
               ${(state.photoUrls || []).map((url, i) => `
                 <div class="photo-preview">
-                  <a href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="첨부 사진" /></a>
+                  <img src="${url}" data-receipt-lightbox="${url}" alt="첨부 사진" />
                   ${!isLocked ? `<button class="photo-remove-btn" data-photo-remove="${m.id}" data-photo-remove-index="${i}">✕</button>` : ""}
                 </div>`).join("")}
               ${!isLocked ? `<button class="photo-add-btn" data-photo-trigger="${m.id}">📷 사진 첨부</button>` : ""}
@@ -666,10 +709,27 @@ function renderItems() {
   }
 
   screenEl.innerHTML = html;
+  if (highlightMaterialId) {
+    const targetId = highlightMaterialId;
+    highlightMaterialId = null; // 한 번만 스크롤+강조하고, 이후 재렌더에선 다시 안 띄운다
+    const card = screenEl.querySelector(`[data-material-card="${targetId}"]`);
+    if (card) {
+      card.scrollIntoView({ block: "center", behavior: "smooth" });
+      card.classList.add("material-card-highlight");
+      card.addEventListener("animationend", () => card.classList.remove("material-card-highlight"), { once: true });
+    }
+  }
   document.getElementById("backSub").addEventListener("click", () => { discardDraft(); view = "sub"; render(); });
   const addToCartBtn = document.getElementById("addToCartBtn");
   if (addToCartBtn) {
     addToCartBtn.addEventListener("click", () => {
+      const missingQty = Object.values(draft).some(
+        (d) => !d.removed && d.urgency && d.subCategory !== "비품" && !(d.qty || "").trim()
+      );
+      if (missingQty) {
+        toast("남은 예비 수량을 입력해주세요");
+        return;
+      }
       const n = Object.values(draft).filter((d) => !d.removed).length;
       commitDraft();
       toast(n > 0 ? `장바구니에 담았어요 (${n}개)` : "새로 선택된 자재가 없어요");
@@ -689,6 +749,14 @@ function renderItems() {
   });
   screenEl.querySelectorAll(".qty-input").forEach((el) => {
     el.addEventListener("input", (e) => onQty(e.target.dataset.id, e.target.value));
+  });
+  screenEl.querySelectorAll("[data-qty-none]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const id = el.dataset.qtyNone;
+      if (synced[id]) return; // locked, ignore
+      upsertDraft(id, { urgency: "urgent", qty: "없음" });
+      render();
+    });
   });
   screenEl.querySelectorAll("[data-qty-delta]").forEach((el) => {
     el.addEventListener("click", () => onOrderQtyDelta(el.dataset.id, parseInt(el.dataset.qtyDelta, 10)));
@@ -751,9 +819,9 @@ function renderCart() {
     return `
       <div class="item-row ${it.ordered ? "ordered" : ""}">
         <div style="flex:1">
-          <div class="name"><span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${showSub && it.subCategory ? `<span class="subcat-inline-tag">${escapeHtml(it.subCategory)}</span>` : ""}${it.autoAdded ? `<span class="subcat-inline-tag">2일마다 자동</span>` : ""}${it.qty ? `<span class="qty-pill">${escapeHtml(it.qty)} 남음</span>` : ""}${it.orderQty && it.orderQty > 1 ? `<span class="qty-pill">요청 ${it.orderQty}개</span>` : ""}</div>
+          <div class="name"><span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${showSub && it.subCategory ? `<span class="subcat-inline-tag">${escapeHtml(it.subCategory)}</span>` : ""}${it.autoAdded ? `<span class="subcat-inline-tag">2일마다 자동</span>` : ""}${it.qty ? `<span class="qty-pill">${escapeHtml(qtyRemainingLabel(it.qty))}</span>` : ""}${it.orderQty && it.orderQty > 1 ? `<span class="qty-pill">요청 ${it.orderQty}개</span>` : ""}</div>
           ${it.note ? `<div class="note">${escapeHtml(it.note)}</div>` : ""}
-          ${materialPhotoUrlsOf(it).map((url) => `<a href="${url}" target="_blank" rel="noopener"><img src="${url}" class="note-photo-thumb" alt="첨부 사진" /></a>`).join("")}
+          ${materialPhotoUrlsOf(it).map((url) => `<img src="${url}" class="note-photo-thumb" data-receipt-lightbox="${url}" alt="첨부 사진" />`).join("")}
           ${it.ordered && it.receiptPhotos && it.receiptPhotos.length > 0 ? `
           <div class="receipt-photo-row" style="margin-top:4px;">
             ${it.receiptPhotos.map((url) => `<img src="${url}" class="receipt-photo-thumb" data-receipt-lightbox="${url}" alt="사장님 결제 영수증" />`).join("")}
@@ -1085,6 +1153,123 @@ async function onPhotosSelected(id, files) {
   }
 }
 
+// ---- 신규 가입 온보딩 (모리가 실제 탭을 화살표로 짚어가며 소개) ----
+// target이 없는 스텝(첫 인사)은 가운데 뜨는 카드로, target이 있는 스텝은
+// 그 실제 DOM 요소를 스포트라이트로 띄우고 화살표 달린 말풍선을 옆에 붙인다.
+const ONBOARDING_STEPS = [
+  { target: null, text: "안녕하세요, 모리예요! 🐻\nMAMORY가 처음이시죠? 제가 탭을 하나씩 직접 짚어드릴게요." },
+  { target: ".big-cat-grid", text: "여기서 부족한 자재를 체크해요.\n기본자재/식자재 고르고 소분류 들어가서, 긴급·정상·품절 중 골라 체크하면 끝!" },
+  { target: '.bottom-tab[data-nav="cart"]', text: "체크한 자재들은 여기, 담은 목록에 모여요.\n다 담았으면 제출 버튼을 눌러서 사장님께 보내주세요." },
+  { target: '.bottom-tab[data-nav="register"]', text: "마감할 땐 여기서\n시재(현금)랑 선결제 내역을 등록해요." },
+  { target: '.bottom-tab[data-nav="share"]', text: "여기선 품절된 메뉴, 레시피 변경, 공지사항을 다같이 나눠요." },
+  { target: '.bottom-tab[data-nav="payroll"]', text: "여기서 출퇴근 도장도 찍고\n내 근무 기록도 확인할 수 있어요.\n\n이제 시작해볼까요?" },
+];
+let onboardingStep = 0;
+let onboardingSpotlightEl = null;
+
+function openOnboarding() {
+  onboardingStep = 0;
+  renderOnboarding();
+}
+
+function clearOnboardingSpotlight() {
+  if (onboardingSpotlightEl) {
+    onboardingSpotlightEl.classList.remove("onboarding-spotlight");
+    onboardingSpotlightEl = null;
+  }
+}
+
+function closeOnboarding() {
+  clearOnboardingSpotlight();
+  const root = document.getElementById("onboardingOverlayRoot");
+  if (root) root.innerHTML = "";
+}
+
+function renderOnboarding() {
+  const root = document.getElementById("onboardingOverlayRoot");
+  if (!root) return;
+  clearOnboardingSpotlight();
+  const step = ONBOARDING_STEPS[onboardingStep];
+  const isLast = onboardingStep === ONBOARDING_STEPS.length - 1;
+  const dotsHtml = `
+    <div class="onboarding-dots">
+      ${ONBOARDING_STEPS.map((_, i) => `<span class="onboarding-dot ${i === onboardingStep ? "active" : ""}"></span>`).join("")}
+    </div>`;
+  const nextLabel = isLast ? "시작하기!" : "다음";
+  const bodyHtml = escapeHtml(step.text).replace(/\n/g, "<br>");
+
+  if (!step.target) {
+    root.innerHTML = `
+      <div class="onboarding-blocker onboarding-blocker-dim" id="onboardingBlocker">
+        <div class="payroll-form-sheet onboarding-sheet">
+          <img class="onboarding-mascot-img" src="img/mascot/mascot-happy.png" alt="모리" />
+          <div class="onboarding-bubble">${bodyHtml}</div>
+          ${dotsHtml}
+          <button type="button" class="btn gold block" id="onboardingNextBtn">${nextLabel}</button>
+        </div>
+      </div>`;
+    document.getElementById("onboardingNextBtn").addEventListener("click", () => advanceOnboarding(isLast));
+    return;
+  }
+
+  const target = document.querySelector(step.target);
+  if (!target) { advanceOnboarding(isLast); return; } // 해당 요소가 없으면 그 스텝은 건너뛴다
+
+  root.innerHTML = `
+    <div class="onboarding-blocker" id="onboardingBlocker">
+      <div class="onboarding-tooltip" id="onboardingTooltip" style="visibility:hidden;">
+        <button class="onboarding-tooltip-skip" id="onboardingSkipBtn" aria-label="건너뛰기">✕</button>
+        <div class="onboarding-tooltip-head">
+          <img class="onboarding-tooltip-mascot" src="img/mascot/mascot-happy.png" alt="모리" />
+          <div class="onboarding-tooltip-text">${bodyHtml}</div>
+        </div>
+        ${dotsHtml}
+        <button type="button" class="btn gold block" id="onboardingNextBtn">${nextLabel}</button>
+        <div class="onboarding-arrow" id="onboardingArrow"></div>
+      </div>
+    </div>`;
+
+  target.scrollIntoView({ block: "center", behavior: "instant" });
+  target.classList.add("onboarding-spotlight");
+  onboardingSpotlightEl = target;
+
+  requestAnimationFrame(() => {
+    const tooltip = document.getElementById("onboardingTooltip");
+    const arrow = document.getElementById("onboardingArrow");
+    const rect = target.getBoundingClientRect();
+    const tRect = tooltip.getBoundingClientRect();
+    const margin = 14;
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+    let top, arrowDir;
+    if (spaceBelow >= tRect.height + margin || spaceBelow > spaceAbove) {
+      top = Math.min(rect.bottom + margin, window.innerHeight - tRect.height - 12);
+      arrowDir = "up";
+    } else {
+      top = rect.top - tRect.height - margin;
+      arrowDir = "down";
+    }
+    top = Math.max(12, top);
+    let left = rect.left + rect.width / 2 - tRect.width / 2;
+    left = Math.max(12, Math.min(left, window.innerWidth - tRect.width - 12));
+    tooltip.style.top = `${top}px`;
+    tooltip.style.left = `${left}px`;
+    tooltip.style.visibility = "visible";
+    arrow.className = `onboarding-arrow ${arrowDir}`;
+    const arrowLeft = Math.max(16, Math.min(rect.left + rect.width / 2 - left - 8, tRect.width - 32));
+    arrow.style.left = `${arrowLeft}px`;
+  });
+
+  document.getElementById("onboardingSkipBtn").addEventListener("click", closeOnboarding);
+  document.getElementById("onboardingNextBtn").addEventListener("click", () => advanceOnboarding(isLast));
+}
+
+function advanceOnboarding(isLast) {
+  if (isLast) { closeOnboarding(); return; }
+  onboardingStep += 1;
+  renderOnboarding();
+}
+
 function onPhotoRemove(id, index) {
   if (synced[id]) return; // locked, ignore
   const current = effectiveState(id);
@@ -1224,12 +1409,15 @@ async function main() {
   // Deep-linked here from a push notification (see functions/index.js's
   // `link` field) — land straight on the relevant tab instead of always
   // opening to 자재선택.
-  const linkedView = new URLSearchParams(location.search).get("view");
+  const linkedParams = new URLSearchParams(location.search);
+  const linkedView = linkedParams.get("view");
   if (linkedView === "cart") {
     view = "cart";
     cartDate = date;
   } else if (linkedView === "share") {
     view = "share";
+    setInitialShareTab(linkedParams.get("stab"));
+    setInitialShareDate(linkedParams.get("sdate"));
   } else if (linkedView === "register") {
     view = "register";
   } else if (linkedView === "payroll") {
@@ -1297,9 +1485,19 @@ async function main() {
 
   loadAllChipCounts();
   loadYesterdayItems();
-  updateNotifyBtn();
+  watchNotificationBadge(notifyBadgeEl, staffPhone);
   render();
   scrollTopSafely();
+
+  // 방금 가입한 신규 직원만 login.js가 ?onboarding=1을 붙여서 보낸다 —
+  // 한 번 보여준 뒤엔 새로고침해도 다시 안 뜨게 URL에서 바로 지운다.
+  const onboardingParams = new URLSearchParams(location.search);
+  if (onboardingParams.get("onboarding") === "1") {
+    onboardingParams.delete("onboarding");
+    const qs = onboardingParams.toString();
+    history.replaceState(null, "", location.pathname + (qs ? `?${qs}` : ""));
+    openOnboarding();
+  }
 }
 
 main();

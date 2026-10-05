@@ -1,3 +1,9 @@
+// 뷰포트의 user-scalable=no만으로는 iOS Safari에서 두 손가락 핀치줌을 완전히
+// 막지 못해서, 제스처 이벤트 자체를 막는다 — 목록을 스크롤하다 손가락이
+// 두 개 닿으면 의도치 않게 살짝 확대됐다가 다시 축소해야 하는 불편이 있었다.
+document.addEventListener("gesturestart", (e) => e.preventDefault());
+document.addEventListener("gesturechange", (e) => e.preventDefault());
+
 if ("serviceWorker" in navigator) {
   let swReg = null;
 
@@ -37,6 +43,27 @@ window.forceAppRefresh = function () {
   location.reload();
 };
 
+// 모바일 키보드가 올라오면 입력창이 가려지거나, 밑에 깔린 목록(검색 결과,
+// 댓글 목록 등)이 잘 안 보인다는 피드백이 있어서 입력창에 포커스가 가면
+// 잠깐 기다렸다가 화면 중앙쯤 보이도록 스크롤한다 — 어느 화면의
+// input/textarea든 공통으로 적용되게 여기(모든 페이지에서 로드되는
+// 스크립트)에 둔다.
+//
+// 원래는 "빈 공간 탭하면 키보드 내려가게" 하는 전역 touchstart 리스너도
+// 같이 있었는데, 그걸 추가한 직후부터 홈화면 설치 앱(standalone PWA)에서
+// 사진첨부(네이티브 포토 피커)가 "사진을 로드할 수 없음"으로 실패하는
+// 문제가 생겼다 — 모든 터치마다 끼어드는 document 레벨 touchstart 리스너가
+// iOS의 더 엄격한 standalone 웹뷰 제스처 신뢰 체인을 건드려서, 뒤이은
+// input.click()이 "진짜 사용자 제스처"로 인정 안 되는 것으로 추정된다.
+// 버튼/사진첨부처럼 중요한 네이티브 상호작용을 건드릴 수 있어 제거했다.
+document.addEventListener("focusin", (e) => {
+  const el = e.target;
+  if (!el.matches || !el.matches("input, textarea")) return;
+  setTimeout(() => {
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, 300);
+});
+
 // 홈화면에 추가한(standalone) PWA는 브라우저 주소창이 없어서 크롬/사파리의
 // 기본 "당겨서 새로고침" 제스처도 같이 사라진다 — 그래서 화면 맨 위에서
 // 아래로 당기면 새로고침되는 동작을 직접 만든다. 페이지 맨 위(scrollTop
@@ -49,7 +76,7 @@ window.forceAppRefresh = function () {
 // "refresh" 모드로 나누면, 손 하나의 제스처가 둘 다를 동시에 건드리는
 // 충돌 없이 깔끔하게 갈린다.
 (function setupTouchGestures() {
-  const REFRESH_DISTANCE = 100; // 이만큼 당기면 손을 떼는 순간 새로고침
+  const REFRESH_DISTANCE = 170; // 이만큼 당기면 손을 떼는 순간 새로고침 — 살짝 스크롤/핀치줌 중 실수로 안 걸리게 넉넉하게 잡음
   const REFRESH_INDICATOR_HEIGHT = 84; // 텍스트만 있을 때보다 더 여유 있게 — 로딩 그림이 들어갈 공간
   const SHEET_DISMISS_DISTANCE = 80; // 이만큼 시트를 내리면 손을 떼는 순간 닫힘
 
@@ -75,7 +102,27 @@ window.forceAppRefresh = function () {
     return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
   }
 
+  // 핀치줌처럼 손가락이 두 개 이상 닿으면 즉시 제스처를 무효화한다 — 그대로
+  // 두면 확대/축소하려고 짚은 첫 손가락의 Y좌표 변화를 당겨서-새로고침으로
+  // 오인해서, 줌을 할 때마다 새로고침이 걸리는 원인이 됐다.
+  function cancelGesture() {
+    if (mode === "sheet" && sheetEl) {
+      sheetEl.style.transition = "transform .15s ease";
+      sheetEl.style.transform = "";
+    } else if (mode === "refresh") {
+      indicator.style.transition = "transform .12s ease";
+      indicator.style.transform = `translateY(-${REFRESH_INDICATOR_HEIGHT}px)`;
+    }
+    mode = null;
+    sheetEl = null;
+    startY = null;
+  }
+
   document.addEventListener("touchstart", (e) => {
+    if (e.touches.length > 1) {
+      cancelGesture();
+      return;
+    }
     const sheet = e.target.closest(".payroll-form-sheet");
     if (sheet && (sheet.scrollTop || 0) === 0) {
       mode = "sheet";
@@ -94,6 +141,10 @@ window.forceAppRefresh = function () {
   }, { passive: true });
 
   document.addEventListener("touchmove", (e) => {
+    if (e.touches.length > 1) {
+      cancelGesture();
+      return;
+    }
     if (!mode || startY === null) return;
     const dy = e.touches[0].clientY - startY;
 

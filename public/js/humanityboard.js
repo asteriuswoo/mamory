@@ -1,4 +1,4 @@
-// 인류애 바사삭 — 직원 홈 화면과 사장님 화면 양쪽에서 같은 버튼/오버레이를
+// 극한직업 일지 (구 인류애 바사삭) — 직원 홈 화면과 사장님 화면 양쪽에서 같은 버튼/오버레이를
 // 띄워 쓰는 공용 모듈. mountHumanityTrigger(triggerBtn, overlayRootEl, account)로
 // 붙여 쓴다. 전역 로그(humanityCracks)라 업무 데이터와는 완전히 분리되어 있다.
 import { db, collection, addDoc, deleteDoc, doc, updateDoc, onSnapshot, query, orderBy, serverTimestamp, arrayUnion, arrayRemove } from "./firebase-init.js";
@@ -207,10 +207,10 @@ function overlayHtml() {
     <div class="payroll-form-overlay" id="humanityOverlay">
       <div class="payroll-form-sheet">
         <div class="row-between">
-          <div style="font-weight:800; font-size:16px;">💢 인류애 바사삭</div>
+          <div style="font-weight:800; font-size:16px;">💢 극한직업 일지</div>
           <button class="payroll-form-close-btn" id="humanityCloseBtn" aria-label="닫기">✕</button>
         </div>
-        <div style="font-size:12px; color:var(--muted); margin:6px 0 14px;">오늘 인류애가 바사삭 깨진 순간이 있었다면 짧게 남겨보세요. 다같이 볼 수 있어요.</div>
+        <div style="font-size:12px; color:var(--muted); margin:6px 0 14px;">오늘 극한직업 느낀 순간이 있었다면 짧게 남겨보세요. 다같이 볼 수 있어요.</div>
         <textarea id="humanityInput" class="humanity-input" placeholder="무슨 일이 있었나요?" rows="3">${escapeHtml(draft)}</textarea>
         <button class="btn gold block" id="humanitySubmitBtn" style="margin-top:8px;">기록하기</button>
         <div class="humanity-list" style="margin-top:16px;">${listHtml()}</div>

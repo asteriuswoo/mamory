@@ -274,7 +274,10 @@ async function confirmRegisterPin() {
     }
     const account = await registerAccount({ phone: pendingPhone, name, role: "staff", pin });
     setAccount(account);
-    goTo("staff");
+    // 신규 가입 직후에만 모리가 탭을 소개해주는 온보딩을 띄운다 — 이미
+    // 계정 있는 사람의 재로그인(goTo("staff"))과는 분리된, 여기뿐인 경로라
+    // 따로 추측할 필요 없이 정확히 "방금 가입한 사람"만 잡아낼 수 있다.
+    location.href = "staff.html?onboarding=1";
     return;
   }
 
