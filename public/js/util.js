@@ -292,8 +292,88 @@ export function openImageLightbox(srcOrGroup, altOrIndex) {
     }, { passive: true });
   }
 
+  overlay.querySelectorAll(".img-lightbox-img").forEach(wirePinchZoom);
+
   document.body.appendChild(overlay);
   if (startIndex > 0) track.scrollLeft = startIndex * track.clientWidth; // 애니메이션 없이 바로 그 장으로
+}
+
+// 앱 전체는 user-scalable=no로 화면 자체의 핀치줌을 막아뒀지만(레이아웃이
+// 밀리는 걸 방지), 라이트박스로 확대해서 보는 사진 한 장만큼은 두 손가락으로
+// 더 크게 보고 싶을 수 있어서 — 이미지 엘리먼트에만 직접 transform(scale/
+// translate)을 입혀서 "사진 자체만" 확대되게 한다(화면/레이아웃은 그대로).
+// 손가락 1개로는 원래처럼 사진 사이를 옆으로 스와이프할 수 있어야 하므로,
+// 확대돼 있을 때(scale>1)만 손가락 1개 드래그를 "사진 안에서 이동"으로
+// 가로채고, 평소엔 그 네이티브 스와이프를 건드리지 않는다.
+function wirePinchZoom(img) {
+  let scale = 1, tx = 0, ty = 0;
+  let startDist = 0, startScale = 1;
+  let startTx = 0, startTy = 0, startX = 0, startY = 0;
+  let panning = false;
+  let lastTapAt = 0;
+
+  function apply() {
+    img.style.transform = scale === 1 ? "" : `translate(${tx}px, ${ty}px) scale(${scale})`;
+  }
+
+  function resetZoom() {
+    scale = 1;
+    tx = 0;
+    ty = 0;
+    apply();
+  }
+
+  function distanceOf(touches) {
+    return Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
+  }
+
+  img.addEventListener(
+    "touchstart",
+    (e) => {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        startDist = distanceOf(e.touches);
+        startScale = scale;
+      } else if (e.touches.length === 1 && scale > 1) {
+        e.preventDefault();
+        panning = true;
+        startX = e.touches[0].clientX;
+        startY = e.touches[0].clientY;
+        startTx = tx;
+        startTy = ty;
+      }
+    },
+    { passive: false }
+  );
+
+  img.addEventListener(
+    "touchmove",
+    (e) => {
+      if (e.touches.length === 2 && startDist > 0) {
+        e.preventDefault();
+        scale = Math.min(4, Math.max(1, startScale * (distanceOf(e.touches) / startDist)));
+        apply();
+      } else if (panning && e.touches.length === 1) {
+        e.preventDefault();
+        tx = startTx + (e.touches[0].clientX - startX);
+        ty = startTy + (e.touches[0].clientY - startY);
+        apply();
+      }
+    },
+    { passive: false }
+  );
+
+  img.addEventListener("touchend", () => {
+    panning = false;
+    startDist = 0;
+    if (scale <= 1.02) {
+      resetZoom();
+      return;
+    }
+    const now = Date.now();
+    if (now - lastTapAt < 300) resetZoom(); // 더블탭하면 원래 크기로
+    lastTapAt = now;
+  });
 }
 
 // Storage 버킷에 CORS 설정이 없어서, 사진 URL을 브라우저에서 바로 fetch()하면

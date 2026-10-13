@@ -3,7 +3,7 @@
 // 붙여 쓴다. 전역 로그(humanityCracks)라 업무 데이터와는 완전히 분리되어 있다.
 import { db, collection, addDoc, deleteDoc, doc, updateDoc, onSnapshot, query, orderBy, serverTimestamp, arrayUnion, arrayRemove } from "./firebase-init.js";
 import { toast, escapeHtml, formatTimeLabel, formatDateLabel, dateStrOf } from "./util.js";
-import { avatarHtml } from "./avatar.js";
+import { avatarHtml, allAccounts } from "./avatar.js";
 
 let overlayRoot = null;
 let triggerBtnEl = null;
@@ -17,6 +17,42 @@ const openReplyFor = new Set();
 // 바인딩이 없으면 타이핑 중이던 내용이 날아간다 — id별로 기억해뒀다가 다시
 // 그릴 때 그대로 복원한다 (공유해요 게시판에서 겪은 것과 같은 버그).
 const replyDrafts = new Map();
+// 답글도 공유해요 게시판처럼 @멘션을 지원한다 — 입력창이 글마다 따로 열려
+// 있을 수 있어서 "@" 입력 중인지 상태를 id별로 따로 들고 있는다.
+const replyMentionState = new Map(); // id -> { active, startIndex, query }
+
+// @멘션 자동완성 후보 — 본인은 멘션할 이유가 없으니 빼고, "모두"를 맨 앞에 둔다.
+function mentionCandidates() {
+  return [{ phone: "all", name: "모두" }, ...allAccounts().filter((a) => a.phone !== account.phone)];
+}
+
+// 작성 중인 텍스트에서 "@이름" 패턴을 뽑아 실제 계정과 매칭한다 — 등록 시
+// 알림을 누구에게 보낼지 정하는 데 쓴다.
+function extractMentions(text) {
+  const accounts = allAccounts();
+  const phones = new Set();
+  let mentionsAll = false;
+  const re = /@([^\s@]+)/g;
+  let m;
+  while ((m = re.exec(text))) {
+    if (m[1] === "모두") { mentionsAll = true; continue; }
+    const found = accounts.find((a) => a.name === m[1]);
+    if (found) phones.add(found.phone);
+  }
+  return { mentions: [...phones], mentionsAll };
+}
+
+// 이미 escapeHtml을 거친 문자열 위에서만 동작 — "@이름"이 실제 계정 이름과
+// 일치할 때만 토글색 글씨로 감싼다(아무 @아무개나 다 색칠하면 오탐이 많다).
+function highlightMentions(escapedContent) {
+  const names = allAccounts().map((a) => a.name);
+  return escapedContent.replace(/@([^\s<]+)/g, (full, name) => {
+    if (name === "모두" || names.includes(name)) {
+      return `<span class="mention-tag">@${name}</span>`;
+    }
+    return full;
+  });
+}
 
 export function mountHumanityTrigger(triggerBtn, overlayRootEl, acc) {
   overlayRoot = overlayRootEl;
@@ -121,9 +157,11 @@ async function addReply(id, content) {
     toast("댓글 내용을 입력해주세요");
     return;
   }
-  const reply = { content: text, staffName: account.name, staffPhone: account.phone, createdAt: Date.now() };
+  const { mentions, mentionsAll } = extractMentions(text);
+  const reply = { content: text, mentions, mentionsAll, staffName: account.name, staffPhone: account.phone, createdAt: Date.now() };
   await updateDoc(doc(db, "humanityCracks", id), { replies: arrayUnion(reply) });
   replyDrafts.delete(id);
+  replyMentionState.delete(id);
   renderOverlay();
 }
 
@@ -149,7 +187,7 @@ function repliesHtml(it) {
         <div class="reply-row">
           ${avatarHtml(r.staffPhone, r.staffName, 18)}
           <div class="reply-body">
-            <span class="reply-who">${escapeHtml(r.staffName || "")}님</span><span class="reply-content">${escapeHtml(r.content)}</span>
+            <span class="reply-who">${escapeHtml(r.staffName || "")}님</span><span class="reply-content">${highlightMentions(escapeHtml(r.content))}</span>
             ${mine ? `<div class="reply-actions"><button class="reply-delete-btn" data-humanity-reply-delete="${it.id}" data-humanity-reply-idx="${idx}">삭제</button></div>` : ""}
           </div>
         </div>`;
@@ -158,13 +196,46 @@ function repliesHtml(it) {
   if (openReplyFor.has(it.id)) {
     html += `
       <div class="reply-input-row">
-        <input type="text" class="reply-input" data-humanity-reply-for="${it.id}" placeholder="댓글 달기" value="${escapeHtml(replyDrafts.get(it.id) || "")}" />
+        <input type="text" class="reply-input" data-humanity-reply-for="${it.id}" placeholder="댓글 달기 (@이름으로 멘션할 수 있어요)" value="${escapeHtml(replyDrafts.get(it.id) || "")}" />
         <button class="reply-send-btn" data-humanity-reply-send="${it.id}">등록</button>
-      </div>`;
+      </div>
+      <div class="mention-suggest-box" data-humanity-reply-mention-box="${it.id}"></div>`;
   } else {
     html += `<button class="reply-toggle-btn" data-humanity-reply-toggle="${it.id}">댓글달기</button>`;
   }
   return html;
+}
+
+function renderReplyMentionSuggestions(id) {
+  const box = overlayRoot.querySelector(`[data-humanity-reply-mention-box="${id}"]`);
+  if (!box) return;
+  const state = replyMentionState.get(id);
+  if (!state || !state.active) { box.innerHTML = ""; return; }
+  const q = state.query.trim();
+  const matches = mentionCandidates().filter((a) => !q || a.name.includes(q)).slice(0, 6);
+  if (matches.length === 0) { box.innerHTML = ""; return; }
+  box.innerHTML = matches.map((a) => `<button type="button" class="mention-suggest-btn" data-humanity-reply-mention-name="${escapeHtml(a.name)}">@${escapeHtml(a.name)}</button>`).join("");
+  box.querySelectorAll("[data-humanity-reply-mention-name]").forEach((el) => {
+    el.addEventListener("click", () => insertReplyMention(id, el.dataset.humanityReplyMentionName));
+  });
+}
+
+function insertReplyMention(id, name) {
+  const input = overlayRoot.querySelector(`.reply-input[data-humanity-reply-for="${id}"]`);
+  if (!input) return;
+  const state = replyMentionState.get(id) || { startIndex: 0 };
+  const current = replyDrafts.get(id) || "";
+  const cursor = input.selectionStart;
+  const before = current.slice(0, state.startIndex);
+  const after = current.slice(cursor);
+  const newText = `${before}@${name} ${after}`;
+  replyDrafts.set(id, newText);
+  input.value = newText;
+  const newCursor = before.length + name.length + 2;
+  replyMentionState.set(id, { active: false, startIndex: -1, query: "" });
+  renderReplyMentionSuggestions(id);
+  input.focus();
+  input.setSelectionRange(newCursor, newCursor);
 }
 
 function entryRowHtml(it) {
@@ -252,7 +323,18 @@ function wireOverlay() {
     const id = el.dataset.humanityReplySend;
     const replyInput = overlay.querySelector(`.reply-input[data-humanity-reply-for="${id}"]`);
     el.addEventListener("click", () => addReply(id, replyInput.value));
-    replyInput.addEventListener("input", (e) => { replyDrafts.set(id, e.target.value); });
+    replyInput.addEventListener("input", (e) => {
+      replyDrafts.set(id, e.target.value);
+      const cursor = e.target.selectionStart;
+      const before = e.target.value.slice(0, cursor);
+      const atIndex = before.lastIndexOf("@");
+      if (atIndex !== -1 && !/\s/.test(before.slice(atIndex + 1))) {
+        replyMentionState.set(id, { active: true, startIndex: atIndex, query: before.slice(atIndex + 1) });
+      } else {
+        replyMentionState.set(id, { active: false, startIndex: -1, query: "" });
+      }
+      renderReplyMentionSuggestions(id);
+    });
     replyInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.isComposing) addReply(id, replyInput.value);
     });

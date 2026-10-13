@@ -2,11 +2,16 @@ const { onDocumentCreated, onDocumentUpdated } = require("firebase-functions/v2/
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { onRequest } = require("firebase-functions/v2/https");
 const { setGlobalOptions } = require("firebase-functions/v2");
+const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
+const vision = require("@google-cloud/vision");
+
+const YOUTUBE_API_KEY = defineSecret("YOUTUBE_API_KEY");
 
 admin.initializeApp();
 const db = admin.firestore();
 const messaging = admin.messaging();
+const visionClient = new vision.ImageAnnotatorClient();
 
 // Collocated with the Firestore database (asia-northeast3 / Seoul) to match
 // the triggers' region and avoid cross-region hops.
@@ -625,6 +630,38 @@ exports.notifyOnHumanityCrack = onDocumentCreated("humanityCracks/{crackId}", as
   });
 });
 
+// 공유해요의 답글(notifyOnNewReply)과 같은 규칙: @멘션이 있으면 멘션된
+// 사람에게만, 없으면 작성자를 뺀 전원에게 알림이 간다.
+exports.notifyOnNewHumanityReply = onDocumentUpdated("humanityCracks/{crackId}", async (event) => {
+  const before = event.data.before.data();
+  const after = event.data.after.data();
+  const beforeReplies = before.replies || [];
+  const afterReplies = after.replies || [];
+  if (afterReplies.length <= beforeReplies.length) return;
+  const newReply = afterReplies[afterReplies.length - 1];
+  if (!newReply || !newReply.staffPhone) return;
+
+  const body = `${newReply.staffName ? newReply.staffName + "님: " : ""}${newReply.content || ""} (댓글)`;
+  const mentionedPhones = new Set(newReply.mentions || []);
+  const hasMention = newReply.mentionsAll || mentionedPhones.size > 0;
+
+  const accSnap = await db.collection("accounts").get();
+  const sends = [];
+  accSnap.forEach((docSnap) => {
+    if (docSnap.id === newReply.staffPhone) return;
+    const mentioned = newReply.mentionsAll || mentionedPhones.has(docSnap.id);
+    if (hasMention && !mentioned) return;
+    const data = docSnap.data();
+    sends.push(notify([docSnap.id], tokensOf(data.fcmTokens), {
+      title: mentioned ? `${newReply.staffName ? newReply.staffName + "님이 " : ""}회원님을 언급했어요` : "💢 극한직업 일지 댓글",
+      body,
+      link: "/staff.html",
+      type: "humanity",
+    }));
+  });
+  await Promise.all(sends);
+});
+
 // ---- 단종 메뉴 공지 자동 정리 (매일 새벽 4시) ----
 // 단종 소식은 "이제 안 만드는 메뉴" 공지라 직원들이 한 달 정도 보고 나면
 // 더 들고 있을 필요가 없다 — 레시피 탭이 오래된 단종 공지로 계속 쌓이지
@@ -641,6 +678,56 @@ exports.cleanupOldDiscontinuedRecipes = onSchedule({ schedule: "0 4 * * *", time
   const batch = db.batch();
   snap.docs.forEach((docSnap) => batch.delete(docSnap.ref));
   await batch.commit();
+});
+
+// ---- 오늘의 노래 미등록 알림 (매일 아침 6시) ----
+// public/js/musicbar.js의 요일별 순서 로직을 서버에서도 그대로 재현해 "오늘
+// 담당자가 누구인지" 판단한다 — 두 곳 로직이 갈라지면 안 되니 바뀔 땐 항상
+// 같이 맞춰야 한다. 이미 등록돼 있으면(songOfTheDay/{today} 존재) 보내지
+// 않는다.
+const SONG_PICKER_START_DATE = "2026-10-07";
+const SONG_PICKER_WEEKDAY_ORDER = [
+  { phone: "01064082901", name: "진우" },
+  { phone: "01083477412", name: "하린" },
+  { phone: "01038355240", name: "유리" },
+];
+const SONG_PICKER_WEEKEND = { phone: "01071362938", name: "지안" };
+
+function songPickerWeekdayIndexSince(fromDateStr, toDateStr) {
+  const from = new Date(`${fromDateStr}T00:00:00`);
+  const to = new Date(`${toDateStr}T00:00:00`);
+  let count = -1;
+  const cur = new Date(from);
+  while (cur <= to) {
+    const dow = cur.getDay();
+    if (dow !== 0 && dow !== 6) count++;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return count;
+}
+
+function todaysSongPicker(dateStr) {
+  const dow = new Date(`${dateStr}T00:00:00`).getDay();
+  if (dow === 0 || dow === 6) return SONG_PICKER_WEEKEND;
+  const idx = songPickerWeekdayIndexSince(SONG_PICKER_START_DATE, dateStr);
+  const n = SONG_PICKER_WEEKDAY_ORDER.length;
+  return SONG_PICKER_WEEKDAY_ORDER[((idx % n) + n) % n];
+}
+
+exports.notifySongPickerMorning = onSchedule({ schedule: "0 6 * * *", timeZone: "Asia/Seoul" }, async () => {
+  const today = kstDateStr(new Date());
+  const songSnap = await db.collection("songOfTheDay").doc(today).get();
+  if (songSnap.exists) return;
+  const picker = todaysSongPicker(today);
+  const accSnap = await db.collection("accounts").doc(picker.phone).get();
+  if (!accSnap.exists) return;
+  const data = accSnap.data();
+  await notify([picker.phone], tokensOf(data.fcmTokens), {
+    title: "🎵 오늘의 노래",
+    body: "오늘의 노래를 아직 등록 안 하셨어요 — 검색해서 골라주세요",
+    link: data.role === "owner" ? "/owner.html" : "/staff.html",
+    type: "song",
+  });
 });
 
 // ---- 알림내역 자동 정리 (매일 새벽 4시) ----
@@ -685,5 +772,58 @@ exports.downloadImage = onRequest({ cors: true }, async (req, res) => {
     res.send(buf);
   } catch (e) {
     res.status(500).send("download failed");
+  }
+});
+
+// ---- 영수증 사진 글자 인식(OCR) ----
+// 사장님이 "전체 영수증" 사진을 올리면, 그 사진에서 글자를 읽어서 어떤
+// 자재가 찍혀 있는지 클라이언트(owner.js)가 자재 목록과 대조해 자동으로
+// 체크할 수 있게 원문 텍스트만 돌려준다 — 매칭 판단은 클라이언트가 한다.
+// Cloud Vision API 사용(월 1,000장까지 무료, 이후 1,000장당 약 1,500원 —
+// 가게당 하루 한두 번 쓰는 용도라 보통 무료 한도 안에서 끝난다).
+exports.extractReceiptText = onRequest({ cors: true }, async (req, res) => {
+  const filePath = req.query.path;
+  if (!filePath) {
+    res.status(400).json({ text: "" });
+    return;
+  }
+  try {
+    const bucket = admin.storage().bucket();
+    const file = bucket.file(filePath);
+    const [buf] = await file.download();
+    const [result] = await visionClient.textDetection({ image: { content: buf } });
+    const text = (result.fullTextAnnotation && result.fullTextAnnotation.text) || "";
+    res.json({ text });
+  } catch (e) {
+    console.error("영수증 OCR 실패", e);
+    res.status(500).json({ text: "" });
+  }
+});
+
+// ---- 오늘의 노래: 유튜브 검색 프록시 ----
+// API 키를 클라이언트에 그대로 내려주지 않으려고 서버에서 대신 호출한다
+// (키가 새어나가도 이 함수 하나만 막으면 되게). YouTube Data API는 하루
+// 10,000 유닛까지 무료이고 검색 1번에 100 유닛이라, 하루 100번 검색까지는
+// 무료 — 이 매장 규모에서 쓸 "오늘의 노래" 검색 용도로는 충분하다.
+exports.searchYoutube = onRequest({ cors: true, secrets: [YOUTUBE_API_KEY] }, async (req, res) => {
+  const q = (req.query.q || "").toString().trim();
+  if (!q) {
+    res.status(400).json({ items: [] });
+    return;
+  }
+  try {
+    const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=8&q=${encodeURIComponent(q)}&key=${YOUTUBE_API_KEY.value()}`;
+    const r = await fetch(url);
+    const data = await r.json();
+    const items = (data.items || []).map((it) => ({
+      videoId: it.id.videoId,
+      title: it.snippet.title,
+      channelTitle: it.snippet.channelTitle,
+      thumbnail: (it.snippet.thumbnails && (it.snippet.thumbnails.default || {}).url) || "",
+    }));
+    res.json({ items });
+  } catch (e) {
+    console.error("유튜브 검색 실패", e);
+    res.status(500).json({ items: [] });
   }
 });

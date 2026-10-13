@@ -35,18 +35,25 @@ import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstati
 import { firebaseConfig, STORE_NAME, QUICK_ORDER_LINKS } from "./firebase-config.js";
 
 const app = initializeApp(firebaseConfig);
+// 2026-10-12 밤: Firestore 연결 방식(롱폴링 강제)과 Auth 초기화 방식(iframe
+// 회피, IndexedDB persistence)을 이것저것 바꿔가며 모바일 연결 문제를
+// 쫓아봤는데, 결과가 그때그때 달라서(됐다 안 됐다) 오히려 더 불안정해진
+// 것으로 보인다 — 원래 몇 주간 문제없이 쓰던 기본 설정(getFirestore/
+// getAuth)으로 되돌린다. 자세한 경위는 TROUBLESHOOTING.md 참고.
 export const db = getFirestore(app);
 export const auth = getAuth(app);
 export const storage = getStorage(app);
 export { ref, uploadBytes, getDownloadURL };
 
-// Caches Firestore reads in IndexedDB so a fresh PWA launch (e.g. from
-// tapping a push notification) can paint cached data immediately instead of
-// waiting on the network round-trip, then updates live once the real
-// snapshot arrives — this is the main thing making cold opens feel slow.
-// Fails silently in multi-tab sessions or unsupported browsers, where the
-// app just falls back to network-only like before.
-enableIndexedDbPersistence(db).catch(() => {});
+// 2026-10-12 밤: enableIndexedDbPersistence()가 "누가 대표 탭인지" 추적하려고
+// localStorage에 firestore_zombie_... 흔적을 남기는데, 홈화면에 설치한
+// standalone 앱을 완전 종료(강제 종료라 정리할 틈이 없음)했다 재실행하는
+// 걸 반복하면 그 흔적이 안 지워지고 계속 쌓이는 게 실제로 확인됐다 — 그
+// 흔적이 쌓인 채로 다음 실행의 "대표 탭 선정"이 막히면서 Firestore 요청이
+// 네트워크 시도조차 안 하고 영원히 멈추는 것으로 보인다. 이 앱은 상시
+// 연결 상태로 쓰는 용도라 오프라인 캐시가 꼭 필요하지 않아서, 이 기능
+// 자체를 끈다 — "흔적이 쌓인다"는 문제의 근본 원인 자체를 없앤다.
+// enableIndexedDbPersistence(db).catch(() => {});
 
 // 모바일 브라우저는 앱이 한참 백그라운드에 있으면 JS 타이머/네트워크를
 // 통째로 멈춰뒀다가 돌아왔을 때 Firestore의 실시간 연결(onSnapshot)을 제대로
@@ -54,18 +61,31 @@ enableIndexedDbPersistence(db).catch(() => {});
 // 몇 번 하거나 앱을 껐다 켜야만 다시 정상으로 돌아오던 문제가 이것.
 // 오래(1분+) 숨겨져 있다가 다시 보이면 네트워크를 껐다 켜서 이미 떠있는
 // 모든 리스너가 서버와 새로 동기화하도록 강제한다.
-let hiddenSinceMs = null;
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden) {
-    hiddenSinceMs = Date.now();
-    return;
-  }
-  const wasHiddenLong = hiddenSinceMs && Date.now() - hiddenSinceMs > 60 * 1000;
-  hiddenSinceMs = null;
-  if (wasHiddenLong) {
+//
+// visibilitychange 하나만 믿고 "숨겨진 시작 시점"을 거기서 찍었었는데,
+// 홈화면에 설치한 standalone 앱(사파리 탭이 아니라)은 백그라운드로 갈 때
+// 이 이벤트가 안 오는 경우가 실제로 있었다 — 그러면 "얼마나 오래
+// 숨어있었는지" 자체를 영영 모르게 되어 재연결이 한 번도 안 걸렸다.
+// 그래서 숨김 시작을 이벤트에 의존하지 않고, 몇 초마다 찍히는 하트비트로
+// 판단한다: 탭/앱이 중단되면 setInterval도 같이 멈추니, 다시 돌아왔을 때
+// (visibilitychange든 pageshow든 focus든 뭐가 됐든 먼저 오는 신호로) 마지막
+// 하트비트와 지금 사이의 간격만 재면 실제로 얼마나 오래 멈춰있었는지 정확히
+// 나온다.
+let lastActiveMs = Date.now();
+setInterval(() => { lastActiveMs = Date.now(); }, 5000);
+
+function reconnectIfWasSuspendedLong() {
+  const gap = Date.now() - lastActiveMs;
+  lastActiveMs = Date.now();
+  if (gap > 60 * 1000) {
     disableNetwork(db).then(() => enableNetwork(db)).catch(() => {});
   }
+}
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) reconnectIfWasSuspendedLong();
 });
+window.addEventListener("pageshow", reconnectIfWasSuspendedLong);
+window.addEventListener("focus", reconnectIfWasSuspendedLong);
 
 // Web Push isn't available everywhere (notably most of iOS Safari unless the
 // PWA is installed on 16.4+), so callers must await messagingReady before

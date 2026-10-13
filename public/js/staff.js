@@ -9,6 +9,7 @@ import { wireAccountHeaderAvatar } from "./avatar.js";
 import { watchAppBadgeClear } from "./badge.js";
 import { mountMascotWidget, earnFood } from "./mascot.js";
 import { mountHumanityTrigger } from "./humanityboard.js";
+import { mountMusicBar } from "./musicbar.js";
 
 document.addEventListener("click", (e) => {
   const img = e.target.closest("[data-receipt-lightbox]");
@@ -62,6 +63,8 @@ let view = "main"; // main | sub | items | cart | share
 let chosenMain = null;
 let chosenSub = null;
 let subSearchQuery = ""; // 소분류 목록 화면의 자재명 검색어
+let cartSearchQuery = ""; // 담은 목록 화면의 자재명 검색어 — 어제 요청한 걸 또
+                           // 중복으로 담지 않으려고, 스크롤 없이 바로 찾기 위함
 let highlightMaterialId = null; // 검색 결과 선택 직후, 그 자재 카드로 스크롤+하이라이트하기 위한 1회용 표시
 
 // history (cart) state
@@ -175,10 +178,33 @@ function forceFixedBarReflow() {
   setTimeout(nudge, 300);
 }
 
+// 위 reflow(화면 전환 시점 보정)만으론 부족했다 — 실제로 더 자주 겹치는 건
+// 스크롤하는 도중/직후, iOS Safari가 주소창을 숨기거나 보이게 하면서
+// "레이아웃 뷰포트"와 실제 눈에 보이는 "비주얼 뷰포트"가 순간적으로
+// 어긋나는 경우다. 그 순간엔 CSS position:fixed 하나만 믿지 말고, 실제
+// 보이는 뷰포트 크기를 계속 재서 하단 탭바의 bottom 값을 직접 맞춰준다 —
+// visualViewport의 resize/scroll 이벤트가 바로 그 어긋남이 생기고 있는
+// 동안(애니메이션 도중까지) 계속 뜨므로, 끝나길 기다리지 않고 실시간으로
+// 따라간다.
+function pinBottomTabsToVisualViewport() {
+  const bar = document.querySelector(".bottom-tabs");
+  if (!bar || !window.visualViewport) return;
+  const vv = window.visualViewport;
+  const sync = () => {
+    const gap = window.innerHeight - vv.height - vv.offsetTop;
+    bar.style.bottom = `${Math.max(0, gap)}px`;
+  };
+  vv.addEventListener("resize", sync);
+  vv.addEventListener("scroll", sync);
+  sync();
+}
+pinBottomTabsToVisualViewport();
+
 function goToCart() {
   discardDraft();
   view = "cart";
   cartDate = date;
+  cartSearchQuery = "";
   loadCartDate(cartDate); // renders internally for today's date
   scrollTopSafely();
 }
@@ -373,17 +399,19 @@ function orderTrendOverlayHtml() {
     </div>`;
 }
 
-// 사장님이 "전체 영수증"으로 첨부한 건 checks/{date} 문서에, 특정 자재 하나를
-// 콕 집어 첨부한 건 그 자재 항목 자체(ownerAttachedPhotos)에 따로 있어서,
-// 한 군데서 다 보려면 모아줘야 한다. 자주 바뀌는 live 데이터가 아니라 "눌러서
-// 확인하는" 용도라 overlay를 열 때 한 번만 불러온다.
+// 사장님이 "전체 영수증"으로 첨부한 사진은 checks/{date}.allReceiptPhotosHistory에
+// 공유해도 안 비워지는 기록으로 쌓인다(그날 체크 때마다 쓰고 비워지는
+// receiptPhotos와는 다른 필드) — 특정 자재 하나만 콕 집어 첨부한 영수증
+// (ownerAttachedPhotos)은 그 자재 카드에서 바로 보이니 여기 모아보기
+// 대상에서는 뺀다. 자주 바뀌는 live 데이터가 아니라 "눌러서 확인하는"
+// 용도라 overlay를 열 때 한 번만 불러온다.
 async function openOwnerReceiptsOverlay() {
   showOwnerReceiptsOverlay = true;
   ownerReceiptsLoading = true;
   render();
   try {
     const snap = await getDoc(doc(db, "checks", cartDate));
-    ownerDayReceiptPhotos = (snap.exists() && snap.data().receiptPhotos) || [];
+    ownerDayReceiptPhotos = (snap.exists() && snap.data().allReceiptPhotosHistory) || [];
   } catch (e) {
     ownerDayReceiptPhotos = [];
   }
@@ -812,6 +840,30 @@ function renderCart() {
     return;
   }
 
+  // 오늘 담은 목록엔 어제 이전부터 아직 주문 안 된 자재도 같이 섞여있어서,
+  // "이거 어제 이미 요청했었나?" 확인하려고 매번 쭉 내려서 찾아야 했다 —
+  // 자재명으로 바로 찾을 수 있게 검색창을 둔다.
+  const cartQ = cartSearchQuery.trim().toLowerCase();
+  const displayedCartItems = cartQ
+    ? cartItems.filter((it) => (it.materialName || "").toLowerCase().includes(cartQ))
+    : cartItems;
+
+  if (isTodayCart) {
+    html += `
+    <div class="sub-search-wrap">
+      <input type="text" id="cartSearchInput" class="sub-search-input" placeholder="자재 이름으로 검색 (이미 요청했는지 확인)" value="${escapeHtml(cartSearchQuery)}" />
+    </div>`;
+  }
+
+  if (cartQ && displayedCartItems.length === 0) {
+    html += `<div class="card"><div class="empty">"${escapeHtml(cartSearchQuery)}"와 일치하는 자재가 이 목록에 없어요.</div></div>`;
+    if (showTrendOverlay) html += orderTrendOverlayHtml();
+    if (showOwnerReceiptsOverlay) html += ownerReceiptsOverlayHtml();
+    screenEl.innerHTML = html;
+    wireCartNav();
+    return;
+  }
+
   function cartItemRowHtml(it, showSub) {
     const canChangeStatus = isTodayCart && !it.ordered;
     const pickerOpen = statusPickerFor.has(it.id);
@@ -858,7 +910,7 @@ function renderCart() {
   }
 
   const byMain = {};
-  for (const it of cartItems) {
+  for (const it of displayedCartItems) {
     const m = it.mainCategory || "기본자재";
     if (!byMain[m]) byMain[m] = [];
     byMain[m].push(it);
@@ -964,6 +1016,18 @@ function renderPayroll() {
 
 function wireCartNav() {
   document.getElementById("backHome2").addEventListener("click", () => { view = "main"; render(); });
+  const cartSearchInput = document.getElementById("cartSearchInput");
+  if (cartSearchInput) {
+    cartSearchInput.addEventListener("input", (e) => {
+      cartSearchQuery = e.target.value;
+      render();
+    });
+    if (document.activeElement !== cartSearchInput && cartSearchQuery) {
+      // 검색어 입력 중 다시 그려질 때도 커서가 유지되도록, 포커스+커서 위치를 복원한다.
+      cartSearchInput.focus();
+      cartSearchInput.setSelectionRange(cartSearchInput.value.length, cartSearchInput.value.length);
+    }
+  }
   const addMoreBtn = document.getElementById("addMoreBtn");
   if (addMoreBtn) addMoreBtn.addEventListener("click", () => { view = "main"; render(); });
   const trendBtn = document.getElementById("orderTrendBtn");
@@ -1427,8 +1491,9 @@ async function main() {
   watchForegroundPush();
   watchAppBadgeClear();
   mountMascotWidget(staffPhone);
+  mountMusicBar(document.getElementById("musicBarRoot"), { name: staffName, phone: staffPhone });
   if (!isOwnerVisiting) mountClockWidget(document.getElementById("clockWidgetRoot"), { name: staffName, phone: staffPhone });
-  if (Notification.permission === "granted") registerPushToken(staffPhone);
+  if ("Notification" in window && Notification.permission === "granted") registerPushToken(staffPhone);
 
   loadPending();
   itemsCol = collection(db, "checks", date, "items");

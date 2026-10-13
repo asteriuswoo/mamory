@@ -216,6 +216,22 @@ async function saveEdit(id, value) {
   render();
 }
 
+// 자재명(직원 화면에도 그대로 보이는 이름)은 안 건드리고, 영수증 OCR이
+// 그 자재를 찾을 때만 쓰는 내부 매핑값을 따로 둔다 — 이름 수정 흐름과
+// 완전히 분리된 별도 동작이라, 자재명 수정 모드를 열지 않고도 바로
+// 설정/해제할 수 있다.
+async function setReceiptAlias(id) {
+  const m = materials.find((x) => x.id === id);
+  if (!m) return;
+  const input = window.prompt(
+    `'${m.name}' 자재를 영수증에서 찾을 때 쓸 검색어를 입력하세요.\n(자재명은 그대로 두고, 이 검색어로만 찾아요. 비우면 다시 자재명으로 찾아요.)`,
+    m.receiptAlias || ""
+  );
+  if (input === null) return;
+  await updateDoc(doc(db, "materials", id), { receiptAlias: input.trim() });
+  toast(input.trim() ? "영수증 검색어를 저장했어요" : "영수증 검색어를 해제했어요");
+}
+
 async function removeMaterial(id) {
   const m = materials.find((x) => x.id === id);
   if (!m) return;
@@ -434,7 +450,9 @@ function render() {
             <div class="drag-handle" data-drag-handle title="꾹 눌러서 순서 변경">⠿</div>
             <div style="flex:1">
               <div class="name">${escapeHtml(m.name)}</div>
+              ${m.receiptAlias ? `<div style="font-size:11px; color:var(--muted); margin-top:2px;">📎 영수증 검색어: ${escapeHtml(m.receiptAlias)}</div>` : ""}
             </div>
+            <button class="icon-btn" data-action="receipt-alias" data-id="${m.id}" title="영수증 검색어 설정">🔗</button>
             <button class="icon-btn" data-action="edit" data-id="${m.id}">수정</button>
             <button class="icon-btn" data-action="delete" data-id="${m.id}">삭제</button>
           </div>`;
@@ -477,6 +495,9 @@ function render() {
       if (e.key === "Escape") cancelEdit();
     });
   }
+  listEl.querySelectorAll('[data-action="receipt-alias"]').forEach((el) =>
+    el.addEventListener("click", () => setReceiptAlias(el.dataset.id))
+  );
   listEl.querySelectorAll('[data-action="delete"]').forEach((el) =>
     el.addEventListener("click", () => removeMaterial(el.dataset.id))
   );

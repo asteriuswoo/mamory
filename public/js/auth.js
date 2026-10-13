@@ -54,27 +54,46 @@ export async function setAccessCodeDoc(code) {
 }
 
 // Call at the top of staff.html / owner.html / admin.html.
-// Re-validates the cached account against Firestore so role/name changes
-// made by the owner (or account removal) always take effect on next load.
+// Returns the locally cached account once Firebase Auth is actually ready,
+// without waiting on the second round-trip (the account doc fetch) — that
+// doc re-check still happens, just in the background (see below).
+//
+// readyAuth itself MUST still be awaited here, not skipped: every onSnapshot
+// listener the rest of the page sets up right after this resolves depends on
+// request.auth already being attached. A listener that's established before
+// auth attaches gets a real PERMISSION_DENIED from Firestore's security
+// rules (not a "retry once you're signed in" — Firestore doesn't retry those
+// on its own) and stays dead even after auth completes a moment later — every
+// list on the page silently shows empty forever. That's exactly what a
+// previous version of this function did by skipping readyAuth entirely, and
+// it broke live for a real user (empty 자재/시재/공유 lists, looked exactly
+// like a network outage) before this comment was written to explain why it
+// can never happen again. readyAuth itself is normally near-instant (cached
+// anon session) so this still avoids the slow part (the account getDoc).
 export async function requireAccount(expectedRole) {
   const cached = getAccount();
   if (!cached || !cached.phone) {
     location.replace("index.html");
     return null;
   }
+  await readyAuth;
+  verifyAccountInBackground(expectedRole, cached);
+  return cached;
+}
 
+async function verifyAccountInBackground(expectedRole, cached) {
   let fresh;
   try {
     fresh = await fetchAccount(cached.phone);
   } catch (e) {
-    // Offline or Firestore unreachable: fall back to cached copy rather than locking the user out.
-    fresh = cached;
+    // Offline or Firestore unreachable: keep using the cached copy, nothing to correct.
+    return;
   }
 
   if (!fresh) {
     clearAccount();
     location.replace("index.html");
-    return null;
+    return;
   }
 
   // 이 기능 배포 전부터 로그인돼 있던 직원 기기는 PIN이 없으므로, 캐시된
@@ -84,7 +103,7 @@ export async function requireAccount(expectedRole) {
   if (fresh.role === "staff" && !fresh.pin) {
     clearAccount();
     location.replace("index.html");
-    return null;
+    return;
   }
 
   setAccount(fresh);
@@ -95,10 +114,7 @@ export async function requireAccount(expectedRole) {
   const allowed = fresh.role === expectedRole || (expectedRole === "staff" && fresh.role === "owner");
   if (!allowed) {
     location.replace(fresh.role === "owner" ? "owner.html" : "staff.html");
-    return null;
   }
-
-  return fresh;
 }
 
 export function logout() {

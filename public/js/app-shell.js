@@ -16,6 +16,7 @@ import { watchUnseenCount } from "./shareboard.js";
 import { registerPushToken, watchForegroundPush, isPushDisabled } from "./push.js";
 import { watchAppBadgeClear } from "./badge.js";
 import { mountMascotWidget } from "./mascot.js";
+import { mountMusicBar } from "./musicbar.js";
 
 const VIEWS = {
   "owner.html": { title: "발주 리스트 - MAMORY", load: () => import("./owner.js") },
@@ -69,6 +70,28 @@ function forceFixedBarReflow() {
   nudge();
   setTimeout(nudge, 300);
 }
+
+// 위 reflow(콜드 런칭 보정)만으론 부족했다 — 실제로 더 자주 겹치는 건
+// 스크롤하는 도중/직후, iOS Safari가 주소창을 숨기거나 보이게 하면서
+// "레이아웃 뷰포트"와 실제 눈에 보이는 "비주얼 뷰포트"가 순간적으로
+// 어긋나는 경우다. 그 순간엔 CSS position:fixed 하나만 믿지 말고, 실제
+// 보이는 뷰포트 크기를 계속 재서 하단 탭바의 bottom 값을 직접 맞춰준다 —
+// visualViewport의 resize/scroll 이벤트가 바로 그 어긋남이 생기고 있는
+// 동안(애니메이션 도중까지) 계속 뜨므로, 끝나길 기다리지 않고 실시간으로
+// 따라간다.
+function pinBottomTabsToVisualViewport() {
+  const bar = document.querySelector(".bottom-tabs");
+  if (!bar || !window.visualViewport) return;
+  const vv = window.visualViewport;
+  const sync = () => {
+    const gap = window.innerHeight - vv.height - vv.offsetTop;
+    bar.style.bottom = `${Math.max(0, gap)}px`;
+  };
+  vv.addEventListener("resize", sync);
+  vv.addEventListener("scroll", sync);
+  sync();
+}
+pinBottomTabsToVisualViewport();
 
 function setActiveTab(path) {
   document.querySelectorAll(".bottom-tab").forEach((a) => {
@@ -135,8 +158,9 @@ requireAccount("owner").then((acc) => {
 
   watchForegroundPush();
   watchAppBadgeClear();
-  if (Notification.permission === "granted" && !isPushDisabled()) registerPushToken(acc.phone);
-  mountMascotWidget();
+  if ("Notification" in window && Notification.permission === "granted" && !isPushDisabled()) registerPushToken(acc.phone);
+  mountMascotWidget(acc.phone);
+  mountMusicBar(document.getElementById("musicBarRoot"), { name: acc.name, phone: acc.phone });
 
   switchTo(pathOf(location.pathname) || "owner.html", { push: false, isInitial: true });
   forceFixedBarReflow();

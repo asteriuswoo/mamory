@@ -4,10 +4,17 @@
 // stays loaded across tab switches instead of being torn down by a full
 // page reload each time.
 import { db, storage, ref, uploadBytes, getDownloadURL, STORE_NAME, QUICK_ORDER_LINKS, collection, doc, addDoc, updateDoc, setDoc, onSnapshot, getDocs, serverTimestamp } from "./firebase-init.js";
-import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, escapeHtml, resizeImageFile, openImageLightbox, URGENCY_LABEL, URGENCY_GROUP_CAPTION, sortMaterials, dayAccentClass, NOTIFY_BELL_ON, qtyRemainingLabel, MULTIPLE_FILE_ATTR } from "./util.js";
+import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, showTopBanner, escapeHtml, resizeImageFile, openImageLightbox, URGENCY_LABEL, URGENCY_GROUP_CAPTION, sortMaterials, dayAccentClass, NOTIFY_BELL_ON, qtyRemainingLabel, MULTIPLE_FILE_ATTR } from "./util.js";
 import { watchNotificationBadge, openNotificationPanel } from "./push.js";
 import { recordSubmitToday } from "./mascot.js";
 import { mountHumanityTrigger } from "./humanityboard.js";
+
+// 사장님이 번거롭다고 해서 "영수증 첨부해야만 주문완료 체크 가능" 잠금을
+// 잠깐 풀어둔다 — 영수증 첨부 기능 자체는 그대로 쓸 수 있고, 체크/공유를
+// 막아서는 게 아니라 공유할 때 영수증이 없으면 확인창만 한 번 띄운다.
+// 나중에 다시 잠가달라고 하면 이 값만 true로 되돌리면 된다(잠금 로직/UI는
+// 그대로 남아있어서 바로 복원됨).
+const RECEIPT_REQUIRED_TO_CHECK = false;
 
 let myOwnerPhone = "";
 
@@ -19,9 +26,11 @@ let materialsUnsub = null;
 let subcatUnsub = null;
 let materialsOrder = {}; // materialId -> catalog rank (matches the staff selection-tab order)
 let materialFirstAppearanceRank = {}; // "main::sub" -> first-appearance rank in the catalog (fallback order)
+let materialReceiptAlias = {}; // materialId -> 자재관리에서 등록해둔 "영수증 검색어" (없으면 "")
 let subcategoryOrder = {}; // { 기본자재: string[], 식자재: string[] } from config/subcategoryOrder — owner's explicit order
 let orderedPending = new Set(); // item ids checked locally but not yet shared/locked
-let receiptPhotos = []; // 지금 보고 있는 날짜의 "전체 영수증" 사진 URL들 — live
+let receiptPhotos = []; // 지금 보고 있는 날짜의 "전체 영수증" 사진 URL들(공유하면 비워짐) — live
+let allReceiptPhotosHistory = []; // 그날 "전체 영수증"으로 올린 사진 전체 — 공유해도 안 비워지는 기록용 — live
 let receiptUnsub = null;
 let receiptUploading = false;
 // 영수증을 "전체"에 적용할지 "선택한 자재"에만 적용할지 매번 명시적으로
@@ -114,8 +123,10 @@ function subscribe() {
   });
   if (receiptUnsub) receiptUnsub();
   receiptPhotos = [];
+  allReceiptPhotosHistory = [];
   receiptUnsub = onSnapshot(doc(db, "checks", datePick.value), (snap) => {
     receiptPhotos = (snap.exists() && snap.data().receiptPhotos) || [];
+    allReceiptPhotosHistory = (snap.exists() && snap.data().allReceiptPhotosHistory) || [];
     // 영수증이 막 첨부/해제되면 그 사실 자체가 발주 목록의 체크박스
     // 잠금(hasReceiptFor) 여부를 바꾸는데, render()를 안 부르면 이미 그려진
     // #orderList는 예전 disabled 상태 그대로 남는다 — renderReceiptCard()
@@ -155,6 +166,82 @@ function resetReceiptDraft() {
   receiptMode = null;
 }
 
+const RECEIPT_OCR_URL = "https://asia-northeast3-mmth-order.cloudfunctions.net/extractReceiptText";
+
+function normalizeForMatch(s) {
+  return (s || "").replace(/[\s()·,.\-]/g, "").toLowerCase();
+}
+
+// 영수증 OCR 텍스트 안에 검색어가 들어있는지 본다. 전체가 그대로 들어있으면
+// 항상 매칭이고, 그게 아닐 때만 isAlias일 경우에 한해 단어 단위로 더 본다.
+//
+// 자재명(자재관리에서 검색어를 따로 안 등록해둔 경우)은 "일반우유"/
+// "시그니처우유"/"저지방우유"처럼 끝 단어만 같고 실제로는 서로 다른 자재인
+// 경우가 많아서 — 전체가 그대로 안 겹치면 매칭 안 시킨다. 괄호 안 "(1.5L)"
+// 같은 용량 표시는 영수증엔 안 찍히는 경우가 많아서 떼고 비교한다.
+//
+// 반면 자재관리에서 따로 등록해둔 "영수증 검색어"는 사장님이 직접 그
+// 유통업체 품명을 보고 적어둔 값이라 괄호를 안 뗀다 — "(L)"/"(S/M)"처럼
+// 사이즈를 구분하는 의미 있는 내용을 괄호 안에 적어두는 경우가 있어서,
+// 용량 표시로 보고 지워버리면 "홀더(라지)"와 "홀더(미듐)"이 똑같은
+// 검색어가 돼버린다. 단어가 여러 개면(예: "번트 카라멜 파우더") 전체가
+// 그대로 안 겹쳐도 과반수 이상 겹치면 매칭한다 — OCR이 단어 하나를
+// 잘못 읽어도(예: "파우더"→"파워") 나머지로 찾아내게. 다만 "원두"처럼
+// 공통 단어 딱 하나만 겹치는 건 매칭으로 안 치는데, "디카페인 원두"가
+// "일반 원두"에도 걸리는 식의 오매칭이 실제로 나서다 — 검색어 단어
+// 중 더 많은 쪽이 겹쳐야 그 변형(디카/라지 등)까지 맞다고 볼 수 있다.
+function receiptTextMatchesMaterial(normalizedOcrText, searchTerm, isAlias) {
+  const raw = (isAlias ? (searchTerm || "") : (searchTerm || "").replace(/\([^)]*\)/g, "")).trim();
+  const core = normalizeForMatch(raw);
+  if (core.length < 2) return false;
+  if (normalizedOcrText.includes(core)) return true;
+  if (!isAlias) return false;
+  const words = raw.split(/\s+/).map((w) => normalizeForMatch(w)).filter((w) => w.length >= 2);
+  if (words.length <= 1) return false;
+  const matchedCount = words.filter((w) => normalizedOcrText.includes(w)).length;
+  return matchedCount >= Math.floor(words.length / 2) + 1;
+}
+
+// "전체 영수증" 사진 한 장을 서버로 보내 글자를 읽어오고(OCR), 아직
+// 미주문 상태인 자재들 중 그 글자에 들어있는 이름이 있으면 체크해둔다 —
+// 여러 장을 한꺼번에 올려도 첫 장만 읽는다(매번 다 읽으면 그만큼 더
+// 과금되고 느려지는데, 보통 영수증 한 장에 그날 품목이 다 찍혀 있어서
+// 한 장으로도 충분하다). 잘못 읽거나 아예 없는 자재는 사장님이 직접
+// 나머지를 체크하면 된다.
+async function autoCheckFromReceiptPhoto(path) {
+  try {
+    const res = await fetch(`${RECEIPT_OCR_URL}?path=${encodeURIComponent(path)}`);
+    if (!res.ok) return { newlyChecked: [], alreadyChecked: [] };
+    const { text } = await res.json();
+    if (!text) return { newlyChecked: [], alreadyChecked: [] };
+    const normalizedText = normalizeForMatch(text);
+    const newlyChecked = [];
+    const alreadyChecked = [];
+    for (const it of items) {
+      // 자재관리에서 "영수증 검색어"를 따로 등록해둔 자재는 그 검색어로만
+      // 찾는다(자재명 대신 — 둘 다 보면 "원두"처럼 겹치는 일반 단어가
+      // 다시 끼어들 수 있어서). 등록 안 해둔 자재는 그대로 자재명으로 찾는다.
+      const alias = materialReceiptAlias[it.id];
+      const searchTerm = alias || it.materialName;
+      if (!receiptTextMatchesMaterial(normalizedText, searchTerm, !!alias)) continue;
+      // 이미 체크(orderedPending)됐거나 아예 주문완료까지 끝난(ordered) 자재도
+      // 영수증 글자와 겹치는지는 똑같이 확인한다 — 다만 새로 체크할 건
+      // 없으니 "이미 체크돼있다"는 것만 알려준다. 완전히 새로운(둘 다
+      // 아닌) 자재만 이번에 새로 체크한다.
+      if (it.ordered || orderedPending.has(it.id)) {
+        alreadyChecked.push(it.materialName);
+      } else {
+        orderedPending.add(it.id);
+        newlyChecked.push(it.materialName);
+      }
+    }
+    return { newlyChecked, alreadyChecked };
+  } catch (e) {
+    console.error("영수증 자동 체크 실패", e);
+    return { newlyChecked: [], alreadyChecked: [] };
+  }
+}
+
 async function submitReceiptAttachment() {
   if (receiptUploading) return;
   if (receiptPendingFiles.length === 0) {
@@ -169,23 +256,47 @@ async function submitReceiptAttachment() {
   toast(receiptPendingFiles.length > 1 ? `영수증 사진 ${receiptPendingFiles.length}장 업로드 중...` : "영수증 사진 업로드 중...");
   try {
     const urls = [];
+    const paths = [];
     for (const p of receiptPendingFiles) {
       const blob = await resizeImageFile(p.file);
       const path = `receiptPhotos/${datePick.value}/${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
       const fileRef = ref(storage, path);
       await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
       urls.push(await getDownloadURL(fileRef));
+      paths.push(path);
     }
     if (receiptMode === "all") {
-      await setDoc(doc(db, "checks", datePick.value), { receiptPhotos: [...receiptPhotos, ...urls] }, { merge: true });
+      await setDoc(
+        doc(db, "checks", datePick.value),
+        { receiptPhotos: [...receiptPhotos, ...urls], allReceiptPhotosHistory: [...allReceiptPhotosHistory, ...urls] },
+        { merge: true }
+      );
+      toast("제품명 읽는 중...");
+      const { newlyChecked, alreadyChecked } = paths.length > 0
+        ? await autoCheckFromReceiptPhoto(paths[0])
+        : { newlyChecked: [], alreadyChecked: [] };
+      const namesPreview = (list) => (list.length <= 4 ? list.join(", ") : `${list.slice(0, 3).join(", ")} 외 ${list.length - 3}개`);
+      if (newlyChecked.length === 0 && alreadyChecked.length === 0) {
+        showTopBanner("영수증에서 일치하는 제품명을 못 찾았어요 — 직접 체크해주세요", 3500);
+      } else {
+        // 이미 체크돼 있던 것과 이번에 새로 체크된 것은 성격이 달라서,
+        // 배너를 하나로 합치지 않고 순서대로 따로 띄운다.
+        if (alreadyChecked.length > 0) {
+          showTopBanner(`📎 영수증에서 읽은 ${namesPreview(alreadyChecked)}은 이미 체크돼있어요`, 3200);
+          if (newlyChecked.length > 0) await new Promise((resolve) => setTimeout(resolve, 3500));
+        }
+        if (newlyChecked.length > 0) {
+          showTopBanner(`✅ 영수증에서 읽은 제품명으로 ${namesPreview(newlyChecked)} 자동 체크했어요 — 확인하고 필요하면 추가로 체크해주세요`, 5000);
+        }
+      }
     } else {
       await Promise.all([...receiptSelectedIds].map((id) => {
         const it = items.find((x) => x.id === id);
         const existing = (it && it.ownerAttachedPhotos) || [];
         return updateDoc(doc(db, "checks", datePick.value, "items", id), { ownerAttachedPhotos: [...existing, ...urls] });
       }));
+      toast("첨부완료");
     }
-    toast("첨부완료");
     resetReceiptDraft();
     render();
     renderReceiptCard();
@@ -244,12 +355,13 @@ function receiptCardHtml() {
         <button type="button" class="receipt-mode-back-btn" id="receiptModeBackBtn">‹ 다시 선택</button>
       </div>
       ${targetHtml}
+      ${receiptMode === "all" ? `<div class="receipt-ocr-hint">📸 제품명이 잘 보이도록 찍어주세요 — 자동으로 자재를 찾아 체크해드려요</div>` : ""}
       ${previewHtml}
       <label class="btn secondary block receipt-upload-btn" style="margin-top:8px;">
         📷 영수증 사진 추가
         <input type="file" accept="image/*" id="receiptPhotoInput" ${MULTIPLE_FILE_ATTR} style="display:none;" />
       </label>
-      <button type="button" class="btn normal block" id="receiptAttachSubmitBtn" style="margin-top:8px;">첨부하고 체크하러 가기${receiptPendingFiles.length > 0 ? ` (${receiptPendingFiles.length})` : ""}</button>
+      <button type="button" class="btn normal" id="receiptAttachSubmitBtn" style="margin-top:8px; display:block; margin-left:auto; width:45%;">첨부하고 체크하러 가기${receiptPendingFiles.length > 0 ? ` (${receiptPendingFiles.length})` : ""}</button>
       <button type="button" class="btn secondary block" id="myReceiptsBtn" style="margin-top:8px;">📎 ${isToday ? "오늘 " : ""}내가 첨부한 영수증 보기</button>
     </div>`;
 }
@@ -321,7 +433,10 @@ function myReceiptsOverlayHtml() {
   // 특정 자재 하나에만 콕 집어 첨부한 영수증(ownerAttachedPhotos)은 여기 모아보기
   // 대상이 아니다 — 그건 그 자재 카드 안에 댓글처럼 바로 붙어있으니 거기서
   // 보면 되고, 여긴 "전체 영수증"만 모아서 보여준다.
-  const overallUrls = receiptPhotos;
+  // receiptPhotos가 아니라 allReceiptPhotosHistory를 써야 한다 — receiptPhotos는
+  // 공유(주문완료 제출)하면 재잠금을 위해 []로 비워지는 필드라, 공유 후엔
+  // 사장님 본인한테도 "아무것도 없다"고 잘못 나와버린다.
+  const overallUrls = allReceiptPhotosHistory;
   const empty = overallUrls.length === 0;
   const isToday = datePick.value === todayStr();
   return `
@@ -380,6 +495,7 @@ function hasReceiptFor(it) {
 // 체크만 해둔 상태였던 항목은 그 체크의 근거가 사라진 거라 다시 잠겨야
 // 한다 — 지우자마자 여기서 바로 떨어내서 체크박스가 눈에 보이게 재잠금된다.
 function reconcileOrderedPending() {
+  if (!RECEIPT_REQUIRED_TO_CHECK) return;
   for (const id of [...orderedPending]) {
     const it = items.find((x) => x.id === id);
     if (!it || !hasReceiptFor(it)) orderedPending.delete(id);
@@ -388,7 +504,14 @@ function reconcileOrderedPending() {
 
 async function deleteOverallReceiptPhoto(url) {
   if (!confirm("삭제하면 아직 공유 전인 발주들은 체크를 다시 해야 해요. 삭제할까요?")) return;
-  await setDoc(doc(db, "checks", datePick.value), { receiptPhotos: receiptPhotos.filter((u) => u !== url) }, { merge: true });
+  await setDoc(
+    doc(db, "checks", datePick.value),
+    {
+      receiptPhotos: receiptPhotos.filter((u) => u !== url),
+      allReceiptPhotosHistory: allReceiptPhotosHistory.filter((u) => u !== url),
+    },
+    { merge: true }
+  );
   toast("삭제완료");
 }
 
@@ -404,7 +527,7 @@ async function deleteItemReceiptPhoto(itemId, url) {
 function toggleOrderedLocal(id, checked) {
   const it = items.find((x) => x.id === id);
   if (it && it.ordered) return; // already shared and locked — can't uncheck
-  if (!hasReceiptFor(it)) return; // 체크박스 자체가 disabled라 평소엔 안 들어오지만, 방어적으로 한 번 더 막는다
+  if (RECEIPT_REQUIRED_TO_CHECK && !hasReceiptFor(it)) return; // 체크박스 자체가 disabled라 평소엔 안 들어오지만, 방어적으로 한 번 더 막는다
   if (checked) orderedPending.add(id);
   else orderedPending.delete(id);
   render();
@@ -416,11 +539,21 @@ async function shareOrderedChecks() {
     return;
   }
   const ids = [...orderedPending];
+  // 영수증 첨부 잠금을 풀어둔 동안엔(RECEIPT_REQUIRED_TO_CHECK = false), 첨부
+  // 없이도 체크·공유가 되니까 — 공유 직전에 한 번이라도 첨부된 사진이
+  // 있는지 확인해서, 하나도 없으면 그래도 보낼지 한 번 더 물어본다.
+  if (!RECEIPT_REQUIRED_TO_CHECK && !ids.some((id) => hasReceiptFor(items.find((x) => x.id === id)))) {
+    if (!confirm("영수증 첨부가 되지 않았습니다. 그래도 공유할까요?")) return;
+  }
   const byStaff = {}; // staffPhone -> { staffName, count } — one push per staff member per submit, not per item
   for (const id of ids) {
     try {
       const it = items.find((x) => x.id === id);
-      const photosForItem = (it && it.ownerAttachedPhotos && it.ownerAttachedPhotos.length > 0) ? it.ownerAttachedPhotos : receiptPhotos;
+      // "선택 자재 영수증"으로 그 자재에 콕 집어 첨부한 사진만 그 자재 항목에
+      // 남긴다 — "전체 영수증"은 특정 자재 하나의 것이 아니니 개별 항목에
+      // 복사해 붙이지 않고, 그날 모아보는 영수증 모음(allReceiptPhotosHistory)
+      // 쪽에만 남긴다.
+      const photosForItem = (it && it.ownerAttachedPhotos && it.ownerAttachedPhotos.length > 0) ? it.ownerAttachedPhotos : [];
       await updateDoc(doc(db, "checks", datePick.value, "items", id), { ordered: true, orderedAt: serverTimestamp(), receiptPhotos: photosForItem });
       orderedPending.delete(id);
       if (it && it.staffPhone) {
@@ -494,7 +627,7 @@ function render() {
   function itemRowHtml(it, showSub) {
     const isChecked = it.ordered || orderedPending.has(it.id);
     const isLocked = !!it.ordered;
-    const isReceiptLocked = !isLocked && !hasReceiptFor(it);
+    const isReceiptLocked = !isLocked && RECEIPT_REQUIRED_TO_CHECK && !hasReceiptFor(it);
     return `
       <div class="item-row ${isChecked ? "ordered" : ""}">
         <div style="flex:1">
@@ -741,10 +874,12 @@ export function mount(account) {
     const mats = sortMaterials(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     materialsOrder = {};
     materialFirstAppearanceRank = {};
+    materialReceiptAlias = {};
     mats.forEach((m, idx) => {
       materialsOrder[m.id] = idx;
       const key = `${m.mainCategory}::${m.subCategory}`;
       if (!(key in materialFirstAppearanceRank)) materialFirstAppearanceRank[key] = idx;
+      materialReceiptAlias[m.id] = m.receiptAlias || "";
     });
     render();
   });
