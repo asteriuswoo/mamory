@@ -1,0 +1,9 @@
+{
+  "appId": "com.mamory.cafe",
+  "appName": "MAMORY",
+  "webDir": "www",
+  "server": {
+    "url": "https://mamory.web.app",
+    "cleartext": false
+  }
+}

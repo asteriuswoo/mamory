@@ -10,7 +10,10 @@
   --gold: #d97745;
   --gold-light: #f0a479;
   --gold-soft: #fbe6da;
-  --cream: #f7f7f5;
+  /* 카드 배경(--card, 순백)과 더 또렷하게 대비되도록 기존 #f7f7f5(거의
+     흰색)보다 한 톤 깊은 베이지로 — 버튼/카드가 배경에 묻혀 안 보인다는
+     지적이 반복돼서, 카드가 배경 위에 또렷하게 "떠 보이게" 바꾼다. */
+  --cream: #efece4;
   --card: #ffffff;
   --border: #e7e7e4;
   --text: #1f1f1f;
@@ -606,7 +609,7 @@ main {
   border-radius: 16px;
   padding: 16px;
   margin-bottom: 14px;
-  box-shadow: 0 1px 2px rgba(27,23,20,.04);
+  box-shadow: 0 2px 10px rgba(27,23,20,.07);
   border: 1px solid var(--border);
 }
 
@@ -1179,11 +1182,57 @@ button {
      덮여 사라진다. */
   background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238a8a86' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'%3E%3C/circle%3E%3Cline x1='21' y1='21' x2='16.65' y2='16.65'%3E%3C/line%3E%3C/svg%3E") no-repeat 13px center / 16px, var(--card) !important;
   padding-left: 38px !important;
+  border: 2px solid #c9c2b4 !important;
 }
 
 .search-result-tag {
   color: var(--gold) !important;
   background: var(--gold-soft) !important;
+}
+
+/* 검색창을 탭하면 입력창+결과만 화면 전체를 차지하는 전용 모드로
+   전환된다 — 상단바/하단 탭바는 그 아래 그대로 있지만 이 오버레이가
+   화면 전체를 덮어버려 안 보이므로, 키보드가 열려도 그런 고정 UI가
+   같이 들썩이는 것처럼 보이지 않는다. 입력창은 맨 위에 고정, 결과만
+   그 아래에서 따로 스크롤된다. */
+.search-fullscreen-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  background: var(--cream);
+  display: flex;
+  flex-direction: column;
+  padding: calc(14px + env(safe-area-inset-top)) 18px calc(14px + env(safe-area-inset-bottom));
+}
+
+.search-fullscreen-overlay .sub-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  margin-bottom: 0;
+}
+
+.search-fullscreen-overlay .sub-search-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.search-fullscreen-cancel-btn {
+  flex: none;
+  background: none;
+  border: none;
+  padding: 6px 2px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.search-fullscreen-results {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  margin-top: 14px;
 }
 
 /* 검색 결과를 눌러 들어왔을 때, 수많은 카드들 중 어떤 걸 찾아왔는지
@@ -1668,12 +1717,16 @@ button {
 .tag.new {
   display: inline-flex;
   align-items: center;
-  background: var(--gold);
+  /* 전체적으로 골드/크림 톤이 많은 화면이라 .tab-n-badge(세그먼트 탭
+     N배지)와 같은 빨간색을 써야 "새로운 게 있다"는 신호가 눈에 확
+     띈다 — 예전엔 골드색이라 배경 톤에 묻혀서 잘 안 보였다. */
+  background: var(--urgent);
   color: #fff;
-  padding: 2px 6px;
+  padding: 1px 5px;
   border-radius: 6px;
   margin-right: 6px;
-  font-size: 9.5px;
+  font-size: 9px;
+  font-weight: 500;
   vertical-align: middle;
 }
 
@@ -1757,6 +1810,62 @@ button {
   border-radius: 6px;
   padding: 1px 7px;
   margin-left: 6px;
+}
+
+/* 담은 목록에서 제출 전 자재의 "OO남음" 배지 옆에 붙는 작은 수정 버튼 —
+   누르면 .qty-edit-row(입력창+저장)가 그 배지를 대신한다. */
+.qty-edit-btn {
+  display: inline-block;
+  border: none;
+  background: none;
+  padding: 0;
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.qty-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.qty-edit-input {
+  flex: 1;
+  max-width: 220px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--gold-soft);
+  border: 1px solid var(--gold-light);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+.qty-edit-save-btn {
+  flex: none;
+  border: none;
+  background: var(--gold);
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 5px 10px;
+  border-radius: 6px;
+}
+
+.carryover-tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--sky);
+  background: var(--sky-soft);
+  border-radius: 6px;
+  padding: 2px 8px;
+  margin-top: 4px;
 }
 
 .order-qty-row {
@@ -1850,6 +1959,55 @@ button {
   margin-left: 7px;
 }
 
+.nudge-owner-chip {
+  flex: none;
+  border: 1px solid var(--toggle-blue);
+  background: var(--toggle-blue-soft);
+  color: var(--toggle-blue);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 5px 10px;
+  border-radius: 999px;
+}
+
+/* 날짜 칩 줄 바로 아래 — 그날 첨부된 영수증이 있을 때만 뜨는 클립 칩.
+   예전엔 회색 secondary 버튼이라 카드 배경과 톤이 비슷해 안 보였는데,
+   골드 톤 배경+글자로 눈에 띄게 하고 개수는 빨간 N배지로 구분한다. */
+.receipt-clip-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  background: var(--gold-soft);
+  color: var(--gold);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 5px 10px 5px 9px;
+  border-radius: 999px;
+  margin-top: 8px;
+}
+
+.receipt-clip-chip svg {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+
+.receipt-clip-badge {
+  background: var(--urgent);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 800;
+  min-width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  line-height: 1;
+}
+
 /* 한 화면에 여러 섹션(시재/품절공유/공유해요)이 이어 붙어 있어도 한눈에
    구분되도록, 섹션마다 카드 왼쪽에 색 띠를 두고 제목에도 같은 색을 쓴다. */
 .section-title-cash { color: var(--normal); }
@@ -1905,6 +2063,11 @@ button {
 .post-top-row .name {
   flex: 1;
   min-width: 0;
+  /* textarea로 줄바꿈/들여쓰기까지 써서 작성해도, 기본 white-space(normal)는
+     연속된 줄바꿈·공백을 전부 하나로 뭉개버려서 애써 나눈 구조가 그냥
+     한 줄로 이어붙어 보였다 — 입력한 줄바꿈/공백을 그대로 살린다. */
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .item-row .note {
@@ -2267,6 +2430,7 @@ img.avatar-circle {
   color: var(--text);
   word-break: break-word;
   overflow-wrap: break-word;
+  white-space: pre-wrap;
 }
 
 .reply-actions {
@@ -2295,16 +2459,22 @@ img.avatar-circle {
 
 .reply-edit-row {
   display: flex;
+  flex-direction: column;
   gap: 6px;
-  align-items: center;
   margin-top: 4px;
 }
 
 .reply-edit-input {
-  flex: 1;
-  min-width: 0;
+  width: 100%;
   font-size: 12.5px;
-  padding: 5px 8px;
+  padding: 6px 8px;
+  resize: vertical;
+}
+
+.reply-edit-btn-row {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 .reply-save-btn,
@@ -2457,6 +2627,14 @@ img.avatar-circle {
   display: block;
   text-align: center;
   cursor: pointer;
+  /* 이 버튼은 <label>이라 .field label 규칙(폼 라벨용 — 12px, 회색,
+     대문자)이 .btn보다 더 구체적이라 그쪽이 이겨버린다. 옆의 다른 두
+     버튼(<button>)과 똑같이 보이도록 명시적으로 되돌린다. */
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  text-transform: none;
+  letter-spacing: -0.01em;
 }
 
 .receipt-target-check-list {
@@ -2478,6 +2656,20 @@ img.avatar-circle {
 
 .receipt-target-check-row:last-child {
   border-bottom: none;
+}
+
+.cash-reset-btn {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  border: 1px solid var(--toggle-blue);
+  background: var(--toggle-blue-soft);
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--toggle-blue);
+  z-index: 1;
 }
 
 .receipt-mode-back-btn {
@@ -2636,6 +2828,14 @@ pre.share-preview {
 .seg button.active {
   background: var(--gold-soft);
   color: var(--ink);
+}
+
+/* 영수증 첨부하기/발주 트렌드처럼 서로 다른 두 기능을 나란히 둘 땐
+   둘 다 gold-soft면 구분이 안 된다 — 사이트에서 거의 안 쓰던 navy를
+   가져와 한쪽만 다른 색으로 구분해준다. */
+.seg button.seg-trend-btn.active {
+  background: var(--navy-soft);
+  color: var(--navy);
 }
 
 /* ---- bottom action sheet (avatar photo picker) ---- */

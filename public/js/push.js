@@ -120,6 +120,32 @@ export async function disablePushToken(phone) {
   }
 }
 
+// 로그아웃할 때 이 기기의 알림 토큰을 그 계정에서 지운다 — disablePushToken과
+// 달리 "이 기기에서 알림을 영구히 끈다"는 로컬 플래그는 안 남긴다(같은
+// 기기를 다른 직원이 로그인해서 쓸 수도 있는데, 그 사람까지 알림이 꺼진
+// 채로 시작하면 안 된다). 로그아웃 후에도 토큰이 안 지워지고 남아있으면,
+// 나중에 다른 기기로 또 로그인했을 때 두 기기 모두에 똑같은 알림이 두 번
+// 가는 문제가 생긴다.
+export async function removeDeviceTokenOnLogout(phone) {
+  if (!phone) return;
+  const supported = await messagingReady;
+  if (!supported || !messaging) return;
+  try {
+    const deviceId = getDeviceId();
+    const accRef = doc(db, "accounts", phone);
+    const snap = await getDoc(accRef);
+    const existing = (snap.exists() && snap.data().fcmTokens) || [];
+    const filtered = existing
+      .map((t) => (typeof t === "string" ? { id: t, token: t } : t))
+      .filter((t) => t.id !== deviceId);
+    if (filtered.length !== existing.length) {
+      await updateDoc(accRef, { fcmTokens: filtered });
+    }
+  } catch (e) {
+    console.error("로그아웃 시 알림 토큰 정리 실패", e);
+  }
+}
+
 export async function enablePushToken(phone) {
   localStorage.removeItem(DISABLED_KEY);
   await registerPushToken(phone);

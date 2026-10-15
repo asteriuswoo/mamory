@@ -46,6 +46,11 @@ export function setInitialShareTab(tab) {
 // 보이면 안 되니, 저장된 값이 없을 때는 지금 시각을 기준으로 삼는다.
 const TAB_SEEN_KEY = "mamory_shareTabSeenAt";
 let tabSeenAt = null;
+// tab -> 이번에 그 탭에 들어와서 보기 시작한 시점에 얼려둔 tabSeenAt 값.
+// 개별 답글의 N배지 판단 전용(아래 isReplyNewToMe) — render()마다 계속
+// 갱신되는 tabSeenAt 자체를 기준으로 삼으면 비교 대상이 매번 "방금"이
+// 돼버려서 절대 N이 안 뜬다.
+let tabViewStartedAt = {};
 
 function loadTabSeen() {
   try {
@@ -177,7 +182,7 @@ function postTopRowHtml(it, isToday) {
   if (editingItems.has(it.id)) {
     const val = escapeHtml(editingItems.get(it.id));
     const field = it.type === "note"
-      ? `<textarea class="edit-textarea" data-edit-input="${it.id}" rows="3">${val}</textarea>`
+      ? `<textarea class="edit-textarea" data-edit-input="${it.id}" rows="5">${val}</textarea>`
       : `<input type="text" class="edit-input" data-edit-input="${it.id}" value="${val}" />`;
     return `
       <div class="post-top-row edit-mode">
@@ -190,7 +195,7 @@ function postTopRowHtml(it, isToday) {
   }
   return `
     <div class="post-top-row">
-      <div class="name">${isToday && isNewToMe(it) ? `<span class="tag new">N</span>` : ""}${it.isNotice ? `<span class="notice-badge">📢 공지</span> ` : ""}${highlightMentions(escapeHtml(it.content))}</div>
+      <div class="name">${isToday && isNewToMe(it) ? `<span class="tag new">N</span>` : isToday && hasUnseenReply(it) ? `<span class="tag new">💬 N</span>` : ""}${it.isNotice ? `<span class="notice-badge">📢 공지</span> ` : ""}${highlightMentions(escapeHtml(it.content))}</div>
       <div class="who">${formatDateLabel(shareDate)}${formatTimeLabel(it.createdAt) ? ` · ${formatTimeLabel(it.createdAt)}` : ""}</div>
     </div>`;
 }
@@ -315,9 +320,11 @@ function repliesHtml(it) {
             <div class="reply-body">
               <span class="reply-who">${escapeHtml(r.staffName || "")}님</span>
               <div class="reply-edit-row">
-                <input type="text" class="reply-edit-input" data-reply-edit-input="${key}" value="${escapeHtml(editingReplies.get(key))}" />
-                <button class="reply-cancel-btn" data-reply-edit-cancel="${key}">취소</button>
-                <button class="reply-save-btn" data-reply-edit-save="${key}">저장</button>
+                <textarea class="reply-edit-input" data-reply-edit-input="${key}" rows="4">${escapeHtml(editingReplies.get(key))}</textarea>
+                <div class="reply-edit-btn-row">
+                  <button class="reply-cancel-btn" data-reply-edit-cancel="${key}">취소</button>
+                  <button class="reply-save-btn" data-reply-edit-save="${key}">저장</button>
+                </div>
               </div>
             </div>
           </div>`;
@@ -326,7 +333,7 @@ function repliesHtml(it) {
         <div class="reply-row">
           ${avatarHtml(r.staffPhone, r.staffName, 18)}
           <div class="reply-body">
-            <span class="reply-who">${escapeHtml(r.staffName || "")}님</span><span class="reply-content">${highlightMentions(escapeHtml(r.content))}</span>
+            <span class="reply-who">${isReplyNewToMe(r) ? `<span class="tag new">N</span> ` : ""}${escapeHtml(r.staffName || "")}님</span><span class="reply-content">${highlightMentions(escapeHtml(r.content))}</span>
             ${replyPhotosHtml(r.photoUrls)}
             ${mine ? `<div class="reply-actions"><button class="reply-edit-btn" data-reply-edit="${key}">수정</button><button class="reply-delete-btn" data-reply-delete-item="${it.id}" data-reply-delete-idx="${idx}">삭제</button></div>` : ""}
           </div>
@@ -537,6 +544,21 @@ function isNewToMe(it) {
   return !(it.seenBy || []).includes(account.phone);
 }
 
+// 답글은 seenBy 같은 필드가 없어서(배열 안 항목이라 개별로 추적하기도
+// 번거롭다), 탭 N배지에 이미 쓰는 "마지막으로 소통해요 탭을 본 시각"
+// (tabSeenAt.note)보다 늦게 달린 답글이면 "아직 안 본 답글"로 본다 — 내가
+// 쓴 답글은 당연히 제외.
+function isReplyNewToMe(r) {
+  if (r.staffPhone === account.phone) return false;
+  ensureTabSeenInit();
+  const since = "note" in tabViewStartedAt ? tabViewStartedAt.note : (tabSeenAt.note || 0);
+  return activityMs(r.createdAt) > since;
+}
+
+function hasUnseenReply(it) {
+  return (it.replies || []).some((r) => isReplyNewToMe(r));
+}
+
 // Opening the tab and looking at an item counts as "checking" it — the N
 // badge (and the day-chip's unseen dot) clears itself rather than needing a
 // separate dismiss action. Works for any date being browsed, not just today.
@@ -712,10 +734,19 @@ function render() {
 
   markSeen(shareItems, shareDate);
 
+  ensureTabSeenInit();
+  // 답글별 N배지(isReplyNewToMe)는 "이번에 들어와서 보기 시작한 시점"이
+  // 고정돼 있어야 한다 — tabSeenAt을 render()마다 바로 지금 시각으로
+  // 갱신해버리면, 그 값을 기준으로 "새 답글"을 판단하는 이 함수 안에서
+  // 조차 이미 "방금"이 돼버려서 N이 뜰 틈이 없다. 그래서 이 탭에 들어온
+  // 첫 렌더의 tabSeenAt 값을 tabViewStartedAt에 한 번 얼려두고, 답글 N
+  // 판단은 그 얼린 값과 비교한다 — 탭을 벗어났다 다시 들어오면(아래
+  // 세그먼트 탭 클릭 핸들러에서) 새로 얼린다.
+  if (!(shareTab in tabViewStartedAt)) tabViewStartedAt[shareTab] = tabSeenAt[shareTab] || 0;
+
   // 지금 보고 있는 탭은 그 순간까지의 활동을 전부 본 걸로 쳐서 seenAt을
   // 계속 최신으로 유지한다 — 다른 탭으로 넘어간 뒤에도 "내가 마지막으로 본
-  // 시점"이 정확하게 남아있게.
-  ensureTabSeenInit();
+  // 시점"이 정확하게 남아있게. (하단 탭/세그먼트 탭 N배지는 이 값을 그대로 쓴다.)
   tabSeenAt[shareTab] = Date.now();
   saveTabSeen();
 
@@ -744,7 +775,16 @@ function render() {
   if (shareTab !== "recipe") wireShareDayChips();
 
   rootEl.querySelectorAll("[data-share-tab]").forEach((el) => {
-    el.addEventListener("click", () => { shareTab = el.dataset.shareTab; saveShareTab(); render(); });
+    el.addEventListener("click", () => {
+      shareTab = el.dataset.shareTab;
+      saveShareTab();
+      // 이 탭에 "다시" 들어오는 거니, 답글 N배지 기준점(tabViewStartedAt)을
+      // 지금 시점으로 새로 얼린다 — 안 지우면 세션 중 그 탭에 처음 들어왔던
+      // 순간에 영원히 고정돼서, 이미 다 보고 나갔다 들어와도 배지가 절대
+      // 안 사라지는 버그가 생긴다.
+      delete tabViewStartedAt[shareTab];
+      render();
+    });
   });
 
   if (shareTab === "soldout") wireSoldoutTab();
@@ -958,9 +998,8 @@ function wireNoteTab() {
     const key = el.dataset.replyEditSave;
     const input = rootEl.querySelector(`[data-reply-edit-input="${key}"]`);
     el.addEventListener("click", () => saveReplyEdit(key, input.value));
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.isComposing) saveReplyEdit(key, input.value);
-    });
+    // textarea라 Enter는 줄바꿈으로 써야 한다 — 더 이상 Enter로 바로
+    // 저장되지 않는다("저장" 버튼을 눌러야 함).
   });
   rootEl.querySelectorAll("[data-reply-edit-cancel]").forEach((el) => {
     el.addEventListener("click", () => {
@@ -1234,6 +1273,11 @@ function ensureStarted() {
 export function mountShareBoard(el, acc) {
   rootEl = el;
   account = acc;
+  // 공유하기 화면에 새로 들어올 때마다(다른 탭 갔다가 돌아온 경우 포함)
+  // 답글 N배지 기준점을 전부 새로 얼린다 — 세그먼트 탭 전환 클릭에서만
+  // 지워주면, "화면 자체를 나갔다 다시 들어온" 경우엔 여전히 예전 기준점이
+  // 남아있어서 이미 본 답글도 계속 N으로 뜨는 문제가 있었다.
+  tabViewStartedAt = {};
   ensureStarted();
   watchAccounts(render);
   // setInitialShareDate()는 main()이 끝나기 한참 전, rootEl도 아직 없을 때
@@ -1264,6 +1308,50 @@ export function getTodayShareCount() {
 
 export function getTodayUnseenCount(myPhone) {
   return shareTodayItems.filter((it) => !(it.seenBy || []).includes(myPhone)).length;
+}
+
+// 하단 탭(공유하기) N배지 전용 — 탭 안의 세그먼트별 "본 시각"(tabSeenAt)에
+// 기대지 않고, 하단 탭 아이콘 자체를 탭하면 그 즉시 사라지는 훨씬 단순한
+// 기준으로 둔다. 셋 중 아무 탭에서든 가장 최근 활동 시각이, 마지막으로
+// 하단 탭을 눌러서 들어간 시각(markShareNavBadgeSeen)보다 늦으면 켠다.
+const NAV_BADGE_SEEN_KEY = "mamory_shareNavBadgeSeenAt";
+
+function loadNavBadgeSeenAt() {
+  try {
+    const all = JSON.parse(localStorage.getItem(NAV_BADGE_SEEN_KEY) || "{}");
+    if (account.phone in all) return all[account.phone];
+  } catch (e) {
+    // localStorage 불가 환경 — 아래에서 지금 시각으로 새로 깔고 넘어간다.
+  }
+  // 처음 보는 계정/기기면 지금까지의 활동을 전부 "새 활동"으로 띄우지
+  // 않도록 지금 시각을 기준점으로 깔아둔다.
+  const now = Date.now();
+  saveNavBadgeSeenAt(now);
+  return now;
+}
+
+function saveNavBadgeSeenAt(ts) {
+  try {
+    const all = JSON.parse(localStorage.getItem(NAV_BADGE_SEEN_KEY) || "{}");
+    all[account.phone] = ts;
+    localStorage.setItem(NAV_BADGE_SEEN_KEY, JSON.stringify(all));
+  } catch (e) {
+    // localStorage 불가 환경이면 그냥 이번 세션만 배지가 덜 정확한 걸로 넘어간다.
+  }
+}
+
+function latestShareActivityMs() {
+  return Math.max(tabActivityMs("soldout"), tabActivityMs("note"), tabActivityMs("recipe"));
+}
+
+// 하단 탭(공유하기)을 탭하는 순간 호출 — 그 즉시 배지가 꺼지고, 그 뒤에
+// 올라온 활동이 있을 때만 다시 켜진다.
+export function markShareNavBadgeSeen() {
+  saveNavBadgeSeenAt(Date.now());
+}
+
+export function hasUnseenShareActivity(myPhone) {
+  return latestShareActivityMs() > loadNavBadgeSeenAt();
 }
 
 // ---- 메뉴 레시피 (공유하기 > 레시피 탭) ----

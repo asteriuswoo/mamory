@@ -8,7 +8,7 @@
 //      주문 등) 기록 — 시재와 같은 날짜 범위를 공유한다.
 //   3. 선결제 충전 등록 — 손님이 충전할 때마다 남기는 기록. 차감/잔액 개념 없이
 //      "누가 언제 얼마 냈는지"만 쌓이는 로그이며, 같은 손님 이름으로 계속 쌓인다.
-import { db, collection, doc, addDoc, updateDoc, deleteDoc, getDocs, setDoc, arrayUnion, writeBatch, onSnapshot, query, orderBy, serverTimestamp, runTransaction, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
+import { db, collection, doc, addDoc, updateDoc, deleteDoc, getDocs, setDoc, arrayUnion, arrayRemove, writeBatch, onSnapshot, query, orderBy, serverTimestamp, runTransaction, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
 import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, resizeImageFile, dayAccentClass, openImageLightbox, showActionSheet, MULTIPLE_FILE_ATTR } from "./util.js";
 import { avatarHtml, watchAccounts } from "./avatar.js";
 
@@ -45,6 +45,67 @@ function dowLabel(dateStr) {
 let rootEl = null;
 let account = { name: "", phone: "", role: "" };
 let started = false;
+
+// ---- 등록해요 하단 탭 N배지 ----
+// 공유하기 탭의 세그먼트별 N배지(tabSeenAt)와 같은 방식 — 시재/선결제 각각
+// "내가 마지막으로 그 탭을 본 시각" 이후 새 등록이 있으면 하단 탭에 N배지.
+// 기기(localStorage)에 계정별로 저장해서 새로고침해도 유지된다.
+const REGISTER_TAB_SEEN_KEY = "mamory_registerTabSeenAt";
+let registerTabSeenAt = null;
+const registerBadgeListeners = [];
+
+function loadRegisterTabSeen() {
+  try {
+    const all = JSON.parse(localStorage.getItem(REGISTER_TAB_SEEN_KEY) || "{}");
+    return all[account.phone] || null;
+  } catch (e) {
+    return null;
+  }
+}
+function saveRegisterTabSeen() {
+  try {
+    const all = JSON.parse(localStorage.getItem(REGISTER_TAB_SEEN_KEY) || "{}");
+    all[account.phone] = registerTabSeenAt;
+    localStorage.setItem(REGISTER_TAB_SEEN_KEY, JSON.stringify(all));
+  } catch (e) {
+    // localStorage 불가 환경이면 그냥 이번 세션만 배지가 덜 정확한 걸로 넘어간다.
+  }
+}
+function ensureRegisterTabSeenInit() {
+  if (registerTabSeenAt) return;
+  registerTabSeenAt = loadRegisterTabSeen() || { cash: Date.now(), topup: Date.now() };
+  saveRegisterTabSeen();
+}
+function registerTabActivityMs(tab) {
+  let max = 0;
+  if (tab === "cash") {
+    cashEntriesToday.forEach((e) => { max = Math.max(max, tsMillisDesc(e.createdAt)); });
+    cashExpensesToday.forEach((e) => { max = Math.max(max, tsMillisDesc(e.createdAt)); });
+  } else if (tab === "topup") {
+    topups.forEach((t) => { max = Math.max(max, tsMillisDesc(t.createdAt)); });
+  }
+  return max;
+}
+function notifyRegisterBadgeListeners() {
+  registerBadgeListeners.forEach((cb) => cb());
+}
+
+// 하단 탭(등록해요) N배지 전용 — 시재/선결제 둘 중 하나라도 안 본 변화가
+// 있으면 true. 들어가서 그 탭을 보기만 하면(render()) 바로 해제된다.
+export function hasUnseenRegisterActivity() {
+  ensureRegisterTabSeenInit();
+  return ["cash", "topup"].some((tab) => registerTabActivityMs(tab) > (registerTabSeenAt[tab] || 0));
+}
+
+// 등록해요 화면을 아직 한 번도 안 열어봤어도(mountRegisterBoard 전) 하단 탭
+// N배지가 바로 뜨도록, 화면 마운트와 무관하게 리스너만 미리 돌려둔다 —
+// shareboard.js의 watchUnseenCount와 같은 패턴.
+export function watchRegisterUnseen(acc, onChange) {
+  account = { ...account, ...acc };
+  registerBadgeListeners.push(onChange);
+  ensureStarted();
+  onChange();
+}
 
 const BILL_DENOMS = [50000, 10000, 5000, 1000];
 const BILL_LABELS = { 50000: "50,000", 10000: "10,000", 5000: "5,000", 1000: "1,000" };
@@ -192,6 +253,26 @@ async function registerCashDraft() {
   render();
 }
 
+// 서랍 안 현금을 실제로 전부 회수했을 때처럼, 지금 세는 중인 장수와
+// 무관하게 바로 0원으로 만들고 싶을 때 쓴다 — 등록 로그와 똑같은 방식으로
+// "0원짜리 등록"을 하나 남겨서(isReset 표시), 최근 등록 기준 요약도 바로
+// 0원이 되고 누가 언제 리셋했는지도 로그에 그대로 남는다.
+async function resetCashRegister() {
+  if (!confirm("시재를 0원으로 리셋할까요?")) return;
+  await addDoc(collection(db, "cashRegister", date, "entries"), {
+    breakdown: {},
+    total: 0,
+    staffName: account.name,
+    staffPhone: account.phone,
+    createdAt: serverTimestamp(),
+    isReset: true,
+  });
+  cashDraft = { 50000: 0, 10000: 0, 5000: 0, 1000: 0 };
+  cashDraftDirty = false;
+  toast("시재를 0원으로 리셋했어요");
+  render();
+}
+
 function breakdownLabel(breakdown) {
   return BILL_DENOMS
     .filter((denom) => (breakdown || {})[denom] > 0)
@@ -222,8 +303,8 @@ function cashHistoryHtml(entries) {
       <div class="cash-log-row">
         ${avatarHtml(e.staffPhone, e.staffName, 22)}
         <div class="cash-log-body">
-          <span class="cash-log-who">${escapeHtml(e.staffName || "")}님 등록</span>
-          <span class="cash-log-detail">${escapeHtml(breakdownLabel(e.breakdown))}</span>
+          <span class="cash-log-who">${escapeHtml(e.staffName || "")}님 ${e.isReset ? "리셋" : "등록"}</span>
+          <span class="cash-log-detail">${e.isReset ? "0원으로 리셋함" : escapeHtml(breakdownLabel(e.breakdown))}</span>
         </div>
         <div class="cash-log-right">
           <span class="cash-log-amount plus">${(e.total || 0).toLocaleString()}원</span>
@@ -261,7 +342,8 @@ function cashCardHtml(isToday) {
 
   return `
     <div class="category-title section-title-cash">💰 ${isToday ? "오늘의 시재" : `${formatDateLabel(cashDate)} 시재`}</div>
-    <div class="card cash-register-card section-cash">
+    <div class="card cash-register-card section-cash" style="position:relative;">
+      ${isToday ? `<button type="button" class="cash-reset-btn" id="cashResetBtn">Reset</button>` : ""}
       ${summary}
       ${form}
       ${cashHistoryHtml(cashEntries)}
@@ -621,7 +703,11 @@ function wireTopupChipLongPress() {
 async function addNewTopupCustomer() {
   const name = (window.prompt("추가할 손님 이름을 입력하세요") || "").trim();
   if (!name) return;
-  await setDoc(doc(db, "config", "topupCustomers"), { names: arrayUnion(name) }, { merge: true });
+  // 예전에 삭제(숨김)했던 이름을 그대로 다시 추가하면, hiddenNames에 남아있는
+  // 기록 때문에 topupChipNames()가 계속 걸러내버려서 칩이 안 보이는 버그가
+  // 있었다 — 추가할 때 hiddenNames에서도 같이 빼서, 다시 추가한 이름은
+  // 확실히 보이게 한다.
+  await setDoc(doc(db, "config", "topupCustomers"), { names: arrayUnion(name), hiddenNames: arrayRemove(name) }, { merge: true });
   toast(`${name}님을 추가했어요`);
 }
 
@@ -703,6 +789,13 @@ async function submitTopup() {
 function render() {
   if (!rootEl) return;
   const isToday = cashDate === date;
+
+  // 지금 보고 있는 탭(시재/선결제)은 그 순간까지의 등록을 전부 본 걸로 쳐서
+  // seenAt을 최신으로 유지한다 — 공유하기 탭 N배지와 같은 방식.
+  ensureRegisterTabSeenInit();
+  registerTabSeenAt[registerTab] = Date.now();
+  saveRegisterTabSeen();
+
   let html = `
     <div class="seg register-tab-seg">
       <button type="button" class="${registerTab === "cash" ? "active" : ""}" data-register-tab="cash">💰 시재등록</button>
@@ -767,6 +860,8 @@ function render() {
   });
   const cashRegisterBtn = rootEl.querySelector("#cashRegisterBtn");
   if (cashRegisterBtn) cashRegisterBtn.addEventListener("click", registerCashDraft);
+  const cashResetBtn = rootEl.querySelector("#cashResetBtn");
+  if (cashResetBtn) cashResetBtn.addEventListener("click", resetCashRegister);
   rootEl.querySelectorAll("[data-cash-log-delete]").forEach((el) => {
     el.addEventListener("click", () => deleteCashEntry(el.dataset.cashLogDelete));
   });
@@ -849,16 +944,19 @@ function ensureStarted() {
     if (cashDate === date) cashEntries = cashEntriesToday;
     primeCashDraftFromLatest();
     render();
+    notifyRegisterBadgeListeners();
     if (cashEntriesToday.length === 0) migrateLegacyCashDoc(date).then(() => { /* onSnapshot picks up the migrated entries automatically */ });
   });
   onSnapshot(collection(db, "cashRegister", date, "expenses"), (snap) => {
     cashExpensesToday = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     if (cashDate === date) cashExpenses = cashExpensesToday;
     render();
+    notifyRegisterBadgeListeners();
   });
   onSnapshot(query(collection(db, "topups"), orderBy("createdAt", "desc")), (snap) => {
     topups = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     render();
+    notifyRegisterBadgeListeners();
   });
   onSnapshot(doc(db, "config", "topupCustomers"), (snap) => {
     const d = snap.exists() ? snap.data() : {};

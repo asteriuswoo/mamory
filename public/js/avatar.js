@@ -43,6 +43,15 @@ export function allAccounts() {
   return Object.entries(accountsMap).map(([phone, data]) => ({ phone, name: data.name || "" }));
 }
 
+// allAccounts()는 멘션 자동완성용이라 {phone, name}만 주는데, 급여관리
+// N배지처럼 role/paydayOfMonth 같은 다른 필드가 필요한 곳도 있다 — 이미 떠
+// 있는 계정 실시간 캐시를 그대로 재사용해서 별도 리스너 없이 전체 필드를
+// 돌려준다.
+export function allAccountsFull() {
+  ensureAccountsWatched();
+  return Object.entries(accountsMap).map(([phone, data]) => ({ phone, ...data }));
+}
+
 function initialOf(name) {
   return (name || "?").trim().charAt(0) || "?";
 }
@@ -80,7 +89,11 @@ export async function uploadAvatar(phone, file) {
   if (!file) return;
   toast("프로필 사진 업로드 중...");
   try {
-    const blob = await resizeImageFile(file, 400, 0.85);
+    // 28~32px짜리 작은 동그란 썸네일로만 쓰일 거라 생각해서 400px로
+    // 줄였었는데, 탭하면 뜨는 확대 보기(라이트박스)도 이 똑같은 파일을
+    // 그대로 키워서 보여주는 거라 흐릿하게 보였다 — 확대해도 선명하게
+    // 보이도록 더 크게 저장한다.
+    const blob = await resizeImageFile(file, 1000, 0.85);
     // Fixed path per phone (not timestamped) — a new photo replaces the old
     // one instead of piling up in Storage.
     const fileRef = ref(storage, `avatars/${phone}.jpg`);

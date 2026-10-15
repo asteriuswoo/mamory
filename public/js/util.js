@@ -464,7 +464,7 @@ export const NOTIFY_BELL_OFF = `
 </svg>`;
 
 export const URGENCY_LABEL = {
-  normal: "정상 발주",
+  normal: "여유",
   urgent: "긴급",
   soldout: "품절",
 };

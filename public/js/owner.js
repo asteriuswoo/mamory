@@ -4,10 +4,11 @@
 // stays loaded across tab switches instead of being torn down by a full
 // page reload each time.
 import { db, storage, ref, uploadBytes, getDownloadURL, STORE_NAME, QUICK_ORDER_LINKS, collection, doc, addDoc, updateDoc, setDoc, onSnapshot, getDocs, serverTimestamp } from "./firebase-init.js";
-import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, showTopBanner, escapeHtml, resizeImageFile, openImageLightbox, URGENCY_LABEL, URGENCY_GROUP_CAPTION, sortMaterials, dayAccentClass, NOTIFY_BELL_ON, qtyRemainingLabel, MULTIPLE_FILE_ATTR } from "./util.js";
+import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, showTopBanner, escapeHtml, resizeImageFile, openImageLightbox, URGENCY_LABEL, URGENCY_GROUP_CAPTION, sortMaterials, dayAccentClass, NOTIFY_BELL_ON, qtyRemainingLabel, MULTIPLE_FILE_ATTR, showActionSheet } from "./util.js";
 import { watchNotificationBadge, openNotificationPanel } from "./push.js";
 import { recordSubmitToday } from "./mascot.js";
 import { mountHumanityTrigger } from "./humanityboard.js";
+import { computeTrendData, trendInsightsHtml, trendListHtml } from "./ordertrend.js";
 
 // 사장님이 번거롭다고 해서 "영수증 첨부해야만 주문완료 체크 가능" 잠금을
 // 잠깐 풀어둔다 — 영수증 첨부 기능 자체는 그대로 쓸 수 있고, 체크/공유를
@@ -18,7 +19,7 @@ const RECEIPT_REQUIRED_TO_CHECK = false;
 
 let myOwnerPhone = "";
 
-let datePick, todayBtn, dayChips, orderList, newRequestCard, newRequestText, urgentCount, shareBtn, previewCard, sharePreview, copyBtn, notifyBtn, notifyBadgeEl, quickOrderLinksEl, pageSub;
+let datePick, todayBtn, dayChips, receiptClipRowEl, orderList, newRequestCard, newRequestText, urgentCount, shareBtn, previewCard, sharePreview, copyBtn, notifyBtn, notifyBadgeEl, quickOrderLinksEl, pageSub;
 
 let items = []; // {id, ...data}
 let unsub = null;
@@ -46,6 +47,51 @@ let myReceiptsOverlayRoot;
 const recentDates = Array.from({ length: 7 }, (_, i) => dateStrDaysAgo(i));
 const chipCounts = {};
 const chipUnordered = {}; // date -> true if that date still has any not-yet-ordered item
+
+let trendOverlayRoot;
+let showTrendOverlay = false;
+let trendLoading = false;
+let trendData = [];
+
+async function loadOrderTrend() {
+  trendLoading = true;
+  renderTrendOverlay();
+  trendData = await computeTrendData(recentDates);
+  trendLoading = false;
+  renderTrendOverlay();
+}
+
+function openOrderTrend() {
+  showTrendOverlay = true;
+  loadOrderTrend();
+  renderTrendOverlay();
+}
+
+function closeOrderTrend() {
+  showTrendOverlay = false;
+  renderTrendOverlay();
+}
+
+function renderTrendOverlay() {
+  if (!trendOverlayRoot) return;
+  if (!showTrendOverlay) { trendOverlayRoot.innerHTML = ""; return; }
+  trendOverlayRoot.innerHTML = `
+    <div class="payroll-form-overlay" id="trendOverlay">
+      <div class="payroll-form-sheet">
+        <div class="row-between">
+          <div style="font-weight:800; font-size:16px;">📊 발주 트렌드</div>
+          <button class="payroll-form-close-btn" id="trendCloseBtn" aria-label="닫기">✕</button>
+        </div>
+        <div style="font-size:12px; color:var(--muted); margin:6px 0 14px;">최근 7일 동안 요청된 자재 기준</div>
+        ${trendLoading ? `<div class="empty">불러오는 중...</div>` : trendData.length === 0 ? `<div class="empty">최근 7일간 요청 기록이 없어요.</div>` : `
+        ${trendInsightsHtml(trendData, recentDates.length)}
+        ${trendListHtml(trendData)}`}
+      </div>
+    </div>`;
+  const overlay = document.getElementById("trendOverlay");
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) closeOrderTrend(); });
+  document.getElementById("trendCloseBtn").addEventListener("click", closeOrderTrend);
+}
 
 // 옛 발주 항목은 photoUrl(단수) 하나였고, 지금은 여러 장을 담는
 // photoUrls(배열)로 바뀌었다 — 어느 쪽으로 저장됐든 한 번에 뽑아 쓴다.
@@ -134,6 +180,7 @@ function subscribe() {
     reconcileOrderedPending();
     render();
     renderReceiptCard();
+    renderReceiptClipRow();
     renderMyReceiptsOverlay();
   });
 }
@@ -169,7 +216,7 @@ function resetReceiptDraft() {
 const RECEIPT_OCR_URL = "https://asia-northeast3-mmth-order.cloudfunctions.net/extractReceiptText";
 
 function normalizeForMatch(s) {
-  return (s || "").replace(/[\s()·,.\-]/g, "").toLowerCase();
+  return (s || "").replace(/[\s()·,.\-&_*]/g, "").toLowerCase();
 }
 
 // 영수증 OCR 텍스트 안에 검색어가 들어있는지 본다. 전체가 그대로 들어있으면
@@ -191,11 +238,23 @@ function normalizeForMatch(s) {
 // "일반 원두"에도 걸리는 식의 오매칭이 실제로 나서다 — 검색어 단어
 // 중 더 많은 쪽이 겹쳐야 그 변형(디카/라지 등)까지 맞다고 볼 수 있다.
 function receiptTextMatchesMaterial(normalizedOcrText, searchTerm, isAlias) {
-  const raw = (isAlias ? (searchTerm || "") : (searchTerm || "").replace(/\([^)]*\)/g, "")).trim();
+  let raw = (isAlias ? (searchTerm || "") : (searchTerm || "").replace(/\([^)]*\)/g, "")).trim();
+  // "말차P"/"버터P"처럼 파우더류 자재명 끝에 붙여둔 "P"는 사장님이 내부적으로
+  // 구분하려고 붙인 표시일 뿐 영수증엔 찍히지 않는다(영수증엔 "파우더"라고
+  // 한글로 찍힘) — 매칭 대상에서 이 trailing P만 떼고 나머지로 찾는다.
+  // 영수증 검색어(alias)는 사장님이 영수증 표기 그대로 입력한 값이라 이
+  // 규칙을 적용하지 않는다.
+  if (!isAlias) raw = raw.replace(/(?<=[가-힣])p$/i, "").trim();
   const core = normalizeForMatch(raw);
   if (core.length < 2) return false;
   if (normalizedOcrText.includes(core)) return true;
-  if (!isAlias) return false;
+  // 띄어쓰기로 나뉜 단어들이 제품명 안에 순서만 다르게 들어있는 경우도
+  // 매칭시킨다(예: "콜드브루 원액" 자재명이 "원액(콜드브루)"처럼 뒤집혀서
+  // 찍혀도 잡히게) — 예전엔 영수증 검색어를 등록한 자재에만 이 단어 단위
+  // 매칭을 허용했는데, 등록 안 한 일반 자재명도 똑같이 혜택을 보게 한다.
+  // 다만 띄어쓰기가 아예 없는 복합어("1구캐리어"처럼)는 여기서도 단어를
+  // 못 쪼개서 여전히 못 잡는다 — 그런 건 영수증 검색어를 띄어서 등록하거나
+  // 그대로 등록해야 한다.
   const words = raw.split(/\s+/).map((w) => normalizeForMatch(w)).filter((w) => w.length >= 2);
   if (words.length <= 1) return false;
   const matchedCount = words.filter((w) => normalizedOcrText.includes(w)).length;
@@ -314,15 +373,14 @@ async function submitReceiptAttachment() {
 }
 
 function receiptCardHtml() {
-  const isToday = datePick.value === todayStr();
-
   if (receiptMode === null) {
     return `
       <div class="field" style="margin:0;">
         <label>결제 영수증 (주문완료 체크 전 필수)</label>
-        <button type="button" class="btn secondary block" id="receiptModeAllBtn" style="margin-top:8px;">🧾 전체 영수증 첨부</button>
-        <button type="button" class="btn secondary block" id="receiptModeSelectBtn" style="margin-top:8px;">🎯 선택 자재 영수증 첨부</button>
-        <button type="button" class="btn secondary block" id="myReceiptsBtn" style="margin-top:8px;">📎 ${isToday ? "오늘 " : ""}내가 첨부한 영수증 보기</button>
+        <div class="seg" style="margin-top:8px;">
+          <button type="button" class="active" id="receiptAttachMenuBtn">📎 영수증 첨부하기</button>
+          <button type="button" class="active seg-trend-btn" id="orderTrendBtn">📊 발주 트렌드</button>
+        </div>
       </div>`;
   }
 
@@ -361,16 +419,23 @@ function receiptCardHtml() {
         📷 영수증 사진 추가
         <input type="file" accept="image/*" id="receiptPhotoInput" ${MULTIPLE_FILE_ATTR} style="display:none;" />
       </label>
-      <button type="button" class="btn normal" id="receiptAttachSubmitBtn" style="margin-top:8px; display:block; margin-left:auto; width:45%;">첨부하고 체크하러 가기${receiptPendingFiles.length > 0 ? ` (${receiptPendingFiles.length})` : ""}</button>
-      <button type="button" class="btn secondary block" id="myReceiptsBtn" style="margin-top:8px;">📎 ${isToday ? "오늘 " : ""}내가 첨부한 영수증 보기</button>
+      <button type="button" class="btn normal block" id="receiptAttachSubmitBtn" style="margin-top:8px;">첨부하고 체크하러 가기${receiptPendingFiles.length > 0 ? ` (${receiptPendingFiles.length})` : ""}</button>
     </div>`;
 }
 
 function wireReceiptCard() {
-  const allBtn = document.getElementById("receiptModeAllBtn");
-  if (allBtn) allBtn.addEventListener("click", () => { receiptMode = "all"; renderReceiptCard(); });
-  const selectBtn = document.getElementById("receiptModeSelectBtn");
-  if (selectBtn) selectBtn.addEventListener("click", () => { receiptMode = "select"; renderReceiptCard(); });
+  const attachMenuBtn = document.getElementById("receiptAttachMenuBtn");
+  if (attachMenuBtn) {
+    attachMenuBtn.addEventListener("click", () => {
+      showActionSheet([
+        { label: "🧾 전체 영수증 첨부", onClick: () => { receiptMode = "all"; renderReceiptCard(); } },
+        { label: "🎯 선택 자재 영수증 첨부", onClick: () => { receiptMode = "select"; renderReceiptCard(); } },
+        { label: "📎 내가 첨부한 영수증 보기", onClick: openMyReceiptsOverlay },
+      ]);
+    });
+  }
+  const trendBtn = document.getElementById("orderTrendBtn");
+  if (trendBtn) trendBtn.addEventListener("click", openOrderTrend);
   const backBtn = document.getElementById("receiptModeBackBtn");
   if (backBtn) backBtn.addEventListener("click", () => { resetReceiptDraft(); renderReceiptCard(); });
   receiptCardEl.querySelectorAll("[data-receipt-target-check]").forEach((el) => {
@@ -392,8 +457,6 @@ function wireReceiptCard() {
   });
   const submitBtn = document.getElementById("receiptAttachSubmitBtn");
   if (submitBtn) submitBtn.addEventListener("click", submitReceiptAttachment);
-  const myBtn = document.getElementById("myReceiptsBtn");
-  if (myBtn) myBtn.addEventListener("click", openMyReceiptsOverlay);
 }
 
 function renderStickyShareBar() {
@@ -413,6 +476,25 @@ function renderReceiptCard() {
     wireReceiptCard();
   }
   renderStickyShareBar();
+}
+
+// 예전엔 "내가 첨부한 영수증 보기" 버튼이 영수증 첨부 카드 안에 회색
+// secondary 버튼으로 있었는데, 카드 배경과 톤이 비슷해서 첨부가 있는지도
+// 잘 안 보였다 — 날짜 칩 바로 아래에, 그날 실제로 첨부된 영수증이 있을
+// 때만 클립 칩 + N배지로 띄워서 눈에 바로 들어오게 바꾼다. 하나도 없는
+// 날은 칩 자체를 안 그려서 그 줄이 조용히 사라진다.
+function renderReceiptClipRow() {
+  if (!receiptClipRowEl) return;
+  const n = allReceiptPhotosHistory.length;
+  if (n <= 0) { receiptClipRowEl.innerHTML = ""; return; }
+  const isToday = datePick.value === todayStr();
+  receiptClipRowEl.innerHTML = `
+    <button type="button" class="receipt-clip-chip" id="receiptClipChipBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+      ${isToday ? "오늘 " : ""}첨부한 영수증
+      <span class="receipt-clip-badge">${n}</span>
+    </button>`;
+  document.getElementById("receiptClipChipBtn").addEventListener("click", openMyReceiptsOverlay);
 }
 
 // 직원 쪽 "담은 목록"에서 자재 요청에 사진을 첨부해 모아보는 것과 똑같이,
@@ -836,6 +918,7 @@ export function mount(account) {
   datePick = document.getElementById("datePick");
   todayBtn = document.getElementById("todayBtn");
   dayChips = document.getElementById("dayChips");
+  receiptClipRowEl = document.getElementById("receiptClipRow");
   orderList = document.getElementById("orderList");
   newRequestCard = document.getElementById("newRequestCard");
   newRequestText = document.getElementById("newRequestText");
@@ -851,6 +934,7 @@ export function mount(account) {
   receiptCardEl = document.getElementById("receiptCard");
   stickyShareBarEl = document.getElementById("stickyShareBar");
   myReceiptsOverlayRoot = document.getElementById("myReceiptsOverlayRoot");
+  trendOverlayRoot = document.getElementById("trendOverlayRoot");
 
   quickOrderLinksEl.innerHTML = QUICK_ORDER_LINKS
     .map((l) => `<a class="btn soft" href="${escapeHtml(l.url)}" target="_blank" rel="noopener">${escapeHtml(l.label)}</a>`)

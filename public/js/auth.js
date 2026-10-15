@@ -1,5 +1,6 @@
 import { db, readyAuth, doc, getDoc, setDoc, updateDoc, serverTimestamp } from "./firebase-init.js";
 import { getAccount, setAccount, clearAccount, normalizePhone } from "./util.js";
+import { removeDeviceTokenOnLogout } from "./push.js";
 
 export async function fetchAccount(phone) {
   await readyAuth;
@@ -117,7 +118,12 @@ async function verifyAccountInBackground(expectedRole, cached) {
   }
 }
 
-export function logout() {
+export async function logout() {
+  // 로그아웃해도 이 기기의 알림 토큰이 그대로 남아있으면, 나중에 다른
+  // 기기로 또 로그인했을 때 두 기기 모두에 같은 알림이 두 번 가버린다 —
+  // 로그아웃 시점에 이 기기 몫만 지워둔다.
+  const acc = getAccount();
+  if (acc && acc.phone) await removeDeviceTokenOnLogout(acc.phone);
   clearAccount();
   location.href = "index.html";
 }

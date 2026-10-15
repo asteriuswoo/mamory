@@ -12,7 +12,8 @@
 // fragment, and caches it in memory so later switches don't refetch.
 import { requireAccount, logout } from "./auth.js";
 import { wireAccountHeaderAvatar } from "./avatar.js";
-import { watchUnseenCount } from "./shareboard.js";
+import { watchUnseenCount, hasUnseenShareActivity, markShareNavBadgeSeen } from "./shareboard.js";
+import { watchRegisterUnseen, hasUnseenRegisterActivity } from "./registerboard.js";
 import { registerPushToken, watchForegroundPush, isPushDisabled } from "./push.js";
 import { watchAppBadgeClear } from "./badge.js";
 import { mountMascotWidget } from "./mascot.js";
@@ -136,6 +137,11 @@ async function switchTo(path, { push, isInitial } = {}) {
 document.querySelectorAll(".bottom-tab").forEach((a) => {
   a.addEventListener("click", (e) => {
     const path = pathOf(a.getAttribute("href"));
+    if (path === "share.html") {
+      markShareNavBadgeSeen();
+      const navBadge = document.getElementById("shareNavBadge");
+      if (navBadge) navBadge.style.display = "none";
+    }
     if (!VIEWS[path]) return; // not one of the 3 SPA views — let it navigate normally
     e.preventDefault();
     switchTo(path, { push: true });
@@ -151,9 +157,15 @@ requireAccount("owner").then((acc) => {
   account = acc;
 
   const navBadge = document.getElementById("shareNavBadge");
-  watchUnseenCount({ name: acc.name, phone: acc.phone }, (n) => {
-    if (n > 0) { navBadge.textContent = "N"; navBadge.style.display = "flex"; }
+  watchUnseenCount({ name: acc.name, phone: acc.phone }, () => {
+    if (hasUnseenShareActivity(acc.phone)) { navBadge.textContent = "N"; navBadge.style.display = "flex"; }
     else navBadge.style.display = "none";
+  });
+
+  const registerNavBadge = document.getElementById("registerNavBadge");
+  watchRegisterUnseen({ name: acc.name, phone: acc.phone }, () => {
+    if (hasUnseenRegisterActivity()) { registerNavBadge.textContent = "N"; registerNavBadge.style.display = "flex"; }
+    else registerNavBadge.style.display = "none";
   });
 
   watchForegroundPush();

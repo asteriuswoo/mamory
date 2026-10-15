@@ -148,6 +148,27 @@ exports.notifyOwnerOnNewRequest = onDocumentCreated("checks/{date}/requestBatche
   });
 });
 
+// 담은 목록 화면의 "사장님께 알리기" 버튼 — 직원이 "오늘 미주문건이 아직
+// 있다"는 걸 그냥 상기시키고 싶을 때 누른다. 누가 눌렀는지는 알림
+// 내용에 일부러 안 담는다(익명 리마인더 용도) — Firestore 문서 자체에는
+// staffPhone을 남겨두지만(나중에 남용 확인이 필요할 경우를 대비), 알림
+// 텍스트에는 절대 안 드러낸다.
+exports.notifyOwnerUnorderedReminder = onDocumentCreated("checks/{date}/unorderedNudges/{nudgeId}", async (event) => {
+  const nudge = event.data.data();
+  const n = nudge.count || 0;
+  if (n <= 0) return;
+  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").get();
+  const phones = [];
+  const tokens = [];
+  ownersSnap.forEach((doc) => { phones.push(doc.id); tokens.push(...tokensOf(doc.data().fcmTokens)); });
+  await notify(phones, tokens, {
+    title: "발주 알림",
+    body: `오늘 미주문건 ${n}개 있습니다!!`,
+    link: "/owner.html",
+    type: "request",
+  });
+});
+
 // 사장님이 주문완료 체크 후 "제출"을 누르면 요청한 직원에게 알림. 예전에는
 // checks/{date}/items 를 직접 구독해서 항목 개수만큼 알림이 우르르 갔는데,
 // 이제는 제출 시점에 owner.js가 직원별로 남기는 orderBatches 문서(제출
@@ -740,6 +761,24 @@ exports.cleanupOldNotifications = onSchedule({ schedule: "0 4 * * *", timeZone: 
   const snap = await db.collectionGroup("notifications").where("createdAt", "<", cutoff).get();
   if (snap.empty) return;
   // batch는 최대 500건이라, 혹시 한 번에 넘치면 여러 배치로 나눠 처리한다.
+  const chunks = [];
+  for (let i = 0; i < snap.docs.length; i += 450) chunks.push(snap.docs.slice(i, i + 450));
+  for (const chunk of chunks) {
+    const batch = db.batch();
+    chunk.forEach((docSnap) => batch.delete(docSnap.ref));
+    await batch.commit();
+  }
+});
+
+// ---- 급여 제출함 월간 자동 리셋 (매월 1일 자정) ----
+// 제출된 급여 요청은 날짜별로 안 나뉘고 하나의 컬렉션에 계속 쌓이기만
+// 해서, 사장님이 입금 처리할 때마다 일일이 지우지 않으면 계속 늘어난다.
+// 새 달이 시작되면 지난달 제출분은 이미 처리됐을 거라 보고, 과거 이력을
+// 따로 보관할 필요 없이 전체를 비워서 급여 제출함을 깨끗한 상태로
+// 시작하게 한다.
+exports.resetPayrollRequestsMonthly = onSchedule({ schedule: "0 0 1 * *", timeZone: "Asia/Seoul" }, async () => {
+  const snap = await db.collection("payrollRequests").get();
+  if (snap.empty) return;
   const chunks = [];
   for (let i = 0; i < snap.docs.length; i += 450) chunks.push(snap.docs.slice(i, i + 450));
   for (const chunk of chunks) {

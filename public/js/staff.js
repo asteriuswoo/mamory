@@ -1,8 +1,8 @@
 import { db, collection, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, getDocs, query, orderBy, serverTimestamp, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
 import { requireAccount, logout } from "./auth.js";
 import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, openImageLightbox, URGENCY_LABEL, URGENCY_HINT, URGENCY_ORDER, URGENCY_GROUP_CAPTION, sortMaterials, sortByOrder, resizeImageFile, confirmModal, dayAccentClass, NOTIFY_BELL_ON, qtyRemainingLabel, MULTIPLE_FILE_ATTR } from "./util.js";
-import { mountShareBoard, getTodayUnseenCount, watchUnseenCount, setInitialShareTab, setInitialShareDate } from "./shareboard.js";
-import { mountRegisterBoard } from "./registerboard.js";
+import { mountShareBoard, hasUnseenShareActivity, watchUnseenCount, setInitialShareTab, setInitialShareDate, markShareNavBadgeSeen } from "./shareboard.js";
+import { mountRegisterBoard, watchRegisterUnseen, hasUnseenRegisterActivity } from "./registerboard.js";
 import { mountPayrollBoard, mountClockWidget } from "./payroll.js";
 import { registerPushToken, watchForegroundPush, watchNotificationBadge, openNotificationPanel } from "./push.js";
 import { wireAccountHeaderAvatar } from "./avatar.js";
@@ -40,6 +40,10 @@ const screenEl = document.getElementById("screen");
 
 const date = todayStr();
 const PENDING_KEY = "cafe_pending_" + date;
+// 이월된(어제 미주문) 자재를 "취소"로 뺀 적 있으면 기억해둔다 — 안 그러면
+// 새로고침마다 loadCarryoverItems()가 "아직 pending에 없네"라고 보고 매번
+// 다시 집어넣어버린다. 날짜별 키라 다음날엔 자연히 초기화된다.
+const DISMISSED_CARRYOVER_KEY = "cafe_dismissed_carryover_" + date;
 
 let materials = [];
 let yesterdayItems = {}; // materialId -> yesterday's checks/items doc data, for the "어제 요청/주문완료" hint
@@ -72,19 +76,24 @@ const recentDates = Array.from({ length: 7 }, (_, i) => dateStrDaysAgo(i));
 const chipCounts = {};
 let cartDate = date;
 let cartItems = [];
-// 발주 트렌드 — 최근 7일간 요청된 자재를 이름별로 세어 많이 요청된 순으로
-// 보여준다. 나중에 계절별 추이나 실제 판매 데이터 연동으로 확장할 여지를
-// 남겨두려고 담은 목록 탭에 독립된 오버레이로 뒀다.
-let showTrendOverlay = false;
-let trendLoading = false;
-let trendData = []; // [{ name, count }] — count 내림차순
 
 // ---- 사장님이 첨부한 영수증 보기 (담은 목록 탭) ----
 let showOwnerReceiptsOverlay = false;
 let ownerReceiptsLoading = false;
 let ownerDayReceiptPhotos = []; // 지금 보고 있는 cartDate의 "전체 영수증" — 필요할 때만 한 번 불러온다
+
+// 담은 목록 탭을 열어보지 않아도 오늘 사장님이 첨부한 영수증 개수를
+// 실시간으로 알 수 있게 — 날짜 칩 바로 아래 클립 칩의 N배지 숫자로 쓴다.
+let todayOwnerReceiptCount = 0;
+// 과거 날짜를 볼 때는 실시간 구독이 없어서, 날짜 칩을 눌러 그 날짜로
+// 넘어갈 때(loadCartDate) 한 번 불러와 둔다 — 0건이면 칩 자체를 숨긴다.
+let cartDateReceiptCount = 0;
+
 // Cart item ids currently showing the inline "다른 상태로 바꾸기" picker.
 const statusPickerFor = new Set();
+// Cart item ids currently showing the "남은 수량 수정" input (대신 평소엔
+// "OO남음" 배지만 보여서 목록이 입력창으로 가득 차지 않는다).
+const qtyEditingFor = new Set();
 
 const MAIN_CATS = ["기본자재", "식자재"];
 const MAIN_DESC = {
@@ -101,7 +110,7 @@ const MATERIAL_ORDER_CRITERIA = {
 function renderOrderCriteriaHint(materialName) {
   const c = MATERIAL_ORDER_CRITERIA[materialName];
   if (!c) return "";
-  return `<div class="order-criteria-hint">정상 발주 ${escapeHtml(c.normal)} · 긴급 ${escapeHtml(c.urgent)}</div>`;
+  return `<div class="order-criteria-hint">여유 ${escapeHtml(c.normal)} · 긴급 ${escapeHtml(c.urgent)}</div>`;
 }
 
 function loadPending() {
@@ -113,6 +122,18 @@ function loadPending() {
 }
 function savePending() {
   localStorage.setItem(PENDING_KEY, JSON.stringify(pending));
+}
+
+let dismissedCarryovers = new Set();
+function loadDismissedCarryovers() {
+  try {
+    dismissedCarryovers = new Set(JSON.parse(localStorage.getItem(DISMISSED_CARRYOVER_KEY) || "[]"));
+  } catch (e) {
+    dismissedCarryovers = new Set();
+  }
+}
+function saveDismissedCarryovers() {
+  localStorage.setItem(DISMISSED_CARRYOVER_KEY, JSON.stringify([...dismissedCarryovers]));
 }
 
 // 옛 발주 항목은 photoUrl(단수) 하나였고, 지금은 여러 장을 담는
@@ -200,6 +221,108 @@ function pinBottomTabsToVisualViewport() {
 }
 pinBottomTabsToVisualViewport();
 
+// 자재 이름 검색창에 포커스하는 순간 모바일 키보드가 화면 아래쪽 상당
+// 부분을 가린다 — 처음엔 스크롤로 입력창을 키보드 위로 끌어올려봤지만,
+// 키보드가 열리는 애니메이션 도중 하단 탭바까지 같이 들썩여서 오히려
+// 더 어지러웠다. 그래서 검색창에 포커스하면 입력창+결과 리스트만 화면
+// 전체를 차지하는 전용 모드로 전환한다 — 다른 고정 UI(상단바/하단
+// 탭바)는 그 밑에 그대로 있지만 이 오버레이가 화면 전체를 덮어버려서
+// 키보드가 열리든 말든 같이 흔들리는 것처럼 보이지 않는다.
+let searchFullscreenMode = null; // null | "sub" | "cart"
+
+function searchFullscreenQuery() {
+  if (searchFullscreenMode === "sub") return subSearchQuery;
+  if (searchFullscreenMode === "cart") return cartSearchQuery;
+  return "";
+}
+
+function searchFullscreenResultsHtml(query) {
+  if (searchFullscreenMode === "sub") {
+    if (!query.trim()) return `<div class="card"><div class="empty">자재 이름을 입력해보세요</div></div>`;
+    return subSearchResultsHtml(query);
+  }
+  if (searchFullscreenMode === "cart") {
+    return cartGroupedItemsHtml(displayedCartItemsFor(query), cartDate === date, query);
+  }
+  return "";
+}
+
+function searchFullscreenPlaceholder() {
+  return searchFullscreenMode === "sub" ? "자재 이름으로 검색" : "자재 이름으로 검색 (이미 요청했는지 확인)";
+}
+
+function openSearchFullscreen(mode) {
+  searchFullscreenMode = mode;
+  renderSearchFullscreen();
+}
+
+function closeSearchFullscreen() {
+  if (!searchFullscreenMode) return;
+  searchFullscreenMode = null;
+  if (subSearchQuery) subSearchQuery = "";
+  if (cartSearchQuery) cartSearchQuery = "";
+  const root = document.getElementById("searchFullscreenRoot");
+  if (root) root.innerHTML = "";
+}
+
+// render()가 호출될 때마다(검색 중이 아닌 다른 화면 상태 변화로도) 전체
+// 화면 모드가 열려있다면 그 결과 리스트도 같이 최신 상태로 맞춰준다 —
+// 예를 들어 전체 화면 검색 중에 수량을 바꾸거나 상태를 토글하면 그 변경이
+// 바로 보여야 한다. 컨테이너 자체(#searchFullscreenResults)는 안 바뀌고
+// 내용만 갈아끼우므로, 거기 걸어둔 delegated 클릭 리스너는 그대로 유지된다.
+function refreshSearchFullscreenResults() {
+  if (!searchFullscreenMode) return;
+  const resultsEl = document.getElementById("searchFullscreenResults");
+  if (resultsEl) resultsEl.innerHTML = searchFullscreenResultsHtml(searchFullscreenQuery());
+}
+
+function renderSearchFullscreen() {
+  const root = document.getElementById("searchFullscreenRoot");
+  if (!root) return;
+  if (!searchFullscreenMode) { root.innerHTML = ""; return; }
+  const query = searchFullscreenQuery();
+  root.innerHTML = `
+    <div class="search-fullscreen-overlay">
+      <div class="sub-search-wrap">
+        <input type="text" id="searchFullscreenInput" class="sub-search-input" placeholder="${searchFullscreenPlaceholder()}" value="${escapeHtml(query)}" />
+        <button type="button" class="search-fullscreen-cancel-btn" id="searchFullscreenCancelBtn">취소</button>
+      </div>
+      <div class="search-fullscreen-results" id="searchFullscreenResults">${searchFullscreenResultsHtml(query)}</div>
+    </div>`;
+  const input = document.getElementById("searchFullscreenInput");
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+  // 결과 리스트만 갈아끼우고 입력창 자체는 절대 건드리지 않는다 — 전체를
+  // 다시 그리면(render()) 한글 조합 중 입력창 DOM이 깨지는 문제가 있다.
+  input.addEventListener("input", (e) => {
+    const q = e.target.value;
+    if (searchFullscreenMode === "sub") subSearchQuery = q;
+    else if (searchFullscreenMode === "cart") cartSearchQuery = q;
+    const resultsEl = document.getElementById("searchFullscreenResults");
+    if (resultsEl) resultsEl.innerHTML = searchFullscreenResultsHtml(q);
+  });
+  document.getElementById("searchFullscreenCancelBtn").addEventListener("click", () => {
+    closeSearchFullscreen();
+    render();
+  });
+  document.getElementById("searchFullscreenResults").addEventListener("click", (e) => {
+    if (searchFullscreenMode === "sub") {
+      const resultEl = e.target.closest("[data-search-result]");
+      if (!resultEl) return;
+      const m = materials.find((x) => x.id === resultEl.dataset.searchResult);
+      if (!m) return;
+      chosenSub = m.subCategory;
+      highlightMaterialId = m.id;
+      view = "items";
+      closeSearchFullscreen();
+      discardDraft();
+      render();
+      return;
+    }
+    if (searchFullscreenMode === "cart") handleCartItemsListClick(e);
+  });
+}
+
 function goToCart() {
   discardDraft();
   view = "cart";
@@ -234,6 +357,11 @@ function syncViewToUrl() {
 document.querySelectorAll(".bottom-tab[data-nav]").forEach((btn) => {
   btn.addEventListener("click", () => {
     const nav = btn.dataset.nav;
+    if (nav === "share") {
+      markShareNavBadgeSeen();
+      const badge = document.getElementById("shareNavBadge");
+      if (badge) badge.style.display = "none";
+    }
     if (nav === "cart") {
       goToCart();
       return;
@@ -278,8 +406,11 @@ async function loadCartDate(targetDate) {
     const snap = await getDocs(collection(db, "checks", targetDate, "items"));
     cartItems = snap.docs.map((d) => ({ id: d.id, ...d.data(), submitted: true }));
     chipCounts[targetDate] = cartItems.length;
+    const checkDocSnap = await getDoc(doc(db, "checks", targetDate));
+    cartDateReceiptCount = (checkDocSnap.exists() && checkDocSnap.data().allReceiptPhotosHistory || []).length;
   } catch (e) {
     cartItems = [];
+    cartDateReceiptCount = 0;
   }
   render();
 }
@@ -291,112 +422,6 @@ function loadAllChipCounts() {
       .then((snap) => { chipCounts[d] = snap.size; if (view === "cart") render(); })
       .catch(() => {});
   });
-}
-
-async function loadOrderTrend() {
-  trendLoading = true;
-  render();
-  // 횟수만으로는 "하루에 몰아서 여러 개 담았다"와 "매일 꾸준히 나간다"를
-  // 구분할 수 없어서, 요청된 날짜 수(dayCount)와 긴급/품절로 요청된 횟수도
-  // 같이 센다 — 인사이트 문장을 만드는 재료가 된다.
-  const stats = new Map(); // name -> { count, days:Set, urgentCount }
-  await Promise.all(
-    recentDates.map(async (d) => {
-      try {
-        const snap = await getDocs(collection(db, "checks", d, "items"));
-        snap.forEach((doc) => {
-          const data = doc.data();
-          const name = data.materialName;
-          if (!name) return;
-          if (!stats.has(name)) stats.set(name, { count: 0, days: new Set(), urgentCount: 0 });
-          const s = stats.get(name);
-          s.count += 1;
-          s.days.add(d);
-          if (data.urgency === "urgent" || data.urgency === "soldout") s.urgentCount += 1;
-        });
-      } catch (e) {
-        // 그 날짜에 담긴 기록이 없으면 건너뛴다.
-      }
-    })
-  );
-  trendData = [...stats.entries()]
-    .map(([name, s]) => ({ name, count: s.count, dayCount: s.days.size, urgentCount: s.urgentCount }))
-    .sort((a, b) => b.count - a.count);
-  trendLoading = false;
-  render();
-}
-
-// 순위 목록만으로는 "그래서 뭘 어떻게 하라는 건지"가 안 보여서, 데이터에서
-// 뽑아낼 수 있는 짧은 인사이트 문장 몇 개를 추가로 만든다 — 아직 1주일치
-// 데이터라 꺾은선 그래프로 보여주기엔 너무 들쭉날쭉해서, 지금은 이 정도가
-// 적당하다고 판단했다. 나중에 몇 달치가 쌓이면 그때 계절별 추이나 실제
-// 판매 데이터 연동까지 붙여서 제대로 된 차트로 확장하면 된다.
-function trendInsightsHtml() {
-  if (trendData.length === 0) return "";
-  const insights = [];
-  const top = trendData[0];
-  insights.push(`가장 자주 요청된 자재는 <strong>${escapeHtml(top.name)}</strong>이에요 (최근 7일간 ${top.count}회, ${top.dayCount}일에 걸쳐 요청).`);
-
-  const daily = trendData.filter((t) => t.dayCount >= recentDates.length - 1);
-  if (daily.length > 0) {
-    insights.push(`<strong>${daily.map((t) => escapeHtml(t.name)).join(", ")}</strong>${daily.length === 1 ? "은" : "는"} 거의 매일 요청되고 있어요 — 재고를 넉넉히 준비해두면 좋을 것 같아요.`);
-  }
-
-  const urgent = [...trendData].filter((t) => t.urgentCount > 0).sort((a, b) => b.urgentCount - a.urgentCount);
-  if (urgent.length > 0) {
-    insights.push(`<strong>${urgent.slice(0, 3).map((t) => escapeHtml(t.name)).join(", ")}</strong>${urgent.length === 1 ? "은" : "는"} 긴급/품절로 요청된 적이 있어요 — 재고 소진 주기를 한번 확인해보세요.`);
-  }
-
-  const burst = trendData.filter((t) => t.count >= 3 && t.dayCount === 1);
-  if (burst.length > 0) {
-    insights.push(`<strong>${burst.slice(0, 3).map((t) => escapeHtml(t.name)).join(", ")}</strong>${burst.length === 1 ? "은" : "는"} 하루에 몰아서 여러 번 요청됐어요 — 한 번에 더 넉넉히 시켜두면 반복 요청을 줄일 수 있어요.`);
-  }
-
-  return `
-    <div class="trend-insight-card">
-      <div class="trend-insight-title">💡 이번 주 인사이트</div>
-      <ul class="trend-insight-list">
-        ${insights.map((i) => `<li>${i}</li>`).join("")}
-      </ul>
-    </div>`;
-}
-
-function openOrderTrend() {
-  showTrendOverlay = true;
-  loadOrderTrend();
-  render();
-}
-
-function closeOrderTrend() {
-  showTrendOverlay = false;
-  render();
-}
-
-function orderTrendOverlayHtml() {
-  const maxCount = trendData.length > 0 ? trendData[0].count : 0;
-  return `
-    <div class="payroll-form-overlay" id="trendOverlay">
-      <div class="payroll-form-sheet">
-        <div class="row-between">
-          <div style="font-weight:800; font-size:16px;">📊 발주 트렌드</div>
-          <button class="payroll-form-close-btn" id="trendCloseBtn" aria-label="닫기">✕</button>
-        </div>
-        <div style="font-size:12px; color:var(--muted); margin:6px 0 14px;">최근 7일 동안 요청된 자재 기준</div>
-        ${trendLoading ? `<div class="empty">불러오는 중...</div>` : trendData.length === 0 ? `<div class="empty">최근 7일간 요청 기록이 없어요.</div>` : `
-        ${trendInsightsHtml()}
-        <div class="trend-list">
-          ${trendData.map((t, i) => `
-            <div class="trend-row">
-              <div class="trend-rank">${i + 1}</div>
-              <div class="trend-info">
-                <div class="trend-name">${escapeHtml(t.name)}${t.urgentCount > 0 ? " 🚨" : ""}</div>
-                <div class="trend-bar-track"><div class="trend-bar-fill" style="width:${maxCount ? Math.round((t.count / maxCount) * 100) : 0}%"></div></div>
-              </div>
-              <div class="trend-count">${t.count}회${t.dayCount > 1 ? ` · ${t.dayCount}일` : ""}</div>
-            </div>`).join("")}
-        </div>`}
-      </div>
-    </div>`;
 }
 
 // 사장님이 "전체 영수증"으로 첨부한 사진은 checks/{date}.allReceiptPhotosHistory에
@@ -422,6 +447,28 @@ async function openOwnerReceiptsOverlay() {
 function closeOwnerReceiptsOverlay() {
   showOwnerReceiptsOverlay = false;
   render();
+}
+
+// 담은 목록의 "사장님께 알리기" 버튼 — 오늘 아직 주문완료 처리 안 된
+// 건수를 그냥 한 번 상기시켜드리는 용도. 문서 하나만 남기면 functions/
+// index.js의 notifyOwnerUnorderedReminder가 알림을 보낸다 — 알림
+// 내용엔 누가 눌렀는지 일부러 안 담는다(익명 리마인더).
+async function nudgeOwnerAboutUnordered() {
+  const n = Object.values(synced).filter((it) => !it.ordered).length;
+  if (n <= 0) {
+    toast("오늘 미주문건이 없어요");
+    return;
+  }
+  try {
+    await addDoc(collection(db, "checks", date, "unorderedNudges"), {
+      count: n,
+      staffPhone,
+      createdAt: serverTimestamp(),
+    });
+    toast("사장님께 알려드렸습니다 😊");
+  } catch (e) {
+    toast("알리기에 실패했어요 — 다시 시도해주세요");
+  }
 }
 
 function ownerReceiptsOverlayHtml() {
@@ -458,6 +505,59 @@ async function loadYesterdayItems() {
   if (view === "items") render();
 }
 
+// 어제 요청했지만 사장님이 아직 주문완료 처리 안 한 자재는, 자재탭에서
+// 다시 찾아 담지 않아도 오늘 담은 목록에 자동으로 다시 올라오게 한다 —
+// "어제 요청드렸지만 주문되지 않았어요" 표시와 함께, 상태(긴급도)나 남은
+// 수량만 고쳐서 바로 다시 제출할 수 있도록. 오늘 이미 같은 자재를 직접
+// 담았거나 제출한 경우는 건너뛴다 — pending/synced 우선이 맞다.
+//
+// 세션당 한 번만 돈다: 매 렌더마다 다시 돌면, 직원이 이월된 항목을
+// "취소"로 치워도 다음 렌더에 다시 살아나버린다. 혹시 타이밍상 이미
+// synced된(오늘 직접 다시 제출한) 자재 위에 실수로 겹쳐 써도, 뒤이어
+// 도착하는 items 실시간 리스너가 "이미 synced면 pending 지움" 정리를
+// 해주므로 금방 바로잡힌다.
+let carryoverLoaded = false;
+async function loadCarryoverItems() {
+  if (carryoverLoaded) return;
+  carryoverLoaded = true;
+  let changed = false;
+  try {
+    const snap = await getDocs(collection(db, "checks", dateStrDaysAgo(1), "items"));
+    snap.docs.forEach((docSnap) => {
+      const data = docSnap.data();
+      const id = docSnap.id;
+      if (data.ordered) return;
+      // "주문완료" 체크는 깜빡했어도, 그 자재에 "선택 자재 영수증 첨부"로
+      // 영수증 사진을 따로 붙여뒀으면 실제로는 이미 주문한 거다 — 체크만
+      // 안 한 것뿐이라 또 요청할 필요가 없다.
+      if (data.ownerAttachedPhotos && data.ownerAttachedPhotos.length > 0) return;
+      if (synced[id] || pending[id]) return; // 오늘 이미 손댄 자재는 건너뛴다
+      if (dismissedCarryovers.has(id)) return; // 오늘 이미 "취소"로 뺀 적 있으면 다시 안 넣는다
+      pending[id] = {
+        action: "set",
+        materialName: data.materialName,
+        mainCategory: data.mainCategory || "기본자재",
+        subCategory: data.subCategory || "기타",
+        urgency: data.urgency,
+        note: data.note || "",
+        qty: data.qty || "",
+        orderQty: data.orderQty || 1,
+        photoUrls: data.photoUrls || [],
+        staffName,
+        carriedOverFrom: true,
+      };
+      changed = true;
+    });
+  } catch (e) {
+    // 어제 기록이 없으면 그냥 넘어간다.
+  }
+  if (changed) {
+    savePending();
+    cartItems = buildTodayCartItems();
+    render();
+  }
+}
+
 function yesterdayStatusLabel(materialId) {
   const y = yesterdayItems[materialId];
   if (!y) return "어제 발주요청 안 드린 자재예요";
@@ -467,6 +567,7 @@ function yesterdayStatusLabel(materialId) {
   }
   return "어제 요청드렸지만 주문되지 않음";
 }
+
 
 function selectedCountInMain(main) {
   let n = 0;
@@ -504,6 +605,7 @@ function render() {
   screenEl.style.display = "";
   updateBottomTabActive();
   updateCartNavBadge();
+  refreshSearchFullscreenResults();
   // 홈(자재선택)에서만 계정 카드(아바타/로그아웃/출근도장/극한직업 버튼)를
   // 보여주고, 다른 탭들은 바로 그 탭의 내용으로 들어가게 한다 — 바텀탭을
   // 누르면 이미 자기 홈(여기서는 자재선택)으로 갈 수 있으니 매 탭마다
@@ -579,40 +681,21 @@ function subSearchResultsHtml(query) {
     </div>`;
 }
 
-function wireSubSearchResults() {
-  const resultsEl = document.getElementById("subSearchResults");
-  if (!resultsEl) return;
-  resultsEl.querySelectorAll("[data-search-result]").forEach((el) => {
-    el.addEventListener("click", () => {
-      const m = materials.find((x) => x.id === el.dataset.searchResult);
-      if (!m) return;
-      chosenSub = m.subCategory;
-      subSearchQuery = "";
-      highlightMaterialId = m.id;
-      view = "items";
-      discardDraft();
-      render();
-    });
-  });
-}
-
 function renderSub() {
   const subs = sortByOrder(
     [...new Set(materials.filter((m) => m.mainCategory === chosenMain).map((m) => m.subCategory))],
     subcategoryOrder[chosenMain]
   );
-  const searching = !!subSearchQuery.trim();
 
   let html = `
     <div class="breadcrumb">
       <span class="step-label">${escapeHtml(chosenMain)}</span>
     </div>
     <div class="sub-search-wrap">
-      <input type="text" id="subSearchInput" class="sub-search-input" placeholder="자재 이름으로 검색" value="${escapeHtml(subSearchQuery)}" />
+      <input type="text" id="subSearchInput" class="sub-search-input" placeholder="자재 이름으로 검색" value="" readonly />
     </div>
     <div class="sub-list-hint">지금 사용하는 분 제외하고 예비 여분의 수량만 기입해주세요</div>
-    <div id="subSearchResults" style="display:${searching ? "block" : "none"};">${searching ? subSearchResultsHtml(subSearchQuery) : ""}</div>
-    <div id="subCategoryGrid" style="display:${searching ? "none" : "block"};">`;
+    <div id="subCategoryGrid">`;
 
   if (subs.length === 0) {
     html += `<div class="card"><div class="empty">이 분류에 등록된 자재가 없어요.</div></div>`;
@@ -641,16 +724,7 @@ function renderSub() {
 
   screenEl.innerHTML = html;
   document.getElementById("submitFromSub").addEventListener("click", () => submitCategory(chosenMain));
-  const subSearchInput = document.getElementById("subSearchInput");
-  subSearchInput.addEventListener("input", (e) => {
-    subSearchQuery = e.target.value;
-    const stillSearching = !!subSearchQuery.trim();
-    document.getElementById("subSearchResults").style.display = stillSearching ? "block" : "none";
-    document.getElementById("subCategoryGrid").style.display = stillSearching ? "none" : "block";
-    document.getElementById("subSearchResults").innerHTML = stillSearching ? subSearchResultsHtml(subSearchQuery) : "";
-    wireSubSearchResults();
-  });
-  wireSubSearchResults();
+  document.getElementById("subSearchInput").addEventListener("focus", () => openSearchFullscreen("sub"));
   screenEl.querySelectorAll("[data-sub]").forEach((el) => {
     el.addEventListener("click", () => {
       chosenSub = el.dataset.sub;
@@ -811,8 +885,14 @@ function renderItems() {
   });
 }
 
+function displayedCartItemsFor(query) {
+  const q = query.trim().toLowerCase();
+  return q ? cartItems.filter((it) => (it.materialName || "").toLowerCase().includes(q)) : cartItems;
+}
+
 function renderCart() {
   const isTodayCart = cartDate === date;
+  const receiptCountForView = isTodayCart ? todayOwnerReceiptCount : cartDateReceiptCount;
   let html = `
     <div class="breadcrumb">
       <button class="back-btn" id="backHome2">‹ 자재 선택</button>
@@ -823,17 +903,15 @@ function renderCart() {
         <label>최근 7일 (누구나 볼 수 있어요)</label>
         <div class="day-chip-row" id="cartDayChips"></div>
       </div>
-    </div>
-    ${isTodayCart ? `
-    <div style="display:flex; gap:8px; margin-bottom:14px;">
-      <button class="btn secondary" id="addMoreBtn" style="flex:1;">장바구니 더 담기</button>
-      <button class="btn secondary" id="orderTrendBtn" style="white-space:nowrap;">📊 발주 트렌드</button>
-    </div>` : `<button class="btn secondary block" id="orderTrendBtn" style="margin-bottom:14px;">📊 발주 트렌드</button>`}
-    <button class="btn secondary block" id="ownerReceiptsBtn" style="margin-bottom:14px;">📎 ${isTodayCart ? "오늘 " : ""}사장님이 첨부한 영수증 보기</button>`;
+      ${receiptCountForView <= 0 ? "" : `
+      <button type="button" class="receipt-clip-chip" id="ownerReceiptsBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        ${isTodayCart ? "오늘 " : ""}사장님이 첨부한 영수증<span class="receipt-clip-badge">${receiptCountForView}</span>
+      </button>`}
+    </div>`;
 
   if (cartItems.length === 0) {
     html += `<div class="card"><div class="cart-empty">이 날짜엔 담긴 자재가 없어요.</div></div>`;
-    if (showTrendOverlay) html += orderTrendOverlayHtml();
     if (showOwnerReceiptsOverlay) html += ownerReceiptsOverlayHtml();
     screenEl.innerHTML = html;
     wireCartNav();
@@ -843,35 +921,60 @@ function renderCart() {
   // 오늘 담은 목록엔 어제 이전부터 아직 주문 안 된 자재도 같이 섞여있어서,
   // "이거 어제 이미 요청했었나?" 확인하려고 매번 쭉 내려서 찾아야 했다 —
   // 자재명으로 바로 찾을 수 있게 검색창을 둔다.
-  const cartQ = cartSearchQuery.trim().toLowerCase();
-  const displayedCartItems = cartQ
-    ? cartItems.filter((it) => (it.materialName || "").toLowerCase().includes(cartQ))
-    : cartItems;
+  const displayedCartItems = displayedCartItemsFor(cartSearchQuery);
 
   if (isTodayCart) {
     html += `
     <div class="sub-search-wrap">
-      <input type="text" id="cartSearchInput" class="sub-search-input" placeholder="자재 이름으로 검색 (이미 요청했는지 확인)" value="${escapeHtml(cartSearchQuery)}" />
+      <input type="text" id="cartSearchInput" class="sub-search-input" placeholder="자재 이름으로 검색 (이미 요청했는지 확인)" value="" readonly />
     </div>`;
   }
 
-  if (cartQ && displayedCartItems.length === 0) {
-    html += `<div class="card"><div class="empty">"${escapeHtml(cartSearchQuery)}"와 일치하는 자재가 이 목록에 없어요.</div></div>`;
-    if (showTrendOverlay) html += orderTrendOverlayHtml();
-    if (showOwnerReceiptsOverlay) html += ownerReceiptsOverlayHtml();
-    screenEl.innerHTML = html;
-    wireCartNav();
-    return;
+  html += `<div id="cartItemsList">${cartGroupedItemsHtml(displayedCartItems, isTodayCart, cartSearchQuery)}</div>`;
+
+  if (showOwnerReceiptsOverlay) html += ownerReceiptsOverlayHtml();
+  screenEl.innerHTML = html;
+  wireCartNav();
+}
+
+// 검색창에 한글 입력 중 매번 전체 화면을 다시 그리면(render()) 한글
+// 조합(초성+중성+종성)이 깨진다 — 조합 중에 입력창 DOM 자체가 통째로
+// 교체되면 IME가 지금 어느 글자를 조합 중인지 잃어버려서 "흔들리고
+// 받침이 안 붙는" 증상이 난다. 그래서 목록 부분만 따로 함수로 빼서,
+// 검색어가 바뀔 때는 #cartItemsList의 내용만 갈아끼우고 입력창 자체는
+// 절대 건드리지 않는다 (아래 wireCartNav의 delegated 리스너 참고).
+function cartGroupedItemsHtml(items, isTodayCart, searchQuery) {
+  if (searchQuery.trim() && items.length === 0) {
+    return `<div class="card"><div class="empty">"${escapeHtml(searchQuery)}"와 일치하는 자재가 이 목록에 없어요.</div></div>`;
   }
+  let html = "";
 
   function cartItemRowHtml(it, showSub) {
-    const canChangeStatus = isTodayCart && !it.ordered;
+    // 제출된(공유된) 자재는 제출한 사람만 상태(보통/긴급/품절)를 바꿀 수
+    // 있다 — canDelete와 같은 기준: staffPhone이 없는(자동 담김) 자재는
+    // 누구 것도 아니라서 누구나 바꿀 수 있게 둔다.
+    const canChangeStatus = isTodayCart && !it.ordered && (!it.staffPhone || it.staffPhone === staffPhone);
     const pickerOpen = statusPickerFor.has(it.id);
     const otherUrgencies = URGENCY_ORDER.filter((u) => u !== it.urgency);
+    // 아직 제출 전(로컬 pending)인 자재는 남은 수량을 담은 뒤에도 "수정"
+    // 버튼으로 고칠 수 있다 — 전에는 자재탭에서 처음 담을 때만 적을 수
+    // 있고 담고 나면 못 고쳤는데, 이월된 자재는 수량이 바뀌어있을 수 있어서
+    // 꼭 필요하다. 이미 제출됐거나(사장님이 보는 중) 주문완료된 건 그대로
+    // 고정 표시. 평소엔 기존 "OO남음" 배지 그대로 보여주고, 수정 중일 때만
+    // 그 자리 대신 입력창+저장 버튼을 보여준다(목록이 입력창으로 가득 차지
+    // 않도록).
+    const qtyEditable = isTodayCart && !it.submitted && !it.ordered;
+    const qtyEditing = qtyEditingFor.has(it.id);
     return `
       <div class="item-row ${it.ordered ? "ordered" : ""}">
         <div style="flex:1">
-          <div class="name"><span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${showSub && it.subCategory ? `<span class="subcat-inline-tag">${escapeHtml(it.subCategory)}</span>` : ""}${it.autoAdded ? `<span class="subcat-inline-tag">2일마다 자동</span>` : ""}${it.qty ? `<span class="qty-pill">${escapeHtml(qtyRemainingLabel(it.qty))}</span>` : ""}${it.orderQty && it.orderQty > 1 ? `<span class="qty-pill">요청 ${it.orderQty}개</span>` : ""}</div>
+          <div class="name"><span class="dot ${it.urgency}"></span>${escapeHtml(it.materialName)}${showSub && it.subCategory ? `<span class="subcat-inline-tag">${escapeHtml(it.subCategory)}</span>` : ""}${it.autoAdded ? `<span class="subcat-inline-tag">2일마다 자동</span>` : ""}${!qtyEditing && it.qty ? `<span class="qty-pill">${escapeHtml(qtyRemainingLabel(it.qty))}</span>` : ""}${qtyEditable && !qtyEditing ? `<button type="button" class="qty-edit-btn" data-cart-qty-edit-toggle="${it.id}">수정</button>` : ""}${it.orderQty && it.orderQty > 1 ? `<span class="qty-pill">요청 ${it.orderQty}개</span>` : ""}</div>
+          ${it.carriedOverFrom ? `<div class="carryover-tag">⏮ 어제 요청드렸지만 주문되지 않았어요</div>` : ""}
+          ${qtyEditing ? `
+            <div class="qty-edit-row">
+              <input type="text" class="qty-edit-input" data-cart-qty-edit="${it.id}" data-cart-qty-auto="${it.autoAdded ? "1" : ""}" value="${escapeHtml(it.qty || "")}" placeholder="남은 수량 (예: 2개)" />
+              <button type="button" class="qty-edit-save-btn" data-cart-qty-save="${it.id}">저장</button>
+            </div>` : ""}
           ${it.note ? `<div class="note">${escapeHtml(it.note)}</div>` : ""}
           ${materialPhotoUrlsOf(it).map((url) => `<img src="${url}" class="note-photo-thumb" data-receipt-lightbox="${url}" alt="첨부 사진" />`).join("")}
           ${it.ordered && it.receiptPhotos && it.receiptPhotos.length > 0 ? `
@@ -910,7 +1013,7 @@ function renderCart() {
   }
 
   const byMain = {};
-  for (const it of displayedCartItems) {
+  for (const it of items) {
     const m = it.mainCategory || "기본자재";
     if (!byMain[m]) byMain[m] = [];
     byMain[m].push(it);
@@ -920,15 +1023,24 @@ function renderCart() {
     html += `<div class="cart-status-hint">탭하면 상태를 변경할 수 있어요</div>`;
   }
 
+  const unorderedTodayCount = Object.values(synced).filter((it) => !it.ordered).length;
   for (const main of MAIN_CATS) {
     if (!byMain[main]) continue;
-    html += `<div class="category-title">${escapeHtml(main)}<span class="sub">${byMain[main].length}건</span></div>`;
+    const showNudgeBtn = isTodayCart && main === "기본자재" && unorderedTodayCount > 0;
+    html += `<div class="category-title row-between"><span>${escapeHtml(main)}<span class="sub">${byMain[main].length}건</span></span>${showNudgeBtn ? `<button type="button" class="nudge-owner-chip" data-nudge-owner="1">🔔 사장님께 알리기</button>` : ""}</div>`;
 
     // 품절/긴급 항목은 소분류에 상관없이 이 대분류 카드 맨 위에 따로 모아서
     // 보여준다 — 사장님 화면과 동일하게 맞춘다. 정상 발주 항목만 기존처럼
-    // 소분류별로 묶는다.
-    const soldoutItems = byMain[main].filter((it) => it.urgency === "soldout");
-    const urgentItems = byMain[main].filter((it) => it.urgency === "urgent");
+    // 소분류별로 묶는다. 어느 쪽이든 자재탭(기본자재 탭)에서 보이는 소분류
+    // 순서(컵>뚜껑>원두>빨대 등, 자재관리에서 정해둔 순서)를 그대로 따라야
+    // 한다 — 요청 들어온 순서대로 쌓이면 찾기 불편하다.
+    const subOrder = subcategoryOrder[main] || [];
+    const subRank = {};
+    subOrder.forEach((name, i) => { subRank[name] = i; });
+    const bySubOrder = (it) => subRank[it.subCategory] ?? 9999;
+
+    const soldoutItems = byMain[main].filter((it) => it.urgency === "soldout").sort((a, b) => bySubOrder(a) - bySubOrder(b));
+    const urgentItems = byMain[main].filter((it) => it.urgency === "urgent").sort((a, b) => bySubOrder(a) - bySubOrder(b));
     const normalItems = byMain[main].filter((it) => it.urgency !== "urgent" && it.urgency !== "soldout");
 
     const bySub = {};
@@ -950,7 +1062,7 @@ function renderCart() {
     if (normalItems.length > 0) {
       const isFirstGroup = soldoutItems.length === 0 && urgentItems.length === 0;
       html += `<div class="subcat-title urgency-caption normal" style="margin-top:${isFirstGroup ? "0" : "14px"};"><span class="urgency-caption-label">${URGENCY_LABEL.normal}</span>${URGENCY_GROUP_CAPTION.normal}</div>`;
-      const subs = Object.keys(bySub);
+      const subs = sortByOrder(Object.keys(bySub), subOrder);
       subs.forEach((sub) => {
         html += `<div class="subcat-title" style="margin-top:14px">${escapeHtml(sub)}</div>`;
         for (const it of bySub[sub]) html += cartItemRowHtml(it, false);
@@ -967,15 +1079,13 @@ function renderCart() {
     }
   }
 
-  if (showTrendOverlay) html += orderTrendOverlayHtml();
-  if (showOwnerReceiptsOverlay) html += ownerReceiptsOverlayHtml();
-  screenEl.innerHTML = html;
-  wireCartNav();
+  return html;
 }
 
 async function changeCartItemUrgency(id, newUrgency) {
   const it = cartItems.find((x) => x.id === id);
   if (!it || it.ordered) return;
+  if (it.staffPhone && it.staffPhone !== staffPhone) return;
   if (it.submitted) {
     await updateDoc(doc(itemsCol, id), { urgency: newUrgency });
   } else if (pending[id]) {
@@ -1017,26 +1127,7 @@ function renderPayroll() {
 function wireCartNav() {
   document.getElementById("backHome2").addEventListener("click", () => { view = "main"; render(); });
   const cartSearchInput = document.getElementById("cartSearchInput");
-  if (cartSearchInput) {
-    cartSearchInput.addEventListener("input", (e) => {
-      cartSearchQuery = e.target.value;
-      render();
-    });
-    if (document.activeElement !== cartSearchInput && cartSearchQuery) {
-      // 검색어 입력 중 다시 그려질 때도 커서가 유지되도록, 포커스+커서 위치를 복원한다.
-      cartSearchInput.focus();
-      cartSearchInput.setSelectionRange(cartSearchInput.value.length, cartSearchInput.value.length);
-    }
-  }
-  const addMoreBtn = document.getElementById("addMoreBtn");
-  if (addMoreBtn) addMoreBtn.addEventListener("click", () => { view = "main"; render(); });
-  const trendBtn = document.getElementById("orderTrendBtn");
-  if (trendBtn) trendBtn.addEventListener("click", openOrderTrend);
-  const trendOverlay = document.getElementById("trendOverlay");
-  if (trendOverlay) {
-    trendOverlay.addEventListener("click", (e) => { if (e.target === trendOverlay) closeOrderTrend(); });
-    document.getElementById("trendCloseBtn").addEventListener("click", closeOrderTrend);
-  }
+  if (cartSearchInput) cartSearchInput.addEventListener("focus", () => openSearchFullscreen("cart"));
   const ownerReceiptsBtn = document.getElementById("ownerReceiptsBtn");
   if (ownerReceiptsBtn) ownerReceiptsBtn.addEventListener("click", openOwnerReceiptsOverlay);
   const ownerReceiptsOverlay = document.getElementById("ownerReceiptsOverlay");
@@ -1067,29 +1158,69 @@ function wireCartNav() {
     });
   });
 
-  screenEl.querySelectorAll("[data-submit]").forEach((el) => {
-    el.addEventListener("click", () => submitCategory(el.dataset.submit));
-  });
-  screenEl.querySelectorAll("[data-remove]").forEach((el) => {
-    el.addEventListener("click", () => deleteSubmittedItem(el.dataset.remove));
-  });
-  screenEl.querySelectorAll("[data-cart-cancel]").forEach((el) => {
-    el.addEventListener("click", () => cancelPendingCartItem(el.dataset.cartCancel));
-  });
-  screenEl.querySelectorAll("[data-status-toggle]").forEach((el) => {
-    el.addEventListener("click", () => {
-      const id = el.dataset.statusToggle;
-      if (statusPickerFor.has(id)) statusPickerFor.delete(id);
-      else statusPickerFor.add(id);
-      render();
-    });
-  });
-  screenEl.querySelectorAll("[data-status-pick]").forEach((el) => {
-    el.addEventListener("click", () => changeCartItemUrgency(el.dataset.statusPick, el.dataset.statusValue));
-  });
-  screenEl.querySelectorAll("[data-cart-qty-delta]").forEach((el) => {
-    el.addEventListener("click", () => onCartOrderQtyDelta(el.dataset.cartId, !!el.dataset.cartAuto, parseInt(el.dataset.cartQtyDelta, 10)));
-  });
+  // 자재 행들은 검색어 입력마다 #cartItemsList만 통째로 다시 그려지므로
+  // (위 cartSearchInput 핸들러 참고), 행 하나하나에 리스너를 다는 대신
+  // 바뀌지 않는 #cartItemsList 자체에 한 번만 걸어두는 delegated 리스너로
+  // 처리한다 — 그래야 재검색 후에도 행 클릭이 계속 동작한다.
+  const cartItemsList = document.getElementById("cartItemsList");
+  if (cartItemsList) cartItemsList.addEventListener("click", handleCartItemsListClick);
+}
+
+// #cartItemsList(담은 목록 화면)와 전체화면 검색 모드의 결과 리스트
+// 둘 다 같은 모양의 자재 행을 보여주므로, 행 클릭 처리도 하나의 함수로
+// 공유한다 — 데이터는 변경되지 않고 어느 쪽 컨테이너에서 눌렸는지만
+// 다르다.
+function handleCartItemsListClick(e) {
+  const nudgeEl = e.target.closest("[data-nudge-owner]");
+  if (nudgeEl) { nudgeOwnerAboutUnordered(); return; }
+  const submitEl = e.target.closest("[data-submit]");
+  if (submitEl) { submitCategory(submitEl.dataset.submit); return; }
+  const removeEl = e.target.closest("[data-remove]");
+  if (removeEl) { deleteSubmittedItem(removeEl.dataset.remove); return; }
+  const cancelEl = e.target.closest("[data-cart-cancel]");
+  if (cancelEl) { cancelPendingCartItem(cancelEl.dataset.cartCancel); return; }
+  const toggleEl = e.target.closest("[data-status-toggle]");
+  if (toggleEl) {
+    const id = toggleEl.dataset.statusToggle;
+    if (statusPickerFor.has(id)) statusPickerFor.delete(id);
+    else statusPickerFor.add(id);
+    render();
+    return;
+  }
+  const pickEl = e.target.closest("[data-status-pick]");
+  if (pickEl) { changeCartItemUrgency(pickEl.dataset.statusPick, pickEl.dataset.statusValue); return; }
+  const qtyEl = e.target.closest("[data-cart-qty-delta]");
+  if (qtyEl) { onCartOrderQtyDelta(qtyEl.dataset.cartId, !!qtyEl.dataset.cartAuto, parseInt(qtyEl.dataset.cartQtyDelta, 10)); return; }
+  const qtyEditToggleEl = e.target.closest("[data-cart-qty-edit-toggle]");
+  if (qtyEditToggleEl) { qtyEditingFor.add(qtyEditToggleEl.dataset.cartQtyEditToggle); render(); return; }
+  const qtySaveEl = e.target.closest("[data-cart-qty-save]");
+  if (qtySaveEl) {
+    const id = qtySaveEl.dataset.cartQtySave;
+    const row = qtySaveEl.closest(".item-row");
+    const input = row ? row.querySelector("[data-cart-qty-edit]") : null;
+    saveCartQtyEdit(id, !!(input && input.dataset.cartQtyAuto), input ? input.value : "");
+    return;
+  }
+}
+
+// "수정" 눌러서 입력창이 뜬 상태에서 "저장"을 눌렀을 때만 실제로 반영한다
+// — 그 전까지는 로컬 상태도 안 건드려서, 입력하다 다른 데를 눌러도 원래
+// 값이 그대로 남는다. autoPending(여러 직원이 공유하는 2일 자동 자재)은
+// 서버에도 바로 반영해서 다른 직원 화면에도 보이게 한다.
+async function saveCartQtyEdit(id, isAuto, value) {
+  if (isAuto) {
+    if (!autoPending[id]) return;
+    autoPending[id] = { ...autoPending[id], qty: value };
+    await updateDoc(doc(db, "checks", date, "autoPending", id), { qty: value || "" }).catch(() => {});
+  } else {
+    if (!pending[id]) return;
+    pending[id] = { ...pending[id], qty: value };
+    savePending();
+  }
+  const it = cartItems.find((x) => x.id === id);
+  if (it) it.qty = value;
+  qtyEditingFor.delete(id);
+  render();
 }
 
 // Same "요청 수량" stepper as the item-selection screen, but for items that
@@ -1122,6 +1253,12 @@ async function cancelPendingCartItem(id) {
     if (!confirm(`'${p.materialName}'을(를) 장바구니에서 뺄까요?`)) return;
     delete pending[id];
     savePending();
+    // 이월된 자재였다면, 다음 새로고침 때 loadCarryoverItems()가 또
+    // 집어넣지 않도록 "오늘은 이미 뺐다"고 기억해둔다.
+    if (p.carriedOverFrom) {
+      dismissedCarryovers.add(id);
+      saveDismissedCarryovers();
+    }
     cartItems = buildTodayCartItems();
     render();
     return;
@@ -1496,6 +1633,7 @@ async function main() {
   if ("Notification" in window && Notification.permission === "granted") registerPushToken(staffPhone);
 
   loadPending();
+  loadDismissedCarryovers();
   itemsCol = collection(db, "checks", date, "items");
 
   onSnapshot(collection(db, "materials"), (snap) => {
@@ -1539,17 +1677,30 @@ async function main() {
     render();
   });
 
+  onSnapshot(doc(db, "checks", date), (snap) => {
+    todayOwnerReceiptCount = (snap.exists() && snap.data().allReceiptPhotosHistory || []).length;
+    render();
+  });
+
   // Start the share-board listener right away so the bottom tab's
   // unseen-count badge is live even before the user opens 공유하기.
   const shareNavBadge = document.getElementById("shareNavBadge");
   watchUnseenCount({ name: staffName, phone: staffPhone }, () => {
-    const n = getTodayUnseenCount(staffPhone);
-    if (n > 0) { shareNavBadge.textContent = "N"; shareNavBadge.style.display = "flex"; }
+    if (hasUnseenShareActivity(staffPhone)) { shareNavBadge.textContent = "N"; shareNavBadge.style.display = "flex"; }
     else shareNavBadge.style.display = "none";
+  });
+
+  // 등록해요(시재/선결제) 탭도 같은 방식으로 — 열어보지 않아도 변화가
+  // 있으면 바로 N배지가 뜬다.
+  const registerNavBadge = document.getElementById("registerNavBadge");
+  watchRegisterUnseen({ name: staffName, phone: staffPhone }, () => {
+    if (hasUnseenRegisterActivity()) { registerNavBadge.textContent = "N"; registerNavBadge.style.display = "flex"; }
+    else registerNavBadge.style.display = "none";
   });
 
   loadAllChipCounts();
   loadYesterdayItems();
+  loadCarryoverItems();
   watchNotificationBadge(notifyBadgeEl, staffPhone);
   render();
   scrollTopSafely();
