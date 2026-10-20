@@ -5,16 +5,32 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
 <meta name="theme-color" content="#fbf3e6" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
 <meta name="apple-mobile-web-app-title" content="MAMORY" />
 <link rel="manifest" href="manifest.json" />
 <link rel="apple-touch-icon" href="icons/icon-192.png?v=4" />
 <link rel="icon" href="icons/icon-192.png?v=4" />
 <title>자재 발주 담기 - MAMORY</title>
 <style>html,body{background:#efece4}</style>
-<link rel="stylesheet" href="css/style.css?v=134" />
+<link rel="stylesheet" href="css/style.css?v=154" />
+<style>
+  /* The page itself never needs to scroll — only #pageScroll inside it does.
+     Pinning html/body removes the native scroll viewport entirely, which is
+     what was letting iOS blur/bounce the top edge during scroll. */
+  html{position:fixed; inset:0; height:100%; overflow:hidden;}
+  /* padding-bottom:0 here — the shared body.has-bottom-tabs rule's 108px
+     would otherwise shrink this fixed box's padding-box, and since
+     #pageScroll's inset:0 is measured from THAT padding edge (not the true
+     screen edge), the two 108px clearances would stack instead of being
+     the single clearance #pageScroll already applies to itself. */
+  body{position:fixed; inset:0; width:100%; height:100%; overflow:hidden; overscroll-behavior:none;}
+  /* Matches body.has-bottom-tabs's own specificity so this actually wins
+     (a bare "body" selector above would lose to that class selector). */
+  body.has-bottom-tabs{padding-bottom:0;}
+</style>
 </head>
 <body class="has-bottom-tabs">
+<div id="pageScroll">
 <header class="topbar">
   <div class="brandrow">
     <div>
@@ -74,6 +90,7 @@
 
   <button type="button" class="btn humanity-trigger-btn block humanity-banner-btn" id="humanityBtn">😠 오늘 극한직업 느꼈다면 😠</button>
 </main>
+</div>
 
 <div id="humanityOverlayRoot"></div>
 <div id="onboardingOverlayRoot"></div>

@@ -20,10 +20,14 @@ messaging.onBackgroundMessage((payload) => {
   // auto-display plus this handler's own showNotification() call was
   // showing every push twice. This is now the single place a notification
   // gets shown.
-  const { title, body, link } = payload.data || {};
+  const { title, body, link, iconUrl } = payload.data || {};
   self.registration.showNotification(title || "MAMORY", {
     body: body || "",
-    icon: "/icons/icon-192.png",
+    // 특정 계정의 행동이면 그 사람 프로필 사진, 발주 확인처럼 모리 이미지가
+    // 맞는 시스템 알림은 모리 이미지 — 서버(functions/index.js)가 골라서
+    // 보내준 URL을 그대로 쓰고, 없으면(대부분의 익명/시스템 알림) 기본
+    // 앱 아이콘을 쓴다.
+    icon: iconUrl || "/icons/icon-192.png",
     tag: payload.messageId || `${title}-${body}`,
     // Stashed on the Notification itself so notificationclick below can read
     // it back — FCM's own webpush.fcmOptions.link auto-open only applies to
@@ -94,7 +98,7 @@ async function bumpAppBadge() {
   }
 }
 
-const CACHE_NAME = "cafe-order-v83";
+const CACHE_NAME = "cafe-order-v121";
 const APP_SHELL = [
   "index.html",
   "staff.html",

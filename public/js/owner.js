@@ -668,6 +668,7 @@ async function shareOrderedChecks() {
 }
 
 function render() {
+  const isToday = datePick.value === todayStr();
   const newCount = items.filter((i) => !i.ordered).length;
   newRequestText.textContent = newCount > 0 ? `신규 발주 요청 ${newCount}건` : "신규 발주 요청이 없습니다";
   newRequestCard.classList.toggle("new", newCount > 0);
@@ -762,7 +763,7 @@ function render() {
     }
 
     if (urgentItems.length > 0) {
-      html += `<div class="subcat-title urgency-caption urgent" style="margin-top:${soldoutItems.length > 0 ? "14px" : "0"};"><span class="urgency-caption-label">${URGENCY_LABEL.urgent}</span>${URGENCY_GROUP_CAPTION.urgent}</div>`;
+      html += `<div class="subcat-title urgency-caption urgent${isToday ? " urgency-caption-blink" : ""}" style="margin-top:${soldoutItems.length > 0 ? "14px" : "0"};"><span class="urgency-caption-label">${URGENCY_LABEL.urgent}</span>${URGENCY_GROUP_CAPTION.urgent}</div>`;
       for (const it of sortItems(urgentItems)) html += itemRowHtml(it, true);
     }
 

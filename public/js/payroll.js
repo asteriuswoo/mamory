@@ -863,6 +863,7 @@ function payslipHtml(cycleShifts, cycleLabel) {
     <div class="card">
       <div class="row-between"><strong>${sumIcon("plus")}지급 합계</strong><strong>${Math.round(gross).toLocaleString()}원</strong></div>
       ${row("근무 수당", totals.base)}
+      ${totals.hours > 0 ? `<div class="payroll-wage-breakdown-hint">시급 ${hourlyWage.toLocaleString()}원 × ${totals.hours % 1 === 0 ? totals.hours : totals.hours.toFixed(1)}시간(${cycleShifts.length}일)</div>` : ""}
       <div class="payroll-admin-shift-header">근무 내역</div>
       ${cycleShifts.map((s) => {
         const p = computeShiftPay(s, hourlyWage);
@@ -1524,9 +1525,210 @@ function ensureAdminStarted() {
   });
 }
 
+// 이 화면엔 달력이 4개(근무내역/출퇴근기록/사장님 전직원 출퇴근/스케줄) 있고
+// 전부 매번 innerHTML을 통째로 다시 그려서, 달력 그리드 자체에 직접 스와이프
+// 리스너를 달면 다시 그릴 때마다 날아간다 — 그래서 절대 다시 안 그려지는
+// rootEl 하나에만 위임해서 걸어둔다(mountPayrollBoard는 탭에 새로 들어올
+// 때만 불려서 매번 새 rootEl을 받으므로 중복으로 쌓이지 않는다). 4개 달력이
+// 각자 다른 상태변수/다른 재조회 로직(월 데이터 다시 불러오기 등)을 쓰고
+// 있어서, 그 로직을 다시 베끼는 대신 그 달력의 이전/다음 버튼을 찾아서
+// 그냥 클릭해준다 — 버튼 하나가 이미 하던 일(상태 변경 + 데이터 재조회 +
+// 재렌더)을 그대로 재사용하는 셈.
+//
+// 손가락을 따라 그리드가 실제로 밀려야(드래그 추적) "넘어가는 중"이라는
+// 느낌이 나고, 기준치를 못 넘기고 손을 떼면 제자리로 돌아와야 "안 넘어갔다"는
+// 게 눈에 보인다 — 그래서 월 전환은 세 단계로 나눈다: ① 손가락을 따라
+// translateX로 실시간 이동 ② 손을 뗀 순간 기준치를 넘었으면 화면 밖으로
+// 끝까지 밀어내고, 그 트랜지션이 끝나야 실제로 버튼을 눌러 월을 바꾼다
+// ③ 버튼을 누르면 즉시(동기적으로) 새 그리드가 그 자리에 다시 그려지는데,
+// 반대쪽 화면 밖에서 시작하도록 transform을 미리 걸어두고 한 프레임 뒤에
+// 0으로 트랜지션시켜서 "다음 달이 이어서 들어온다"는 느낌을 만든다.
+// 각 달력의 "지금 보여주는 연/월" 상태변수와, 그 상태만으로(추가 fetch 없이)
+// 카드 전체 HTML을 순수하게 다시 만들어내는 함수를 짝지어둔다 — 이걸로
+// 드래그 중에 옆 달(이전/다음) 미리보기 그리드를 실제로 그려서 보여줄 수
+// 있다. 버튼 id의 접두어("shiftCal"/"attCal"/"adminAttCal"/"scheduleCal")로
+// 지금 스와이프 중인 게 어느 달력인지 구분한다.
+const CALENDAR_KINDS = {
+  shiftCal: { getYM: () => [shiftCalYear, shiftCalMonth], setYM: (y, m) => { shiftCalYear = y; shiftCalMonth = m; }, buildHtml: () => myShiftCalendarHtml() },
+  attCal: { getYM: () => [attCalYear, attCalMonth], setYM: (y, m) => { attCalYear = y; attCalMonth = m; }, buildHtml: () => attendanceCalendarHtml() },
+  adminAttCal: { getYM: () => [adminAttCalYear, adminAttCalMonth], setYM: (y, m) => { adminAttCalYear = y; adminAttCalMonth = m; }, buildHtml: () => adminAttendanceCalendarHtml() },
+  scheduleCal: { getYM: () => [scheduleCalYear, scheduleCalMonth], setYM: (y, m) => { scheduleCalYear = y; scheduleCalMonth = m; }, buildHtml: () => scheduleCalendarHtml() },
+};
+
+function calendarKindFromButtonId(id) {
+  if (!id) return null;
+  const key = id.replace(/(Prev|Next)Month$/, "");
+  return CALENDAR_KINDS[key] || null;
+}
+
+// kind의 실제 상태(연/월)는 손대지 않고, direction(±1)만큼 옮긴 달의 카드
+// HTML을 한 번 뽑아낸 뒤 그 안의 .payroll-calendar-grid만 떼어 돌려준다 —
+// 데이터가 그 달 것만 따로 불러와지는 달력(출퇴근기록 등)은 숫자 칸은
+// 맞지만 그 안의 도장/일정 내용은 비어 보일 수 있다 — 실제 버튼을 눌러
+// 데이터까지 새로 불러오면 바로 맞게 채워진다. 미리보기일 뿐이라 상태는
+// 즉시 원래 값으로 되돌려서 화면 밖 다른 곳엔 영향이 없다.
+function buildPreviewGrid(kind, direction) {
+  const [y, m] = kind.getYM();
+  let ny = y;
+  let nm = m + direction;
+  if (nm < 0) { nm = 11; ny -= 1; }
+  if (nm > 11) { nm = 0; ny += 1; }
+  kind.setYM(ny, nm);
+  const html = kind.buildHtml();
+  kind.setYM(y, m);
+  const tmp = document.createElement("div");
+  tmp.innerHTML = html;
+  const grid = tmp.querySelector(".payroll-calendar-grid");
+  if (grid) grid.classList.add("payroll-calendar-grid-preview");
+  return grid;
+}
+
+function wireCalendarSwipe() {
+  if (!rootEl) return;
+  const SWIPE_THRESHOLD = 40;
+  const SLIDE_MS = 200;
+  let startX = null;
+  let startY = null;
+  let dragging = false;
+  let activeGrid = null;
+  let activeContainer = null;
+  let activeKind = null;
+  let prevPreview = null;
+  let nextPreview = null;
+  let gridWidth = 0;
+
+  function clearPreviews() {
+    if (prevPreview) prevPreview.remove();
+    if (nextPreview) nextPreview.remove();
+    prevPreview = null;
+    nextPreview = null;
+  }
+
+  rootEl.addEventListener("touchstart", (e) => {
+    clearPreviews();
+    const container = e.target.closest(".payroll-calendar");
+    const grid = container && container.querySelector(".payroll-calendar-grid");
+    const navBtn = container && container.querySelector('[id$="PrevMonth"], [id$="NextMonth"]');
+    const kind = navBtn && calendarKindFromButtonId(navBtn.id);
+    if (!grid || !kind) { activeGrid = null; return; }
+    activeGrid = grid;
+    activeContainer = container;
+    activeKind = kind;
+    startX = e.touches[0].clientX;
+    startY = e.touches[0].clientY;
+    dragging = false;
+    grid.style.transition = "none";
+  }, { passive: true });
+
+  rootEl.addEventListener("touchmove", (e) => {
+    if (!activeGrid) return;
+    const touch = e.touches[0];
+    const dx = touch.clientX - startX;
+    const dy = touch.clientY - startY;
+    if (!dragging) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return; // 아직 방향을 판단할 만큼 안 움직임
+      if (Math.abs(dx) <= Math.abs(dy)) { activeGrid = null; return; } // 세로 스크롤 의도 — 포기
+      dragging = true;
+      gridWidth = activeGrid.getBoundingClientRect().width || 320;
+      // 옆 달 미리보기 두 개를 드래그 시작과 동시에 만들어서, 화면 밖
+      // 양쪽에 미리 걸어둔다 — 그래야 어느 쪽으로 밀든 그 즉시 옆 달
+      // 내용이 같이 따라와 보인다(빈 여백이 아니라).
+      //
+      // top/left/width를 "0"/"100%"로 주면 absolute 요소의 퍼센트 기준이
+      // 부모의 패딩 박스라서, 패딩(12px)만큼 실제 그리드보다 더 넓고 왼쪽
+      // 으로 치우치게 자리잡는다 — 그래서 넘어가는 순간 그리드가 잠깐
+      // 커졌다가 제자리로 줄어드는 것처럼 보였다. 실제 그리드의 측정값
+      // (offsetTop/offsetLeft/실측 너비)을 그대로 픽셀로 못박아서 완전히
+      // 같은 자리·같은 크기로 겹치게 한다.
+      // .payroll-calendar는 CSS에서 이미 position:relative라서(스와이프
+      // 전용으로 추가한 속성), offsetTop/offsetLeft가 지금 바로 이 카드
+      // 기준으로 정확히 측정된다 — 예전엔 여기서 position을 런타임에
+      // 나중에 걸어서, 측정 시점엔 아직 static이라 엉뚱한(더 바깥) 조상
+      // 기준으로 잘못 잡혔었다(그래서 미리보기가 안 보이는 자리에 있었다).
+      const gridTop = activeGrid.offsetTop;
+      const gridLeft = activeGrid.offsetLeft;
+      prevPreview = buildPreviewGrid(activeKind, -1);
+      nextPreview = buildPreviewGrid(activeKind, 1);
+      if (prevPreview) {
+        prevPreview.style.position = "absolute";
+        prevPreview.style.top = `${gridTop}px`;
+        prevPreview.style.left = `${gridLeft}px`;
+        prevPreview.style.width = `${gridWidth}px`;
+        prevPreview.style.transform = `translateX(${-gridWidth}px)`;
+        activeContainer.appendChild(prevPreview);
+      }
+      if (nextPreview) {
+        nextPreview.style.position = "absolute";
+        nextPreview.style.top = `${gridTop}px`;
+        nextPreview.style.left = `${gridLeft}px`;
+        nextPreview.style.width = `${gridWidth}px`;
+        nextPreview.style.transform = `translateX(${gridWidth}px)`;
+        activeContainer.appendChild(nextPreview);
+      }
+    }
+    activeGrid.style.transform = `translateX(${dx}px)`;
+    if (prevPreview) prevPreview.style.transform = `translateX(${-gridWidth + dx}px)`;
+    if (nextPreview) nextPreview.style.transform = `translateX(${gridWidth + dx}px)`;
+  }, { passive: true });
+
+  rootEl.addEventListener("touchend", (e) => {
+    const grid = activeGrid;
+    const container = activeContainer;
+    const kind = activeKind;
+    const pPrev = prevPreview;
+    const pNext = nextPreview;
+    activeGrid = null;
+    activeContainer = null;
+    activeKind = null;
+    prevPreview = null;
+    nextPreview = null;
+    if (!grid || !dragging) return;
+    dragging = false;
+    const touch = e.changedTouches[0];
+    const dx = touch.clientX - startX;
+    const transition = `transform ${SLIDE_MS}ms ease`;
+    grid.style.transition = transition;
+    if (pPrev) pPrev.style.transition = transition;
+    if (pNext) pNext.style.transition = transition;
+
+    if (Math.abs(dx) < SWIPE_THRESHOLD || !container || !kind) {
+      // 기준치 못 넘김 — 전부 제자리로 스냅백, 월 안 바뀜.
+      grid.style.transform = "translateX(0)";
+      if (pPrev) pPrev.style.transform = `translateX(${-gridWidth}px)`;
+      if (pNext) pNext.style.transform = `translateX(${gridWidth}px)`;
+      setTimeout(() => { if (pPrev) pPrev.remove(); if (pNext) pNext.remove(); }, SLIDE_MS);
+      return;
+    }
+    const goNext = dx < 0;
+    const btn = container.querySelector(goNext ? '[id$="NextMonth"]' : '[id$="PrevMonth"]');
+    const winningPreview = goNext ? pNext : pPrev;
+    const losingPreview = goNext ? pPrev : pNext;
+    if (!btn) {
+      grid.style.transform = "translateX(0)";
+      if (pPrev) pPrev.style.transform = `translateX(${-gridWidth}px)`;
+      if (pNext) pNext.style.transform = `translateX(${gridWidth}px)`;
+      setTimeout(() => { if (pPrev) pPrev.remove(); if (pNext) pNext.remove(); }, SLIDE_MS);
+      return;
+    }
+    // 원래 달은 화면 밖으로 끝까지, 이기는 쪽 미리보기는 정확히 그 자리로 —
+    // 둘이 같은 속도로 동시에 움직여서 "다음 칸이 밀고 들어온다"는 느낌을 준다.
+    grid.style.transform = `translateX(${goNext ? -gridWidth : gridWidth}px)`;
+    if (winningPreview) winningPreview.style.transform = "translateX(0)";
+    if (losingPreview) losingPreview.style.transform = `translateX(${goNext ? -2 * gridWidth : 2 * gridWidth}px)`;
+    setTimeout(() => {
+      // 실제 월 변경 — rootEl 전체가 다시 그려지며 이 grid와 미리보기들은
+      // (이미 DOM에서 통째로 교체되므로) 자연히 함께 사라진다. 미리보기가
+      // 이미 최종 위치(translateX 0)에 와 있던 그 자리에 새로 그려진 실제
+      // 달력이 정지 상태로 나타나서, 끊김 없이 이어진다.
+      btn.click();
+    }, SLIDE_MS);
+  }, { passive: true });
+}
+
 export function mountPayrollBoard(el, acc) {
   rootEl = el;
   account = acc;
+  wireCalendarSwipe();
   if (acc.role === "owner") {
     ensureAdminStarted();
     renderAdmin();

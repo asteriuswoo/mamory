@@ -47,35 +47,38 @@ let account = { name: "", phone: "", role: "" };
 let started = false;
 
 // ---- 등록해요 하단 탭 N배지 ----
-// 공유하기 탭의 세그먼트별 N배지(tabSeenAt)와 같은 방식 — 시재/선결제 각각
-// "내가 마지막으로 그 탭을 본 시각" 이후 새 등록이 있으면 하단 탭에 N배지.
-// 기기(localStorage)에 계정별로 저장해서 새로고침해도 유지된다.
-const REGISTER_TAB_SEEN_KEY = "mamory_registerTabSeenAt";
-let registerTabSeenAt = null;
+// 예전엔 시재/선결제 각 탭의 "마지막으로 본 시각"을 render() 때마다 갱신해서
+// 판단했는데, 그 값이 바뀌어도 하단 탭 배지 자체는 다음 Firestore 변경이
+// 와야 재평가돼서 — 탭에 들어가 보기만 해서는 안 사라지고 새로고침을
+// 해야만 사라지는 문제가 있었다(공유하기 하단 배지에서 겪은 것과 같은
+// 종류의 버그). 그래서 하단 탭 배지는 훨씬 단순하게, 하단 탭 아이콘 자체를
+// 탭하는 순간 바로 꺼지고, 그 뒤에 올라온 활동이 있을 때만 다시 켜지는
+// 방식으로 바꾼다.
+const NAV_BADGE_SEEN_KEY = "mamory_registerNavBadgeSeenAt";
 const registerBadgeListeners = [];
 
-function loadRegisterTabSeen() {
+function loadNavBadgeSeenAt() {
   try {
-    const all = JSON.parse(localStorage.getItem(REGISTER_TAB_SEEN_KEY) || "{}");
-    return all[account.phone] || null;
+    const all = JSON.parse(localStorage.getItem(NAV_BADGE_SEEN_KEY) || "{}");
+    if (account.phone in all) return all[account.phone];
   } catch (e) {
-    return null;
+    // localStorage 불가 환경 — 아래에서 지금 시각으로 새로 깔고 넘어간다.
   }
+  const now = Date.now();
+  saveNavBadgeSeenAt(now);
+  return now;
 }
-function saveRegisterTabSeen() {
+
+function saveNavBadgeSeenAt(ts) {
   try {
-    const all = JSON.parse(localStorage.getItem(REGISTER_TAB_SEEN_KEY) || "{}");
-    all[account.phone] = registerTabSeenAt;
-    localStorage.setItem(REGISTER_TAB_SEEN_KEY, JSON.stringify(all));
+    const all = JSON.parse(localStorage.getItem(NAV_BADGE_SEEN_KEY) || "{}");
+    all[account.phone] = ts;
+    localStorage.setItem(NAV_BADGE_SEEN_KEY, JSON.stringify(all));
   } catch (e) {
     // localStorage 불가 환경이면 그냥 이번 세션만 배지가 덜 정확한 걸로 넘어간다.
   }
 }
-function ensureRegisterTabSeenInit() {
-  if (registerTabSeenAt) return;
-  registerTabSeenAt = loadRegisterTabSeen() || { cash: Date.now(), topup: Date.now() };
-  saveRegisterTabSeen();
-}
+
 function registerTabActivityMs(tab) {
   let max = 0;
   if (tab === "cash") {
@@ -86,15 +89,23 @@ function registerTabActivityMs(tab) {
   }
   return max;
 }
+
+function latestRegisterActivityMs() {
+  return Math.max(registerTabActivityMs("cash"), registerTabActivityMs("topup"));
+}
+
 function notifyRegisterBadgeListeners() {
   registerBadgeListeners.forEach((cb) => cb());
 }
 
-// 하단 탭(등록해요) N배지 전용 — 시재/선결제 둘 중 하나라도 안 본 변화가
-// 있으면 true. 들어가서 그 탭을 보기만 하면(render()) 바로 해제된다.
+// 하단 탭(등록해요)을 탭하는 순간 호출 — 그 즉시 배지가 꺼지고, 그 뒤에
+// 올라온 활동이 있을 때만 다시 켜진다.
+export function markRegisterNavBadgeSeen() {
+  saveNavBadgeSeenAt(Date.now());
+}
+
 export function hasUnseenRegisterActivity() {
-  ensureRegisterTabSeenInit();
-  return ["cash", "topup"].some((tab) => registerTabActivityMs(tab) > (registerTabSeenAt[tab] || 0));
+  return latestRegisterActivityMs() > loadNavBadgeSeenAt();
 }
 
 // 등록해요 화면을 아직 한 번도 안 열어봤어도(mountRegisterBoard 전) 하단 탭
@@ -717,7 +728,7 @@ function topupBoardHtml() {
     return `
       <div class="category-title section-title-topup">🧾 선결제 충전 등록</div>
       <div class="card section-topup">
-        <div class="topup-accrual-hint">💵 현금 결제 시 10% 추가 적립 · 💳 카드 결제 시 5% 추가 적립</div>
+        <div class="topup-accrual-hint">💰 충전될 때마다 충전금액을 등록해주세요!</div>
         <div class="topup-name-chips">
           ${chipNames.map((n) => `<button class="topup-name-chip" data-topup-select="${escapeHtml(n)}">${escapeHtml(n)}</button>`).join("")}
           <button type="button" class="topup-name-chip add-new" id="topupAddCustomerBtn">+ 손님 추가</button>
@@ -740,7 +751,7 @@ function topupBoardHtml() {
         <input type="number" id="topupAmountInput" placeholder="충전 금액" inputmode="numeric" value="${escapeHtml(topupAmountDraft)}" />
         <button class="btn gold" id="topupAddBtn">등록</button>
       </div>
-      <div class="topup-accrual-hint">💵 현금 결제 시 10% 추가 적립 · 💳 카드 결제 시 5% 추가 적립</div>
+      <div class="topup-accrual-hint">💰 충전될 때마다 충전금액을 등록해주세요!</div>
       ${group.entries.length === 0 ? `<div class="empty">아직 등록된 충전 내역이 없어요.</div>` : `
       <div class="topup-entry-list">
         ${group.entries.map((e) => `
@@ -789,12 +800,6 @@ async function submitTopup() {
 function render() {
   if (!rootEl) return;
   const isToday = cashDate === date;
-
-  // 지금 보고 있는 탭(시재/선결제)은 그 순간까지의 등록을 전부 본 걸로 쳐서
-  // seenAt을 최신으로 유지한다 — 공유하기 탭 N배지와 같은 방식.
-  ensureRegisterTabSeenInit();
-  registerTabSeenAt[registerTab] = Date.now();
-  saveRegisterTabSeen();
 
   let html = `
     <div class="seg register-tab-seg">

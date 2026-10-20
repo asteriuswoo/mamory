@@ -85,6 +85,22 @@ function activityMs(ts) {
   return tsMillis(ts);
 }
 
+// 날짜 칩 빨간 점(chipUnseen) 판단 — seenBy만 보면 "새 글"만 잡히고, 이미
+// 본 글에 나중에 달린 "새 답글"은 못 잡는다(seenBy는 글 하나당 값이라
+// 답글이 달려도 안 바뀐다). 그래서 오늘(사장님이 어제 글에 답글 다는 것처럼)
+// 안 보던 날짜에 답글만 새로 달려도 그 날짜 밑에 점이 떠야 한다 — note
+// 탭을 마지막으로 본 시각(tabSeenAt.note) 이후에 달린, 내가 안 쓴 답글이
+// 있으면 그 글도 "안 본 것"으로 친다.
+function itemHasUnseenActivity(data, myPhone) {
+  if (!(data.seenBy || []).includes(myPhone)) return true;
+  if (data.type === "note") {
+    ensureTabSeenInit();
+    const since = tabSeenAt.note || 0;
+    return (data.replies || []).some((r) => r.staffPhone !== myPhone && activityMs(r.createdAt) > since);
+  }
+  return false;
+}
+
 function tabActivityMs(tab) {
   let max = 0;
   if (tab === "soldout") {
@@ -417,38 +433,56 @@ function insertReplyMention(itemId, name) {
   input.setSelectionRange(newCursor, newCursor);
 }
 
+// itemId별로 전송 중인지 추적 — 빠르게 오가는 대화 중 엔터/등록 버튼을
+// 연타하면 앞선 요청이 끝나기도 전에 또 addReply가 불려서 같은(혹은 그
+// 사이 더 입력된) 내용이 중복 등록될 수 있었다.
+const replySending = new Set();
+
 async function addReply(itemId, content, photoUrls) {
+  if (replySending.has(itemId)) return;
   const text = (content || "").trim();
   const photos = photoUrls || [];
   if (!text && photos.length === 0) {
     toast("답글 내용을 입력해주세요");
     return;
   }
-  const { mentions, mentionsAll } = extractMentions(text);
-  const reply = {
-    content: text,
-    photoUrls: photos,
-    mentions,
-    mentionsAll,
-    staffName: account.name,
-    staffPhone: account.phone,
-    createdAt: Date.now(),
-  };
-  await updateDoc(doc(db, "shares", shareDate, "items", itemId), {
-    replies: arrayUnion(reply),
-  });
-  // Today's live listener already picks this write up on its own — patching
-  // the local copy too (unconditionally, as this used to) double-added it,
-  // showing the same reply twice until the next reload corrected it. Only
-  // past dates (no listener) still need the manual patch.
-  if (shareDate !== date) {
-    const it = shareItems.find((x) => x.id === itemId);
-    if (it) it.replies = [...(it.replies || []), reply];
+  replySending.add(itemId);
+  try {
+    const { mentions, mentionsAll } = extractMentions(text);
+    const reply = {
+      content: text,
+      photoUrls: photos,
+      mentions,
+      mentionsAll,
+      staffName: account.name,
+      staffPhone: account.phone,
+      createdAt: Date.now(),
+    };
+    await updateDoc(doc(db, "shares", shareDate, "items", itemId), {
+      replies: arrayUnion(reply),
+    });
+    // Today's live listener already picks this write up on its own —
+    // patching the local copy too (unconditionally, as this used to)
+    // double-added it, showing the same reply twice until the next reload
+    // corrected it. Only past dates (no listener) still need the manual patch.
+    if (shareDate !== date) {
+      const it = shareItems.find((x) => x.id === itemId);
+      if (it) it.replies = [...(it.replies || []), reply];
+    }
+    replyDrafts.delete(itemId);
+    replyDraftPhotos.delete(itemId);
+    replyMentionState.delete(itemId);
+    // render() silently no-ops while this input still has focus (true for
+    // the Enter-key path, since Enter doesn't blur it) — without this, the
+    // just-submitted text stayed sitting in the box looking unsent, so
+    // staff would retype/resend and the same reply landed multiple times
+    // with slightly different content each try.
+    const input = rootEl && rootEl.querySelector(`.reply-input[data-reply-for="${itemId}"]`);
+    if (input) input.value = "";
+    render();
+  } finally {
+    replySending.delete(itemId);
   }
-  replyDrafts.delete(itemId);
-  replyDraftPhotos.delete(itemId);
-  replyMentionState.delete(itemId);
-  render();
 }
 
 async function saveReplyEdit(key, value) {
@@ -723,8 +757,28 @@ function noteTabHtml(noteList, isToday) {
   return html;
 }
 
+// render()는 매번 rootEl.innerHTML을 통째로 새로 그리는데, 이 화면의
+// 글쓰기/답글수정/품절해제 입력창들이 전부 그 안에 같이 들어있다 — 그래서
+// 다른 사람이 글을 쓰거나 반응을 누르는 등 shares/{date}/items에 어떤
+// 변화가 생겨도(이 탭을 보는 모든 사람에게 실시간으로) render()가 돌면서
+// 지금 타이핑 중인 입력창 DOM 자체가 통째로 날아갔다 — 모바일에서는 포커스를
+// 잃는 순간 키보드도 같이 내려가 버린다. 지금 이 화면의 입력창에 포커스가
+// 있는 동안은 다시 그리지 않고, 포커스가 빠지는 순간(focusout, 아래
+// mountShareBoard에서 위임) 밀린 렌더를 한 번에 반영한다.
+let renderSkippedWhileTyping = false;
+
+function isTypingInShareInput() {
+  const active = document.activeElement;
+  return !!(rootEl && active && rootEl.contains(active) && (active.tagName === "INPUT" || active.tagName === "TEXTAREA"));
+}
+
 function render() {
   if (!rootEl) return;
+  if (isTypingInShareInput()) {
+    renderSkippedWhileTyping = true;
+    return;
+  }
+  renderSkippedWhileTyping = false;
   const isToday = shareDate === date;
   const soldoutListAll = sortByTime(shareItems.filter((it) => it.type === "soldout"));
   // 최신 글이 바로 눈에 보여야 매번 스크롤을 안 내려도 되니까, 오래된 순
@@ -1097,7 +1151,7 @@ function loadAllShareChipCounts() {
     getDocs(collection(db, "shares", d, "items"))
       .then((snap) => {
         chipCounts[d] = snap.size;
-        chipUnseen[d] = snap.docs.some((doc) => !(doc.data().seenBy || []).includes(account.phone));
+        chipUnseen[d] = snap.docs.some((doc) => itemHasUnseenActivity(doc.data(), account.phone));
         const soldoutDocs = snap.docs.filter((doc) => doc.data().type === "soldout");
         chipSoldoutItems[d] = soldoutDocs.map((doc) => ({ id: doc.id, date: d, content: doc.data().content, resolved: !!doc.data().resolved, staffName: doc.data().staffName, staffPhone: doc.data().staffPhone, resolvedByName: doc.data().resolvedByName, resolvedByPhone: doc.data().resolvedByPhone, resolvedAt: doc.data().resolvedAt, createdAt: doc.data().createdAt }));
         // Today's own render depends on every past day's chipSoldoutItems
@@ -1261,7 +1315,7 @@ function ensureStarted() {
   onSnapshot(collection(db, "shares", date, "items"), (snap) => {
     shareTodayItems = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     chipCounts[date] = shareTodayItems.length;
-    chipUnseen[date] = shareTodayItems.some((it) => !(it.seenBy || []).includes(account.phone));
+    chipUnseen[date] = shareTodayItems.some((it) => itemHasUnseenActivity(it, account.phone));
     if (shareDate === date) shareItems = shareTodayItems;
 
     render();
@@ -1278,6 +1332,19 @@ export function mountShareBoard(el, acc) {
   // 지워주면, "화면 자체를 나갔다 다시 들어온" 경우엔 여전히 예전 기준점이
   // 남아있어서 이미 본 답글도 계속 N으로 뜨는 문제가 있었다.
   tabViewStartedAt = {};
+  // 타이핑 중이라 미뤄둔 render()를, 입력창에서 포커스가 빠지는 순간(제출
+  // 버튼을 눌렀든 다른 곳을 탭했든) 바로 따라잡는다. focusout은 버블링되는
+  // 이벤트라 rootEl 하나에만 걸어도 그 안의 모든 입력창을 다 잡는다.
+  // mountShareBoard는 매번 새로 생긴 rootEl에 대해서만 불리므로(이전
+  // rootEl은 그대로 버려짐) 리스너가 중복으로 쌓이지 않는다.
+  // setTimeout으로 한 틱 미루는 이유 — "제출" 버튼을 눌러서 포커스가
+  // 빠진 경우, focusout이 click보다 먼저 발생한다. 여기서 바로 render()를
+  // 돌리면 그 버튼 DOM이 click 이벤트가 도착하기 전에 통째로 바뀐 새
+  // 버튼으로 교체돼버려서, 정작 그 탭이 아무 반응 없이 씹힌다 — click이
+  // 마저 처리되고 난 다음 틱에 반영해야 한다.
+  rootEl.addEventListener("focusout", () => {
+    setTimeout(() => { if (renderSkippedWhileTyping) render(); }, 0);
+  });
   ensureStarted();
   watchAccounts(render);
   // setInitialShareDate()는 main()이 끝나기 한참 전, rootEl도 아직 없을 때

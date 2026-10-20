@@ -9,6 +9,7 @@ import { db, doc, getDoc, updateDoc, collection, query, orderBy, limit, onSnapsh
 import { VAPID_KEY } from "./firebase-config.js";
 import { toast, escapeHtml, todayStr, dateStrDaysAgo, dateStrOf, formatDateLabel } from "./util.js";
 import { bumpAppBadge } from "./badge.js";
+import { avatarHtml } from "./avatar.js";
 import { getToken, deleteToken, onMessage } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging.js";
 
 // The browser's own Notification permission can't be revoked from JS once
@@ -151,6 +152,41 @@ export async function enablePushToken(phone) {
   await registerPushToken(phone);
 }
 
+// 특정 계정의 행동(댓글/답글/새 글/반응 등)으로 생긴 알림은 그 사람의
+// 프로필 사진 + "OO님: 내용" 형태로, 시스템/익명 알림(시재 리마인드,
+// 발주 확인 등)은 그냥 글자만 있는 배너로 — 하나의 디자인으로만 뜨면
+// 뭐가 누구한테서 온 건지 헷갈린다는 피드백으로 둘을 구분한다. 둘 다
+// 흰 배경 검은 글자, 상단에서 내려왔다 사라지는 모양은 같다.
+// 발주 확인 리마인드는 익명/시스템 알림이라 사람 프로필을 붙일 순 없지만,
+// "모리가 기다리고 있어요"라는 문구에 맞춰 모리 이미지를 맨 앞에 붙인다 —
+// 배고픈(기다리는) 표정이 이 문구 톤과 맞아서 그걸 쓴다.
+const BANNER_ICON_BY_TYPE = {
+  orderReminder: "img/mascot/mascot-hungry.png",
+};
+
+let pushBannerTimer = null;
+function showPushBanner({ fromPhone, fromName, title, body, type }) {
+  let el = document.getElementById("pushBanner");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "pushBanner";
+    el.className = "push-banner-overlay";
+    document.body.appendChild(el);
+  }
+  const text = body || title || "새 알림이 있어요";
+  const iconSrc = BANNER_ICON_BY_TYPE[type];
+  if (fromPhone) {
+    el.innerHTML = `<div class="push-banner-card">${avatarHtml(fromPhone, fromName, 30)}<div class="push-banner-card-text">${escapeHtml(text)}</div></div>`;
+  } else if (iconSrc) {
+    el.innerHTML = `<div class="push-banner-card"><img src="${iconSrc}" class="push-banner-icon" alt="" /><div class="push-banner-card-text">${escapeHtml(title && body ? `${title}: ${body}` : text)}</div></div>`;
+  } else {
+    el.innerHTML = `<div class="push-banner-pill">${escapeHtml(title && body ? `${title}: ${body}` : text)}</div>`;
+  }
+  el.classList.add("show");
+  clearTimeout(pushBannerTimer);
+  pushBannerTimer = setTimeout(() => el.classList.remove("show"), 4000);
+}
+
 let foregroundWatchStarted = false;
 export function watchForegroundPush() {
   if (foregroundWatchStarted) return;
@@ -159,9 +195,9 @@ export function watchForegroundPush() {
     if (!supported || !messaging) return;
     onMessage(messaging, (payload) => {
       // Server sends data-only (see functions/index.js) so the browser never
-      // auto-displays anything on its own — this toast is the only rendering.
-      const { title, body } = payload.data || {};
-      toast(body ? `${title || "MAMORY"}: ${body}` : title || "새 알림이 있어요");
+      // auto-displays anything on its own — this banner is the only rendering.
+      const { title, body, fromPhone, fromName, type } = payload.data || {};
+      showPushBanner({ fromPhone, fromName, title, body, type });
       bumpAppBadge();
     });
   });

@@ -2,7 +2,7 @@ import { db, collection, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, onSn
 import { requireAccount, logout } from "./auth.js";
 import { todayStr, dateStrDaysAgo, formatDateLabel, formatTimestampLabel, formatTimeLabel, toast, escapeHtml, openImageLightbox, URGENCY_LABEL, URGENCY_HINT, URGENCY_ORDER, URGENCY_GROUP_CAPTION, sortMaterials, sortByOrder, resizeImageFile, confirmModal, dayAccentClass, NOTIFY_BELL_ON, qtyRemainingLabel, MULTIPLE_FILE_ATTR } from "./util.js";
 import { mountShareBoard, hasUnseenShareActivity, watchUnseenCount, setInitialShareTab, setInitialShareDate, markShareNavBadgeSeen } from "./shareboard.js";
-import { mountRegisterBoard, watchRegisterUnseen, hasUnseenRegisterActivity } from "./registerboard.js";
+import { mountRegisterBoard, watchRegisterUnseen, hasUnseenRegisterActivity, markRegisterNavBadgeSeen } from "./registerboard.js";
 import { mountPayrollBoard, mountClockWidget } from "./payroll.js";
 import { registerPushToken, watchForegroundPush, watchNotificationBadge, openNotificationPanel } from "./push.js";
 import { wireAccountHeaderAvatar } from "./avatar.js";
@@ -64,6 +64,16 @@ let staffRole = "staff";
 
 // nav state
 let view = "main"; // main | sub | items | cart | share
+// renderShare/renderRegister/renderPayroll은 각자 자기 화면을 통째로
+// screenEl.innerHTML로 새로 그리고 보드를 처음부터 다시 mount한다 — 탭을
+// 실제로 "들어올 때"만 필요한 동작인데, 이 전역 render()는 그 탭에 계속
+// 머물러 있는 동안에도(자재/장바구니 등 전혀 무관한 다른 Firestore 변경이
+// 생길 때마다) 계속 불린다. 그때마다 보드를 통째로 재마운트해버리면, 그
+// 보드 안에서 지금 타이핑 중인 입력창(공유하기 글쓰기, 등록해요 메모 등)의
+// DOM이 날아가 포커스가 빠지고 모바일에서는 키보드도 같이 내려간다 — 각
+// 보드는 자기 데이터 변경은 이미 스스로 실시간으로 반영하므로, 실제로 그
+// 탭에 "새로 들어올 때"만 재마운트하면 된다.
+let lastMountedView = null;
 let chosenMain = null;
 let chosenSub = null;
 let subSearchQuery = ""; // 소분류 목록 화면의 자재명 검색어
@@ -174,6 +184,11 @@ function allKnownIds() {
 // height — deferring it a frame lets the browser finish that layout pass
 // first, which avoids the glitch.
 function scrollTopSafely() {
+  // staff.html pins html/body (see its <head>) — #pageScroll is the actual
+  // scrolling element now, so resetting window scroll alone no longer does
+  // anything.
+  const inner = document.getElementById("pageScroll");
+  if (inner) inner.scrollTop = 0;
   requestAnimationFrame(forceFixedBarReflow);
 }
 
@@ -362,6 +377,11 @@ document.querySelectorAll(".bottom-tab[data-nav]").forEach((btn) => {
       const badge = document.getElementById("shareNavBadge");
       if (badge) badge.style.display = "none";
     }
+    if (nav === "register") {
+      markRegisterNavBadgeSeen();
+      const badge = document.getElementById("registerNavBadge");
+      if (badge) badge.style.display = "none";
+    }
     if (nav === "cart") {
       goToCart();
       return;
@@ -531,8 +551,20 @@ async function loadCarryoverItems() {
       // 영수증 사진을 따로 붙여뒀으면 실제로는 이미 주문한 거다 — 체크만
       // 안 한 것뿐이라 또 요청할 필요가 없다.
       if (data.ownerAttachedPhotos && data.ownerAttachedPhotos.length > 0) return;
-      if (synced[id] || pending[id]) return; // 오늘 이미 손댄 자재는 건너뛴다
+      if (synced[id]) return; // 오늘 이미 제출/확정된 자재는 건너뛴다
       if (dismissedCarryovers.has(id)) return; // 오늘 이미 "취소"로 뺀 적 있으면 다시 안 넣는다
+      if (pending[id]) {
+        // 예전 버그로 요청자 이름이 지금 보는 사람 이름으로 잘못 저장돼
+        // 있던 이월 항목을, 다시 추가하는 대신 조용히 고쳐준다 — 그 외
+        // (오늘 직접 새로 담은 것 등)는 그대로 둔다.
+        const p = pending[id];
+        if (p.carriedOverFrom && data.staffName && p.staffName !== data.staffName) {
+          p.staffName = data.staffName;
+          p.staffPhone = data.staffPhone;
+          changed = true;
+        }
+        return;
+      }
       pending[id] = {
         action: "set",
         materialName: data.materialName,
@@ -543,7 +575,10 @@ async function loadCarryoverItems() {
         qty: data.qty || "",
         orderQty: data.orderQty || 1,
         photoUrls: data.photoUrls || [],
-        staffName,
+        // 이월해도 "누가 요청했는지"는 어제 그 사람 그대로 남아야 한다 —
+        // 지금 이걸 불러오는 사람(staffName)으로 덮어쓰면 안 된다.
+        staffName: data.staffName || staffName,
+        staffPhone: data.staffPhone,
         carriedOverFrom: true,
       };
       changed = true;
@@ -617,13 +652,25 @@ function render() {
   if (monthEndBanner) monthEndBanner.style.display = (isHomeView && isLastDayOfMonth()) ? "block" : "none";
   const humanityBtn = document.getElementById("humanityBtn");
   if (humanityBtn) humanityBtn.style.display = isHomeView ? "" : "none";
-  if (view === "main") return renderMain();
-  if (view === "sub") return renderSub();
-  if (view === "items") return renderItems();
-  if (view === "cart") return renderCart();
-  if (view === "share") return renderShare();
-  if (view === "register") return renderRegister();
-  if (view === "payroll") return renderPayroll();
+  if (view === "main") { lastMountedView = view; return renderMain(); }
+  if (view === "sub") { lastMountedView = view; return renderSub(); }
+  if (view === "items") { lastMountedView = view; return renderItems(); }
+  if (view === "cart") { lastMountedView = view; return renderCart(); }
+  if (view === "share") {
+    if (lastMountedView === "share") return;
+    lastMountedView = view;
+    return renderShare();
+  }
+  if (view === "register") {
+    if (lastMountedView === "register") return;
+    lastMountedView = view;
+    return renderRegister();
+  }
+  if (view === "payroll") {
+    if (lastMountedView === "payroll") return;
+    lastMountedView = view;
+    return renderPayroll();
+  }
 }
 
 function isLastDayOfMonth() {
@@ -965,6 +1012,13 @@ function cartGroupedItemsHtml(items, isTodayCart, searchQuery) {
     // 않도록).
     const qtyEditable = isTodayCart && !it.submitted && !it.ordered;
     const qtyEditing = qtyEditingFor.has(it.id);
+    // 지난 날짜 목록을 직접 볼 때만(과거 날짜 칩을 선택한 경우) 미주문
+    // 배지로 긴급/품절/여유 상태바를 대신한다 — 오늘 목록에 이월돼 들어온
+    // 자재(carriedOverFrom)는 비록 하루가 지났어도 오늘 안에서 여전히
+    // 상태를 긴급/품절/여유로 바꿀 수 있어야 하므로(이월됐다고 그 권한이
+    // 없어지면 안 된다) 여기서는 절대 미주문으로 바꿔치기하지 않는다 —
+    // 이월 표시는 바로 위 carryover-tag가 이미 따로 하고 있다.
+    const showUnorderedBadge = !it.ordered && !isTodayCart;
     return `
       <div class="item-row ${it.ordered ? "ordered" : ""}">
         <div style="flex:1">
@@ -998,8 +1052,10 @@ function cartGroupedItemsHtml(items, isTodayCart, searchQuery) {
             </div>` : ""}
         </div>
         <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
-          <span class="badge ${it.urgency} ${canChangeStatus ? "tappable" : ""}" ${canChangeStatus ? `data-status-toggle="${it.id}"` : ""}>${it.urgency === "urgent" ? "🚨 " : ""}${URGENCY_LABEL[it.urgency] || it.urgency}</span>
-          ${pickerOpen ? `
+          ${showUnorderedBadge
+            ? `<span class="badge-unordered">미주문</span>`
+            : `<span class="badge ${it.urgency} ${canChangeStatus ? "tappable" : ""}" ${canChangeStatus ? `data-status-toggle="${it.id}"` : ""}>${it.urgency === "urgent" ? "🚨 " : ""}${URGENCY_LABEL[it.urgency] || it.urgency}</span>`}
+          ${!showUnorderedBadge && pickerOpen ? `
             <div class="status-picker">
               ${otherUrgencies.map((u) => `<button class="status-picker-btn ${u}" data-status-pick="${it.id}" data-status-value="${u}">${URGENCY_LABEL[u]}</button>`).join("")}
             </div>` : ""}
@@ -1056,7 +1112,7 @@ function cartGroupedItemsHtml(items, isTodayCart, searchQuery) {
       for (const it of soldoutItems) html += cartItemRowHtml(it, true);
     }
     if (urgentItems.length > 0) {
-      html += `<div class="subcat-title urgency-caption urgent" style="margin-top:${soldoutItems.length > 0 ? "14px" : "0"};"><span class="urgency-caption-label">${URGENCY_LABEL.urgent}</span>${URGENCY_GROUP_CAPTION.urgent}</div>`;
+      html += `<div class="subcat-title urgency-caption urgent${isTodayCart ? " urgency-caption-blink" : ""}" style="margin-top:${soldoutItems.length > 0 ? "14px" : "0"};"><span class="urgency-caption-label">${URGENCY_LABEL.urgent}</span>${URGENCY_GROUP_CAPTION.urgent}</div>`;
       for (const it of urgentItems) html += cartItemRowHtml(it, true);
     }
     if (normalItems.length > 0) {
@@ -1526,8 +1582,12 @@ async function submitCategory(main) {
     toast("제출할 변경사항이 없어요");
     return;
   }
+  // 누르는 순간 전부 동시에 전송하고, 로컬 pending/autoPending도 전부 끝난
+  // 뒤에야 한꺼번에 비운다 — 하나씩 순서대로 기다렸다가 그때그때 지우면
+  // "담긴 횟수 (5)"가 보내지는 족족 4, 3, 2...로 줄어드는 게 보였는데,
+  // 누르자마자 바로 전달되는 거라 그 과정을 눈에 보여줄 필요가 없다.
   let addedCount = 0;
-  for (const [id, p] of entries) {
+  await Promise.all(entries.map(async ([id, p]) => {
     const ref = doc(itemsCol, id);
     if (p.action === "delete") {
       await deleteDoc(ref);
@@ -1548,11 +1608,10 @@ async function submitCategory(main) {
       }, { merge: true });
       addedCount++;
     }
-    delete pending[id];
-  }
+  }));
   // 2일마다 자동으로 담긴 것도 이 제출에 같이 실어 보낸다 — 지금 제출하는
   // 사람이 확인하고 보내는 거니 그 사람 이름으로 나간다.
-  for (const [id, a] of autoEntries) {
+  await Promise.all(autoEntries.map(async ([id, a]) => {
     await setDoc(doc(itemsCol, id), {
       materialName: a.materialName,
       mainCategory: a.mainCategory,
@@ -1569,7 +1628,8 @@ async function submitCategory(main) {
     }, { merge: true });
     await deleteDoc(doc(db, "checks", date, "autoPending", id));
     addedCount++;
-  }
+  }));
+  for (const [id] of entries) delete pending[id];
   savePending();
   // 사장님 알림은 항목 하나하나가 아니라 이 제출 묶음당 한 번만 가도록,
   // 개별 자재 문서와는 별도로 "제출 이벤트" 문서 하나를 추가로 남긴다 —

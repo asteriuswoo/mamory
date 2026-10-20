@@ -13,7 +13,7 @@
 import { requireAccount, logout } from "./auth.js";
 import { wireAccountHeaderAvatar } from "./avatar.js";
 import { watchUnseenCount, hasUnseenShareActivity, markShareNavBadgeSeen } from "./shareboard.js";
-import { watchRegisterUnseen, hasUnseenRegisterActivity } from "./registerboard.js";
+import { watchRegisterUnseen, hasUnseenRegisterActivity, markRegisterNavBadgeSeen } from "./registerboard.js";
 import { registerPushToken, watchForegroundPush, isPushDisabled } from "./push.js";
 import { watchAppBadgeClear } from "./badge.js";
 import { mountMascotWidget } from "./mascot.js";
@@ -141,6 +141,11 @@ document.querySelectorAll(".bottom-tab").forEach((a) => {
       markShareNavBadgeSeen();
       const navBadge = document.getElementById("shareNavBadge");
       if (navBadge) navBadge.style.display = "none";
+    }
+    if (path === "register.html") {
+      markRegisterNavBadgeSeen();
+      const registerBadge = document.getElementById("registerNavBadge");
+      if (registerBadge) registerBadge.style.display = "none";
     }
     if (!VIEWS[path]) return; // not one of the 3 SPA views — let it navigate normally
     e.preventDefault();

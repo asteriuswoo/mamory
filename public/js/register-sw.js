@@ -38,9 +38,12 @@ if ("serviceWorker" in navigator) {
 
 window.forceAppRefresh = function () {
   if ("caches" in window) {
-    caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))));
+    caches.keys()
+      .then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+      .finally(() => location.reload());
+  } else {
+    location.reload();
   }
-  location.reload();
 };
 
 // 모바일 키보드가 올라오면 입력창이 가려지거나, 밑에 깔린 목록(검색 결과,
@@ -91,14 +94,38 @@ document.addEventListener("focusin", (e) => {
     if (navigator.vibrate) navigator.vibrate(ms);
   }
 
+  // border/box-shadow live here, not in the base CSS rule — box-shadow
+  // moves together with the element's transform, so even fully hidden
+  // (-84px) its downward shadow still bled a few px into the visible top
+  // edge. Only turn them on while the indicator is actually being revealed.
+  function setIndicatorEdgeVisible(visible) {
+    indicator.style.borderBottomColor = visible ? "var(--border)" : "transparent";
+    indicator.style.boxShadow = visible ? "0 2px 10px rgba(27,23,20,.08)" : "none";
+  }
+
   const indicator = document.createElement("div");
   indicator.id = "pullRefreshIndicator";
+  // Inline, not just relying on the external stylesheet's default rule —
+  // right after a hard refresh (forceAppRefresh) this element can paint
+  // before style.css finishes loading, showing briefly untransformed
+  // (fully visible, white) at the top of the screen.
+  indicator.style.transform = "translateY(-84px)";
   indicator.innerHTML = `<div class="pull-refresh-spinner"></div><div class="pull-refresh-text">아래로 당겨서 새로고침</div>`;
   document.body.appendChild(indicator);
   const spinner = indicator.querySelector(".pull-refresh-spinner");
   const text = indicator.querySelector(".pull-refresh-text");
 
+  // Pages that pin html/body (see their own <head>) move actual scrolling
+  // into #pageScroll instead — window/body never scroll there, so checking
+  // only window.scrollY would permanently read 0 and make every drag look
+  // like it started at the top.
+  function scrollEl() {
+    return document.getElementById("pageScroll") || null;
+  }
+
   function pageScrollTop() {
+    const inner = scrollEl();
+    if (inner) return inner.scrollTop;
     return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
   }
 
@@ -112,6 +139,7 @@ document.addEventListener("focusin", (e) => {
     } else if (mode === "refresh") {
       indicator.style.transition = "transform .12s ease";
       indicator.style.transform = `translateY(-${REFRESH_INDICATOR_HEIGHT}px)`;
+      setIndicatorEdgeVisible(false);
     }
     mode = null;
     sheetEl = null;
@@ -155,10 +183,12 @@ document.addEventListener("focusin", (e) => {
 
     if (dy <= 0) {
       indicator.style.transform = `translateY(-${REFRESH_INDICATOR_HEIGHT}px)`;
+      setIndicatorEdgeVisible(false);
       thresholdCrossed = false;
       return;
     }
     const progress = Math.min(dy / REFRESH_DISTANCE, 1);
+    setIndicatorEdgeVisible(true);
     indicator.style.transform = `translateY(${(progress - 1) * REFRESH_INDICATOR_HEIGHT}px)`;
     spinner.style.transform = `rotate(${progress * 360}deg)`;
     if (progress >= 1) {
@@ -200,11 +230,13 @@ document.addEventListener("focusin", (e) => {
     if (dy >= REFRESH_DISTANCE) {
       text.textContent = "새로고침 중...";
       indicator.style.transform = "translateY(0)";
+      setIndicatorEdgeVisible(true);
       spinner.style.transform = "";
       spinner.classList.add("spinning");
       window.forceAppRefresh();
     } else {
       indicator.style.transform = `translateY(-${REFRESH_INDICATOR_HEIGHT}px)`;
+      setIndicatorEdgeVisible(false);
     }
     mode = null;
     startY = null;

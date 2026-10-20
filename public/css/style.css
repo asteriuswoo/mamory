@@ -38,7 +38,7 @@
      글자색으로 뒤집히는 토큰이라, 그걸로 배경을 칠하면 다크모드에서
      카드가 밝은 회색으로 뒤집혀버리는 역효과가 났다. */
   --hero-dark: #1f1f1f;
-  --header-wash: rgba(217, 119, 69, .5);
+  --header-wash: rgba(217, 119, 69, .2);
   font-family: "Pretendard", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
 }
 
@@ -101,13 +101,11 @@ body {
   -webkit-overflow-scrolling: touch;
 }
 
-/* A gradient wash of our own accent color behind the wordmark (echoing the
-   official Mammoth Coffee app's banner), NOT sticky — it scrolls away with
-   the page like normal content — and never overlapping the account card
-   below: no negative margins here, plain normal document flow. */
 header.topbar {
-  position: static;
-  background: linear-gradient(180deg, var(--header-wash) 0%, rgba(217,119,69,0) 95%), var(--cream);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--cream);
   padding: calc(16px + env(safe-area-inset-top)) 18px 16px;
 }
 
@@ -452,7 +450,17 @@ header.topbar .sub {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  background: linear-gradient(160deg, #2c2c2c 0%, var(--hero-dark) 100%);
+  /* 예전엔 어두운 그라데이션(#2c2c2c→거의 검정)이라, 크림톤 화면 위로
+     당길 때마다 안 어울리는 짙은 회색 띠가 덮이는 것처럼 보였다 — 카드와
+     같은 톤으로 바꿔서 자연스럽게 녹아들게 한다. */
+  background: var(--card);
+  /* border-bottom/box-shadow는 여기 기본값으로 안 둔다 — transform으로
+     화면 밖(-84px)에 치워놔도 box-shadow 자체는 transform과 함께 그대로
+     움직여서 아래쪽으로 퍼지는 그림자가 화면 안까지 비쳐 보였다(고정된
+     상단바 바로 위에 늘 옅은 선처럼). 끌어내리는 동안에만 register-sw.js가
+     인라인으로 붙여준다. */
+  border-bottom: 1px solid transparent;
+  box-shadow: none;
   transform: translateY(-84px);
   transition: transform .12s ease;
   pointer-events: none;
@@ -461,7 +469,7 @@ header.topbar .sub {
 .pull-refresh-spinner {
   width: 30px;
   height: 30px;
-  border: 3px solid rgba(255,255,255,.25);
+  border: 3px solid var(--border);
   border-top-color: var(--gold);
   border-radius: 50%;
 }
@@ -477,7 +485,7 @@ header.topbar .sub {
 .pull-refresh-text {
   font-size: 12px;
   font-weight: 800;
-  color: #fff;
+  color: var(--text);
 }
 
 .corner-badge {
@@ -499,6 +507,21 @@ header.topbar .sub {
 }
 
 body.has-bottom-tabs {
+  padding-bottom: 108px;
+}
+
+/* The actual scrolling element on pages that pin html/body (see each such
+   page's own <head> override) — body itself no longer scrolls, so the
+   bottom-tab-bar clearance padding moves here instead of body. */
+#pageScroll {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: none;
+}
+
+body.has-bottom-tabs #pageScroll {
   padding-bottom: 108px;
 }
 
@@ -753,6 +776,13 @@ button {
   display: flex;
   align-items: flex-end;
   justify-content: center;
+  /* The box reserves empty space above the mascot for the MAMORY-letters-
+     into-mouth animation, but the face itself sits anchored at the very
+     bottom (see .kirby-face) — once the letters fade out, that leftover
+     empty space above makes the centered flex group (this + .splash-hint)
+     visually sit below the screen's true center. Pulling the box up
+     compensates without touching the animation itself. */
+  margin-top: -110px;
 }
 
 .kirby-face {
@@ -845,6 +875,11 @@ button {
 
 .role-hero {
   min-height: calc(100vh - 0px);
+  /* 100vh can overshoot the real visible height slightly on iOS — now that
+     body is position:fixed (see index.html) and clips overflow, an
+     oversized box here means the centered content sits below the fold's
+     true center. 100dvh tracks the actual visible viewport. */
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1119,6 +1154,25 @@ button {
 .subcat-title.urgency-caption.soldout { color: var(--soldout); }
 .subcat-title.urgency-caption.urgent { color: var(--urgent); }
 .subcat-title.urgency-caption.normal { color: var(--normal); }
+
+/* 직원/사장 계정 공통 — 당일 요청목록을 볼 때만, 화면을 열 때마다(이
+   줄이 새로 그려질 때마다) 연빨강 배경이 3번 깜빡이고 멈춘다. 글자는
+   항상 그대로 보이고 배경만 깜빡인다. 하루 지난 목록을 볼 땐 더 이상
+   "지금 긴급"이라는 의미가 없어서 안 붙인다. */
+.subcat-title.urgency-caption.urgent.urgency-caption-blink {
+  animation: urgencyCaptionBlink .6s ease-in-out 3;
+}
+
+@keyframes urgencyCaptionBlink {
+  0%, 100% { background: transparent; }
+  50% { background: var(--urgent-soft); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subcat-title.urgency-caption.urgent.urgency-caption-blink {
+    animation: none;
+  }
+}
 
 .urgency-caption-label {
   display: inline-block;
@@ -1590,6 +1644,76 @@ button {
   transform: translateX(-50%) translateY(0);
 }
 
+/* ---- 포그라운드 푸시 알림 배너 ---- */
+/* .top-banner와 똑같이 상단에서 내려왔다 사라지는 모양이지만, 별도 토글
+   블루 색 대신 흰 배경/검정 글자(카드 톤)로 — "다 똑같은 디자인이라
+   헷갈린다"는 피드백으로 .top-banner(출퇴근 도장 응원 메시지 등)와는
+   완전히 분리된 전용 요소를 쓴다. */
+.push-banner-overlay {
+  position: fixed;
+  top: max(16px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%) translateY(-140%);
+  opacity: 0;
+  transition: transform .3s cubic-bezier(.2, .8, .3, 1), opacity .3s;
+  pointer-events: none;
+  z-index: 300;
+  max-width: 88vw;
+}
+
+.push-banner-overlay.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.push-banner-pill {
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 10px 18px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+  box-shadow: 0 6px 20px rgba(0,0,0,.14);
+}
+
+/* 특정 계정의 행동(댓글/답글/새 글/반응 등)으로 생긴 알림 — 프로필 사진을
+   붙여서 "누구한테서 온 건지" 바로 보이게 한다. */
+.push-banner-card {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 7px 16px 7px 7px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  box-shadow: 0 6px 20px rgba(0,0,0,.14);
+  max-width: 88vw;
+}
+
+.push-banner-card .avatar-circle {
+  flex-shrink: 0;
+}
+
+/* 발주 확인 리마인드처럼 특정 사람 없이도 모리 이미지를 붙이는 경우 —
+   프로필 사진 자리에 .avatar-circle 대신 들어간다. */
+.push-banner-icon {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
+}
+
+.push-banner-card-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---- badges / dots ---- */
 .dot {
   display: inline-block;
@@ -1712,6 +1836,20 @@ button {
 .tag.submitted { color: var(--gold); }
 .tag.pending { color: var(--navy); }
 .tag.ordered { color: var(--normal); }
+
+/* 하루가 지나도록 체크(주문완료)도 영수증도 안 된 자재 — 직원 쪽 담은
+   목록에서만 보이는 상태 배지(사장 쪽엔 이미 다른 방식으로 미주문을
+   보여주고 있어서 안 씀). */
+.badge-unordered {
+  display: inline-flex;
+  align-items: center;
+  background: var(--urgent-soft);
+  color: var(--urgent);
+  font-size: 10px;
+  font-weight: 800;
+  padding: 3px 8px;
+  border-radius: 999px;
+}
 .tag.role-owner { color: var(--normal); }
 .tag.role-staff { color: var(--gold); }
 .tag.new {
@@ -3819,6 +3957,13 @@ pre.share-preview {
   margin-top: 2px;
 }
 
+.payroll-wage-breakdown-hint {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 600;
+  margin: -4px 0 8px;
+}
+
 /* ---- 출근기록 · 급여대장 ---- */
 .payroll-summary-card {
   text-align: center;
@@ -4261,6 +4406,20 @@ pre.share-preview {
   border-radius: 12px;
   padding: 12px;
   background: var(--card);
+  /* 스와이프로 월을 넘길 때 그리드가 좌우로 밀려나가는/들어오는 모션이
+     카드 테두리 밖으로 삐져나오지 않고 안에서만 보이게. */
+  overflow: hidden;
+  /* 미리보기 그리드(옆 달)를 이 카드 기준으로 absolute 배치하려면 이게
+     있어야 한다 — 없으면 offsetTop/offsetLeft가 더 바깥쪽(엉뚱한) 조상
+     기준으로 측정돼서 미리보기가 안 보이는 자리에 놓인다. */
+  position: relative;
+}
+
+/* 스와이프 드래그 중에만 잠깐 끼워 넣는 옆 달 미리보기 — 실제 달력과
+   똑같은 자리에 겹쳐 그려지고(JS가 position/top/left를 inline으로 건다),
+   안의 버튼(날짜 칸 등)을 실수로 탭해서 반응하는 일이 없게 막아둔다. */
+.payroll-calendar-grid-preview {
+  pointer-events: none;
 }
 
 .payroll-calendar-header {

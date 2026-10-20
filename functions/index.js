@@ -17,6 +17,16 @@ const visionClient = new vision.ImageAnnotatorClient();
 // the triggers' region and avoid cross-region hops.
 setGlobalOptions({ region: "asia-northeast3", maxInstances: 10 });
 
+// 앱 밖(닫혀있을 때/백그라운드)에서 뜨는 실제 OS 알림도 포그라운드 배너와
+// 똑같이 구분되게 — 특정 계정의 행동이면 그 사람 프로필 사진을, 익명/시스템
+// 알림 중 발주 확인처럼 모리 이미지가 맞는 경우는 모리 이미지를 아이콘으로
+// 띄운다. sw.js의 showNotification()은 icon에 어떤 URL이든 쓸 수 있어서
+// (PWA라서 안 되는 게 아니다), 여기서 정해서 데이터에 실어 보내면 된다.
+const SITE_ORIGIN = "https://mamory.web.app";
+const MASCOT_ICON_BY_TYPE = {
+  orderReminder: `${SITE_ORIGIN}/img/mascot/mascot-hungry.png`,
+};
+
 // Client stores fcmTokens as {id, token} (id = a per-device id, so
 // re-registering replaces this device's entry instead of piling up a new
 // one every time the SW updates and reissues a token). Older entries may
@@ -61,7 +71,18 @@ async function sendToTokens(tokens, notification) {
       // default banner in ADDITION to whatever our service worker's
       // onBackgroundMessage renders — this was the actual cause of every
       // push showing up twice. With data-only, the SW is the sole renderer.
-      data: { title: notification.title, body: notification.body, link: notification.link || "/" },
+      // FCM data 필드는 전부 문자열이어야 해서, 없는 값은 null/undefined가
+      // 아니라 빈 문자열로 보낸다 — 클라이언트는 빈 문자열을 "사람이 특정된
+      // 알림 아님(시스템/익명)"으로 해석해 일반 배너로 그린다.
+      data: {
+        title: notification.title,
+        body: notification.body,
+        link: notification.link || "/",
+        type: notification.type || "general",
+        fromPhone: notification.fromPhone || "",
+        fromName: notification.fromName || "",
+        iconUrl: notification.iconUrl || "",
+      },
       webpush: {
         fcmOptions: { link: notification.link || "/" },
       },
@@ -102,12 +123,29 @@ async function notify(phones, tokens, notification) {
         body: notification.body,
         link: notification.link || "/",
         type: notification.type || "general",
+        // 특정 계정의 행동(댓글/답글/새 글 등)으로 생긴 알림이면 그 사람의
+        // phone/name을 같이 남긴다 — 클라이언트가 포그라운드 배너를 그릴 때
+        // 프로필 사진을 붙여서 보여줄 수 있게. 익명/시스템 알림은 비워둔다.
+        fromPhone: notification.fromPhone || null,
+        fromName: notification.fromName || null,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     });
     jobs.push(batch.commit());
   }
-  if (tokens && tokens.length > 0) jobs.push(sendToTokens(tokens, notification));
+  if (tokens && tokens.length > 0) {
+    // 앱이 닫혀있을 때 뜨는 실제 OS 알림도 포그라운드 배너와 똑같이
+    // 구분되게 — 특정 계정의 행동이면 그 사람 프로필 사진을, 모리 아이콘이
+    // 맞는 시스템 알림(발주 확인 등)은 모리 이미지를 아이콘으로 보낸다.
+    let iconUrl = null;
+    if (notification.fromPhone) {
+      const fromSnap = await db.collection("accounts").doc(notification.fromPhone).get();
+      iconUrl = (fromSnap.exists && fromSnap.data().avatarUrl) || null;
+    } else if (MASCOT_ICON_BY_TYPE[notification.type]) {
+      iconUrl = MASCOT_ICON_BY_TYPE[notification.type];
+    }
+    jobs.push(sendToTokens(tokens, { ...notification, iconUrl }));
+  }
   await Promise.all(jobs);
 }
 
@@ -145,6 +183,8 @@ exports.notifyOwnerOnNewRequest = onDocumentCreated("checks/{date}/requestBatche
     body: `${batch.staffName ? batch.staffName + "님이 " : ""}자재 발주 요청을 보냈습니다`,
     link: "/owner.html",
     type: "request",
+    fromPhone: batch.staffPhone,
+    fromName: batch.staffName,
   });
 });
 
@@ -217,6 +257,8 @@ exports.notifyOnNewShareNote = onDocumentCreated("shares/{date}/items/{itemId}",
       body,
       link: shareLinkForRole(role, isSoldout ? "soldout" : "note", itemDate),
       type: isSoldout ? "soldout" : "share",
+      fromPhone: item.staffPhone,
+      fromName: item.staffName,
     }));
   });
   await Promise.all(sends);
@@ -243,7 +285,7 @@ exports.notifyOnSoldoutResolved = onDocumentUpdated("shares/{date}/items/{itemId
   });
   await Promise.all(
     Object.keys(byRole).map((role) =>
-      notify(byRole[role].phones, byRole[role].tokens, { title: "품절 해제 알림", body, link: shareLinkForRole(role, "soldout", itemDate), type: "soldout" })
+      notify(byRole[role].phones, byRole[role].tokens, { title: "품절 해제 알림", body, link: shareLinkForRole(role, "soldout", itemDate), type: "soldout", fromPhone: after.resolvedByPhone, fromName: after.resolvedByName })
     )
   );
 });
@@ -266,7 +308,7 @@ exports.notifyOnNewRecipe = onDocumentCreated("recipes/{recipeId}", async (event
   });
   await Promise.all(
     Object.keys(byRole).map((role) =>
-      notify(byRole[role].phones, byRole[role].tokens, { title, body, link: shareLinkForRole(role, "recipe"), type: isDisco ? "discontinued" : "recipe" })
+      notify(byRole[role].phones, byRole[role].tokens, { title, body, link: shareLinkForRole(role, "recipe"), type: isDisco ? "discontinued" : "recipe", fromPhone: recipe.staffPhone, fromName: recipe.staffName })
     )
   );
 });
@@ -290,7 +332,7 @@ exports.notifyOnNewCashEntry = onDocumentCreated("cashRegister/{date}/entries/{e
   const body = `${entry.staffName ? entry.staffName + "님이 " : ""}시재 ${(entry.total || 0).toLocaleString()}원을 등록했습니다`;
   await Promise.all(
     Object.keys(byRole).map((role) =>
-      notify(byRole[role].phones, byRole[role].tokens, { title: "시재 등록 알림", body, link: registerLinkForRole(role), type: "cash" })
+      notify(byRole[role].phones, byRole[role].tokens, { title: "시재 등록 알림", body, link: registerLinkForRole(role), type: "cash", fromPhone: entry.staffPhone, fromName: entry.staffName })
     )
   );
 });
@@ -308,6 +350,8 @@ exports.notifyOwnerOnPayrollRequest = onDocumentCreated("payrollRequests/{reques
     body: `${req.staffName ? req.staffName + "님이 " : ""}${req.cycleLabel || ""} 급여를 제출했습니다`,
     link: "/staff.html?view=payroll",
     type: "payroll",
+    fromPhone: req.staffPhone,
+    fromName: req.staffName,
   });
 });
 
@@ -331,6 +375,8 @@ exports.notifyOwnerOnAttendanceStamp = onDocumentCreated("accounts/{phone}/atten
     body: `${stamp.staffName ? stamp.staffName + "님이 " : ""}${stamp.time || ""} ${label} 도장을 찍었습니다`,
     link: "/staff.html?view=payroll",
     type: "attendance",
+    fromPhone: phone,
+    fromName: stamp.staffName,
   });
 });
 
@@ -370,6 +416,8 @@ exports.notifyOnNewReply = onDocumentUpdated("shares/{date}/items/{itemId}", asy
       body,
       link: shareLinkForRole(role, "note", itemDate),
       type: "share",
+      fromPhone: newReply.staffPhone,
+      fromName: newReply.staffName,
     }));
   });
   await Promise.all(sends);
@@ -462,6 +510,8 @@ exports.notifyOnNewReaction = onDocumentUpdated("shares/{date}/items/{itemId}", 
     body: `${reactorName}님이 ${withEulReul(label)} 눌렀습니다`,
     link: shareLinkForRole(authorAccSnap.data().role, "note", itemDate),
     type: "share",
+    fromPhone: reactorPhone,
+    fromName: reactorName,
   });
 });
 
@@ -517,6 +567,8 @@ exports.notifyPayday = onSchedule({ schedule: "0 9 * * *", timeZone: "Asia/Seoul
         body: `${s.name || "직원"}님 급여 지급날입니다!`,
         link: "/staff.html?view=payroll",
         type: "payroll",
+        fromPhone: s.phone,
+        fromName: s.name,
       })
     ),
   ]);
@@ -526,12 +578,11 @@ exports.notifyPayday = onSchedule({ schedule: "0 9 * * *", timeZone: "Asia/Seoul
 // 요청되는 고정 자재. 시작일부터 이틀 간격(diff % 2 === 0)으로만 해당 날짜에
 // 문서를 만든다 — .create()라서 그날 이미 (사람이 직접 담았든, 이 함수가
 // 이미 만들었든) 같은 자재 문서가 있으면 조용히 건너뛰고 덮어쓰지 않는다.
+// 자재 ID를 직접 하드코딩하는 대신 이름으로 매번 조회한다 — ID를 미리 알아둘
+// 필요가 없어서 새 자재를 추가하기 쉽고, mainCategory/subCategory도 자재관리
+// 쪽 실제 값을 그대로 따라가 어긋날 일이 없다.
 const FIXED_INTERVAL_START = "2026-09-30";
-const FIXED_INTERVAL_MATERIALS = [
-  { id: "Yj417CXCvshydcGjEHbZ", materialName: "홀더(미듐)", mainCategory: "기본자재", subCategory: "홀더/캐리어" },
-  { id: "EHwg6H31nXzpSszsfgsy", materialName: "홀더(라지)", mainCategory: "기본자재", subCategory: "홀더/캐리어" },
-  { id: "S8M3b87BMOeMoIU1gSJ9", materialName: "일반우유", mainCategory: "식자재", subCategory: "우유옵션" },
-];
+const FIXED_INTERVAL_MATERIAL_NAMES = ["홀더(미듐)", "홀더(라지)", "일반우유", "디카원두", "일반원두"];
 
 function kstDaysBetween(dateStr, fromStr) {
   return Math.round((new Date(`${dateStr}T00:00:00Z`) - new Date(`${fromStr}T00:00:00Z`)) / 86400000);
@@ -549,13 +600,20 @@ exports.autoRequestFixedMaterials = onSchedule(
     const diff = kstDaysBetween(today, FIXED_INTERVAL_START);
     if (diff < 0 || diff % 2 !== 0) return; // 아직 시작 전이거나, 이틀 주기가 아닌 날
 
-    for (const m of FIXED_INTERVAL_MATERIALS) {
+    for (const name of FIXED_INTERVAL_MATERIAL_NAMES) {
+      const matSnap = await db.collection("materials").where("name", "==", name).limit(1).get();
+      if (matSnap.empty) {
+        console.warn(`autoRequestFixedMaterials: 자재관리에서 "${name}" 이름의 자재를 못 찾았어요 — 건너뜀`);
+        continue;
+      }
+      const m = matSnap.docs[0];
+      const data = m.data();
       const ref = db.collection("checks").doc(today).collection("autoPending").doc(m.id);
       try {
         await ref.create({
-          materialName: m.materialName,
-          mainCategory: m.mainCategory,
-          subCategory: m.subCategory,
+          materialName: data.name,
+          mainCategory: data.mainCategory,
+          subCategory: data.subCategory,
           urgency: "normal",
           note: "",
           qty: "",
@@ -605,6 +663,39 @@ exports.notifyCashRegister11am = onSchedule({ schedule: "0 11 * * 1-5", timeZone
 exports.notifyCashRegister2pm = onSchedule({ schedule: "0 14 * * 1-5", timeZone: "Asia/Seoul" }, () => notifyScheduledCashReminder(14));
 exports.notifyCashRegister6pm = onSchedule({ schedule: "0 18 * * 1-5", timeZone: "Asia/Seoul" }, () => notifyScheduledCashReminder(18));
 
+// ---- 발주 체크 알림 (일요일 제외 매일 오후 3시) ----
+// 오늘 요청된 자재 중 하나라도 주문완료 체크가 안 됐거나(!ordered), 영수증이
+// 하나도 안 붙어있으면(그날 전체 영수증도 없고 그 자재에 개별 첨부도 없음)
+// 사장님에게 리마인드. 오늘 요청된 자재가 하나도 없으면(주문할 게 없음)
+// 보낼 이유가 없어 건너뛴다.
+exports.notifyOwnerOrderReminder = onSchedule({ schedule: "0 15 * * 1-6", timeZone: "Asia/Seoul" }, async () => {
+  const today = kstDateStr(new Date());
+  const itemsSnap = await db.collection("checks").doc(today).collection("items").get();
+  if (itemsSnap.empty) return;
+
+  const checkDocSnap = await db.collection("checks").doc(today).get();
+  const hasDayReceipt = (checkDocSnap.exists && checkDocSnap.data().receiptPhotos || []).length > 0;
+
+  const needsReminder = itemsSnap.docs.some((docSnap) => {
+    const it = docSnap.data();
+    if (!it.ordered) return true;
+    const hasItemReceipt = hasDayReceipt || (it.ownerAttachedPhotos || []).length > 0;
+    return !hasItemReceipt;
+  });
+  if (!needsReminder) return;
+
+  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").get();
+  const phones = [];
+  const tokens = [];
+  ownersSnap.forEach((docSnap) => { phones.push(docSnap.id); tokens.push(...tokensOf(docSnap.data().fcmTokens)); });
+  await notify(phones, tokens, {
+    title: "발주 확인",
+    body: "오늘 자재 주문 하셨나요? 모리가 기다리고 있어요",
+    link: "/owner.html",
+    type: "orderReminder",
+  });
+});
+
 // ---- 근무표 출근 전날 알림 (매일 밤 9시) ----
 // 내일(KST) 날짜로 등록된 근무표 항목을 모아, 각자 본인에게만 "내일 근무예요"
 // 알림을 보낸다 — 다른 직원의 스케줄까지 알 필요는 없으므로 본인 항목만.
@@ -648,6 +739,8 @@ exports.notifyOnHumanityCrack = onDocumentCreated("humanityCracks/{crackId}", as
     body: `${crack.staffName ? crack.staffName + "님: " : ""}${crack.reason || ""}`,
     link: "/staff.html",
     type: "humanity",
+    fromPhone: crack.staffPhone,
+    fromName: crack.staffName,
   });
 });
 
@@ -678,6 +771,8 @@ exports.notifyOnNewHumanityReply = onDocumentUpdated("humanityCracks/{crackId}",
       body,
       link: "/staff.html",
       type: "humanity",
+      fromPhone: newReply.staffPhone,
+      fromName: newReply.staffName,
     }));
   });
   await Promise.all(sends);
