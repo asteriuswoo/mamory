@@ -39,6 +39,7 @@
      카드가 밝은 회색으로 뒤집혀버리는 역효과가 났다. */
   --hero-dark: #1f1f1f;
   --header-wash: rgba(217, 119, 69, .2);
+  --tabbar-bg: rgba(255, 255, 255, .82);
   font-family: "Pretendard", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
 }
 
@@ -75,6 +76,7 @@
   /* 라이트모드에선 50% 오렌지 워시가 크림색과 섞여 은은한 복숭아빛이지만,
      같은 걸 어두운 배경 위에 그대로 쓰면 탁한 갈색으로 보여서 낮춘다. */
   --header-wash: rgba(217, 119, 69, .28);
+  --tabbar-bg: rgba(35, 35, 39, .82);
 }
 
 * { box-sizing: border-box; }
@@ -517,7 +519,11 @@ body.has-bottom-tabs {
   position: absolute;
   inset: 0;
   overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+  /* NOT -webkit-overflow-scrolling:touch — that legacy property is known to
+     trap position:fixed descendants (modals, the payroll day-detail sheet)
+     inside this scroll box instead of letting them escape to the true
+     viewport, cutting them off above the bottom tab bar. Modern iOS scrolls
+     smoothly without it. */
   overscroll-behavior: none;
 }
 
@@ -525,57 +531,53 @@ body.has-bottom-tabs #pageScroll {
   padding-bottom: 108px;
 }
 
+/* Instagram-style floating pill — icons only, no labels, not edge-to-edge
+   (replaces the old full-width bar with a raised circular active tab). */
 .bottom-tabs {
   position: fixed;
-  left: 0;
-  right: 0;
-  /* Forces its own compositing layer — without this, iOS Safari can visibly
-     detach position:fixed bars from the true screen edge for a moment after
-     a JS-driven scroll/DOM update, showing a sliver of the page background
-     underneath until the next repaint. */
-  transform: translateZ(0);
-  bottom: 0;
+  left: 50%;
+  bottom: calc(14px + env(safe-area-inset-bottom));
+  /* translateZ(0) forces its own compositing layer — without this, iOS
+     Safari can visibly detach position:fixed bars from the true screen
+     position for a moment after a JS-driven scroll/DOM update. */
+  transform: translateX(-50%) translateZ(0);
   z-index: 40;
   display: flex;
-  align-items: flex-end;
-  background: linear-gradient(0deg, rgba(217,119,69,.5) 0%, rgba(217,119,69,0) 95%), var(--cream);
-  border-top: 1px solid var(--border);
-  padding-bottom: env(safe-area-inset-bottom);
-  box-shadow: 0 -2px 10px rgba(0,0,0,.06);
+  align-items: center;
+  gap: 10px;
+  background: var(--tabbar-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-radius: 999px;
+  padding: 8px 16px;
+  box-shadow: 0 8px 24px rgba(27,23,20,.16);
 }
 
 .bottom-tab {
-  flex: 1;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 3px;
-  padding: 9px 4px 8px;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  padding: 0;
   text-decoration: none;
   color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
   border: none;
   background: none;
+  border-radius: 50%;
   font-family: inherit;
   cursor: pointer;
+  transition: background .15s ease, color .15s ease;
 }
 
-/* The "you are here" motion: the label gets a highlighter-pen stroke behind
-   it, sweeping left-to-right in the same orange the header gradient uses,
-   whenever this tab becomes the active one (no JS animation needed — it's
-   just background-size transitioning on the .active class toggle). */
+/* Text labels stay in the markup (badges rely on the DOM structure) but are
+   visually hidden — icon-only, Instagram-style. */
 .bottom-tab > span:last-child {
-  position: relative;
-  background-image: linear-gradient(90deg, rgba(217,119,69,.45), rgba(217,119,69,.45));
-  background-repeat: no-repeat;
-  background-position: 0 78%;
-  background-size: 0% 55%;
-  transition: background-size .4s ease;
-}
-
-.bottom-tab.active > span:last-child {
-  background-size: 100% 55%;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
 }
 
 .bottom-tab svg {
@@ -593,32 +595,17 @@ body.has-bottom-tabs #pageScroll {
 .bottom-tab-icon .corner-badge {
   position: absolute;
   top: -4px;
-  right: -10px;
+  right: -8px;
   margin-left: 0;
 }
 
-/* Whichever tab is currently open gets a raised circular button, like the
-   round "주문" tab in the official Mammoth Coffee app — this follows the
-   active tab (not a fixed position), so it doubles as a "you are here"
-   indicator. 오늘 발주 just happens to be active by default on app open. */
 .bottom-tab.active {
   color: var(--ink);
-}
-
-.bottom-tab.active .bottom-tab-icon {
-  width: 54px;
-  height: 54px;
-  border-radius: 50%;
-  background: linear-gradient(180deg, #e2895c 0%, var(--gold) 100%);
-  box-shadow: 0 4px 14px rgba(217,119,69,.45);
-  border: 4px solid #fff;
-  margin-top: -30px;
-  color: #fff;
+  background: var(--cream);
 }
 
 .bottom-tab.active .bottom-tab-icon svg {
-  width: 24px;
-  height: 24px;
+  stroke-width: 2.4;
 }
 
 main {
@@ -4106,6 +4093,9 @@ pre.share-preview {
 .payroll-form-sheet {
   width: 100%;
   max-height: 88vh;
+  /* 88vh can overshoot the real visible height now that pages pin
+     html/body (position:fixed) — 88dvh tracks the actual viewport. */
+  max-height: 88dvh;
   overflow-y: auto;
   background: var(--card);
   border-radius: 20px 20px 0 0;

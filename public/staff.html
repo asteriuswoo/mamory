@@ -12,7 +12,7 @@
 <link rel="icon" href="icons/icon-192.png?v=4" />
 <title>자재 발주 담기 - MAMORY</title>
 <style>html,body{background:#efece4}</style>
-<link rel="stylesheet" href="css/style.css?v=154" />
+<link rel="stylesheet" href="css/style.css?v=158" />
 <style>
   /* The page itself never needs to scroll — only #pageScroll inside it does.
      Pinning html/body removes the native scroll viewport entirely, which is
@@ -23,7 +23,12 @@
      #pageScroll's inset:0 is measured from THAT padding edge (not the true
      screen edge), the two 108px clearances would stack instead of being
      the single clearance #pageScroll already applies to itself. */
-  body{position:fixed; inset:0; width:100%; height:100%; overflow:hidden; overscroll-behavior:none;}
+  /* -webkit-overflow-scrolling:auto overrides the shared body rule's
+     "touch" — that property on body (an ancestor of the payroll detail
+     sheet etc.) was the real reason position:fixed overlays stayed trapped
+     above the bottom tab bar instead of covering the full screen, even
+     after removing it from #pageScroll. */
+  body{position:fixed; inset:0; width:100%; height:100%; overflow:hidden; overscroll-behavior:none; -webkit-overflow-scrolling:auto;}
   /* Matches body.has-bottom-tabs's own specificity so this actually wins
      (a bare "body" selector above would lose to that class selector). */
   body.has-bottom-tabs{padding-bottom:0;}

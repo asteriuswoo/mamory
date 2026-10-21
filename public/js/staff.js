@@ -222,19 +222,14 @@ function forceFixedBarReflow() {
 // visualViewport의 resize/scroll 이벤트가 바로 그 어긋남이 생기고 있는
 // 동안(애니메이션 도중까지) 계속 뜨므로, 끝나길 기다리지 않고 실시간으로
 // 따라간다.
-function pinBottomTabsToVisualViewport() {
-  const bar = document.querySelector(".bottom-tabs");
-  if (!bar || !window.visualViewport) return;
-  const vv = window.visualViewport;
-  const sync = () => {
-    const gap = window.innerHeight - vv.height - vv.offsetTop;
-    bar.style.bottom = `${Math.max(0, gap)}px`;
-  };
-  vv.addEventListener("resize", sync);
-  vv.addEventListener("scroll", sync);
-  sync();
-}
-pinBottomTabsToVisualViewport();
+// staff.html now pins html/body (position:fixed) for the scroll-bounce fix
+// (see its <head>) — there's no address bar to show/hide in that pinned,
+// standalone-app layout anymore, which was the only scenario this was
+// compensating for, so it was left with nothing real to correct. Instead it
+// kept measuring a small phantom gap and nudging the bar up off the true
+// bottom edge. Plain CSS position:fixed + bottom:0 is correct on its own
+// now, so this no longer runs.
+function pinBottomTabsToVisualViewport() {}
 
 // 자재 이름 검색창에 포커스하는 순간 모바일 키보드가 화면 아래쪽 상당
 // 부분을 가린다 — 처음엔 스크롤로 입력창을 키보드 위로 끌어올려봤지만,
