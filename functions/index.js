@@ -1,6 +1,6 @@
 const { onDocumentCreated, onDocumentUpdated } = require("firebase-functions/v2/firestore");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
-const { onRequest } = require("firebase-functions/v2/https");
+const { onRequest, onCall, HttpsError } = require("firebase-functions/v2/https");
 const { setGlobalOptions } = require("firebase-functions/v2");
 const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
@@ -172,9 +172,10 @@ function shareLinkForRole(role, tab, dateStr) {
 // 컬렉션을 직접 구독해서 자재 개수만큼 알림이 우르르 갔다 — 대신 제출 시점에
 // staff.js가 별도로 남기는 requestBatches 문서(제출 묶음 1건당 1개) 를
 // 구독해서, 제출할 때마다 딱 한 번만 알림이 가도록 한다.
-exports.notifyOwnerOnNewRequest = onDocumentCreated("checks/{date}/requestBatches/{batchId}", async (event) => {
+exports.notifyOwnerOnNewRequest = onDocumentCreated("stores/{storeId}/checks/{date}/requestBatches/{batchId}", async (event) => {
+  const storeId = event.params.storeId;
   const batch = event.data.data();
-  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").get();
+  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").where("storeId", "==", storeId).get();
   const phones = [];
   const tokens = [];
   ownersSnap.forEach((doc) => { phones.push(doc.id); tokens.push(...tokensOf(doc.data().fcmTokens)); });
@@ -193,11 +194,12 @@ exports.notifyOwnerOnNewRequest = onDocumentCreated("checks/{date}/requestBatche
 // 내용에 일부러 안 담는다(익명 리마인더 용도) — Firestore 문서 자체에는
 // staffPhone을 남겨두지만(나중에 남용 확인이 필요할 경우를 대비), 알림
 // 텍스트에는 절대 안 드러낸다.
-exports.notifyOwnerUnorderedReminder = onDocumentCreated("checks/{date}/unorderedNudges/{nudgeId}", async (event) => {
+exports.notifyOwnerUnorderedReminder = onDocumentCreated("stores/{storeId}/checks/{date}/unorderedNudges/{nudgeId}", async (event) => {
+  const storeId = event.params.storeId;
   const nudge = event.data.data();
   const n = nudge.count || 0;
   if (n <= 0) return;
-  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").get();
+  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").where("storeId", "==", storeId).get();
   const phones = [];
   const tokens = [];
   ownersSnap.forEach((doc) => { phones.push(doc.id); tokens.push(...tokensOf(doc.data().fcmTokens)); });
@@ -214,7 +216,7 @@ exports.notifyOwnerUnorderedReminder = onDocumentCreated("checks/{date}/unordere
 // 이제는 제출 시점에 owner.js가 직원별로 남기는 orderBatches 문서(제출
 // 1건당 직원 1명당 1개)를 구독해서, 제출할 때마다 직원당 딱 한 번만 알림이
 // 가도록 한다.
-exports.notifyStaffOnOrdered = onDocumentCreated("checks/{date}/orderBatches/{batchId}", async (event) => {
+exports.notifyStaffOnOrdered = onDocumentCreated("stores/{storeId}/checks/{date}/orderBatches/{batchId}", async (event) => {
   const batch = event.data.data();
   if (!batch.staffPhone) return;
   const accSnap = await db.collection("accounts").doc(batch.staffPhone).get();
@@ -234,17 +236,22 @@ exports.notifyStaffOnOrdered = onDocumentCreated("checks/{date}/orderBatches/{ba
 // 대신 제목만 "~님이 회원님을 언급했어요"로 바꿔서 구분되게 보낸다.
 // 댓글(notifyOnNewReply)과 같은 규칙: @멘션이 있으면 멘션된 사람에게만,
 // 없으면 작성자를 뺀 전원에게 알림이 간다.
-exports.notifyOnNewShareNote = onDocumentCreated("shares/{date}/items/{itemId}", async (event) => {
+exports.notifyOnNewShareNote = onDocumentCreated("stores/{storeId}/shares/{date}/items/{itemId}", async (event) => {
+  const storeId = event.params.storeId;
   const itemDate = event.params.date;
   const item = event.data.data();
   if (item.type !== "note" && item.type !== "soldout") return;
   const isSoldout = item.type === "soldout";
   const defaultTitle = isSoldout ? "품절 공유 알림" : "소통해요 알림";
-  const body = `${item.staffName ? item.staffName + "님: " : ""}${item.content || ""}${isSoldout ? " 품절됐어요" : ""}`;
+  // 품절공유는 누가 올렸는지보다 품절 사실 자체가 중요해서 익명으로 보낸다
+  // (소통해요는 대화라 누가 썼는지가 여전히 중요해 그대로 둔다).
+  const body = isSoldout
+    ? `${item.content || ""} 품절됐어요`
+    : `${item.staffName ? item.staffName + "님: " : ""}${item.content || ""}`;
   const mentionedPhones = new Set(item.mentions || []);
   const hasMention = !isSoldout && (item.mentionsAll || mentionedPhones.size > 0);
 
-  const accSnap = await db.collection("accounts").get();
+  const accSnap = await db.collection("accounts").where("storeId", "==", storeId).get();
   const sends = [];
   accSnap.forEach((docSnap) => {
     if (docSnap.id === item.staffPhone) return;
@@ -257,8 +264,7 @@ exports.notifyOnNewShareNote = onDocumentCreated("shares/{date}/items/{itemId}",
       body,
       link: shareLinkForRole(role, isSoldout ? "soldout" : "note", itemDate),
       type: isSoldout ? "soldout" : "share",
-      fromPhone: item.staffPhone,
-      fromName: item.staffName,
+      ...(isSoldout ? {} : { fromPhone: item.staffPhone, fromName: item.staffName }),
     }));
   });
   await Promise.all(sends);
@@ -268,14 +274,15 @@ exports.notifyOnNewShareNote = onDocumentCreated("shares/{date}/items/{itemId}",
 // 알림 — 품절 등록 때(notifyOnNewShareNote)와 짝을 이루는 알림이라, 자재가
 // 다시 들어온 걸 다들 바로 알 수 있게 한다. 이미 해제된 항목의 문구만 다시
 // 고치는 경우(resolved가 이미 true)는 제외 — 그때는 다시 알릴 내용이 없다.
-exports.notifyOnSoldoutResolved = onDocumentUpdated("shares/{date}/items/{itemId}", async (event) => {
+exports.notifyOnSoldoutResolved = onDocumentUpdated("stores/{storeId}/shares/{date}/items/{itemId}", async (event) => {
+  const storeId = event.params.storeId;
   const itemDate = event.params.date;
   const before = event.data.before.data();
   const after = event.data.after.data();
   if (after.type !== "soldout" || before.resolved || !after.resolved) return;
 
   const body = `${after.resolvedByName ? after.resolvedByName + "님: " : ""}${after.content || ""} 해제됐어요`;
-  const accSnap = await db.collection("accounts").get();
+  const accSnap = await db.collection("accounts").where("storeId", "==", storeId).get();
   const byRole = { owner: { phones: [], tokens: [] }, staff: { phones: [], tokens: [] } };
   accSnap.forEach((docSnap) => {
     if (docSnap.id === after.resolvedByPhone) return;
@@ -293,12 +300,14 @@ exports.notifyOnSoldoutResolved = onDocumentUpdated("shares/{date}/items/{itemId
 // 공유하기 > 레시피(레시피변경/단종)에 새 글이 올라오면 작성자를 제외한
 // 모두에게 알림 — 공유해요/품절공유와 같은 패턴. 단종 소식은 제목만
 // 다르게 보내서 구분되게 한다.
-exports.notifyOnNewRecipe = onDocumentCreated("recipes/{recipeId}", async (event) => {
+exports.notifyOnNewRecipe = onDocumentCreated("stores/{storeId}/recipes/{recipeId}", async (event) => {
+  const storeId = event.params.storeId;
   const recipe = event.data.data();
   const isDisco = recipe.status === "discontinued";
   const title = isDisco ? "🔴 메뉴 단종 알림" : "📖 레시피 등록 알림";
-  const body = `${recipe.staffName ? recipe.staffName + "님: " : ""}${recipe.menuName || ""}${isDisco ? " 단종됐어요" : " 레시피가 등록됐어요"}`;
-  const accSnap = await db.collection("accounts").get();
+  // 누가 등록/단종했는지보다 메뉴 자체가 중요해서 익명으로 보낸다.
+  const body = `${recipe.menuName || ""}${isDisco ? " 단종됐어요" : " 레시피가 등록됐어요"}`;
+  const accSnap = await db.collection("accounts").where("storeId", "==", storeId).get();
   const byRole = { owner: { phones: [], tokens: [] }, staff: { phones: [], tokens: [] } };
   accSnap.forEach((docSnap) => {
     if (docSnap.id === recipe.staffPhone) return;
@@ -308,20 +317,21 @@ exports.notifyOnNewRecipe = onDocumentCreated("recipes/{recipeId}", async (event
   });
   await Promise.all(
     Object.keys(byRole).map((role) =>
-      notify(byRole[role].phones, byRole[role].tokens, { title, body, link: shareLinkForRole(role, "recipe"), type: isDisco ? "discontinued" : "recipe", fromPhone: recipe.staffPhone, fromName: recipe.staffName })
+      notify(byRole[role].phones, byRole[role].tokens, { title, body, link: shareLinkForRole(role, "recipe"), type: isDisco ? "discontinued" : "recipe" })
     )
   );
 });
 
-// 등록해요 > 시재 등록에 새 기록이 쌓이면 등록한 사람을 제외한 모두에게
-// 알림 — 선결제 충전 등록(topups)은 알림 대상이 아니라 시재 entries만 구독.
+// 등록해요 > 시재 등록 / 선결제 충전 등록에 새 기록이 쌓이면 등록한 사람을
+// 제외한 모두에게 알림.
 function registerLinkForRole(role) {
   return role === "owner" ? "/register.html" : "/staff.html?view=register";
 }
 
-exports.notifyOnNewCashEntry = onDocumentCreated("cashRegister/{date}/entries/{entryId}", async (event) => {
+exports.notifyOnNewCashEntry = onDocumentCreated("stores/{storeId}/cashRegister/{date}/entries/{entryId}", async (event) => {
+  const storeId = event.params.storeId;
   const entry = event.data.data();
-  const accSnap = await db.collection("accounts").get();
+  const accSnap = await db.collection("accounts").where("storeId", "==", storeId).get();
   const byRole = { owner: { phones: [], tokens: [] }, staff: { phones: [], tokens: [] } };
   accSnap.forEach((doc) => {
     if (doc.id === entry.staffPhone) return;
@@ -329,19 +339,42 @@ exports.notifyOnNewCashEntry = onDocumentCreated("cashRegister/{date}/entries/{e
     byRole[role].phones.push(doc.id);
     byRole[role].tokens.push(...tokensOf(doc.data().fcmTokens));
   });
-  const body = `${entry.staffName ? entry.staffName + "님이 " : ""}시재 ${(entry.total || 0).toLocaleString()}원을 등록했습니다`;
+  // 누가 등록했는지보다 금액 자체가 중요해서 익명으로 보낸다.
+  const body = `시재 ${(entry.total || 0).toLocaleString()}원을 등록했습니다`;
   await Promise.all(
     Object.keys(byRole).map((role) =>
-      notify(byRole[role].phones, byRole[role].tokens, { title: "시재 등록 알림", body, link: registerLinkForRole(role), type: "cash", fromPhone: entry.staffPhone, fromName: entry.staffName })
+      notify(byRole[role].phones, byRole[role].tokens, { title: "시재 등록 알림", body, link: registerLinkForRole(role), type: "cash" })
+    )
+  );
+});
+
+// 선결제 충전 등록 알림 — 누가 등록했는지는 밝히지 않고(익명), 어느
+// 고객에게 충전됐는지만 모두에게 알린다(등록한 사람 본인 제외).
+exports.notifyOnNewTopup = onDocumentCreated("stores/{storeId}/topups/{topupId}", async (event) => {
+  const storeId = event.params.storeId;
+  const topup = event.data.data();
+  const accSnap = await db.collection("accounts").where("storeId", "==", storeId).get();
+  const byRole = { owner: { phones: [], tokens: [] }, staff: { phones: [], tokens: [] } };
+  accSnap.forEach((doc) => {
+    if (doc.id === topup.staffPhone) return;
+    const role = doc.data().role === "owner" ? "owner" : "staff";
+    byRole[role].phones.push(doc.id);
+    byRole[role].tokens.push(...tokensOf(doc.data().fcmTokens));
+  });
+  const body = `${topup.customerName || ""}에게 선결제 충전이 등록되었습니다`;
+  await Promise.all(
+    Object.keys(byRole).map((role) =>
+      notify(byRole[role].phones, byRole[role].tokens, { title: "선결제 충전 알림", body, link: registerLinkForRole(role), type: "topup" })
     )
   );
 });
 
 // 출근기록 > 급여대장에서 직원이 월급 제출하면 사장님에게만 알림 — 다른
 // 직원들은 서로의 급여 정보를 알 필요가 없으므로 owner 역할 계정에만 보낸다.
-exports.notifyOwnerOnPayrollRequest = onDocumentCreated("payrollRequests/{requestId}", async (event) => {
+exports.notifyOwnerOnPayrollRequest = onDocumentCreated("stores/{storeId}/payrollRequests/{requestId}", async (event) => {
+  const storeId = event.params.storeId;
   const req = event.data.data();
-  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").get();
+  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").where("storeId", "==", storeId).get();
   const phones = [];
   const tokens = [];
   ownersSnap.forEach((doc) => { phones.push(doc.id); tokens.push(...tokensOf(doc.data().fcmTokens)); });
@@ -361,7 +394,10 @@ exports.notifyOwnerOnPayrollRequest = onDocumentCreated("payrollRequests/{reques
 exports.notifyOwnerOnAttendanceStamp = onDocumentCreated("accounts/{phone}/attendance/{stampId}", async (event) => {
   const stamp = event.data.data();
   const phone = event.params.phone;
-  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").get();
+  const actingAccSnap = await db.collection("accounts").doc(phone).get();
+  const storeId = actingAccSnap.exists ? actingAccSnap.data().storeId : null;
+  if (!storeId) return;
+  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").where("storeId", "==", storeId).get();
   const phones = [];
   const tokens = [];
   ownersSnap.forEach((doc) => {
@@ -389,7 +425,8 @@ exports.notifyOwnerOnAttendanceStamp = onDocumentCreated("accounts/{phone}/atten
 // 콕 집어 멘션했으면 그 사람(들)에게만 "언급했어요" 알림이 가고, 멘션 없이
 // 쓴 일반 댓글은 작성자를 뺀 전원에게 알림이 간다(원글 작성자만 받던
 // 예전 방식에서 확장됨).
-exports.notifyOnNewReply = onDocumentUpdated("shares/{date}/items/{itemId}", async (event) => {
+exports.notifyOnNewReply = onDocumentUpdated("stores/{storeId}/shares/{date}/items/{itemId}", async (event) => {
+  const storeId = event.params.storeId;
   const itemDate = event.params.date;
   const before = event.data.before.data();
   const after = event.data.after.data();
@@ -403,7 +440,7 @@ exports.notifyOnNewReply = onDocumentUpdated("shares/{date}/items/{itemId}", asy
   const mentionedPhones = new Set(newReply.mentions || []);
   const hasMention = newReply.mentionsAll || mentionedPhones.size > 0;
 
-  const accSnap = await db.collection("accounts").get();
+  const accSnap = await db.collection("accounts").where("storeId", "==", storeId).get();
   const sends = [];
   accSnap.forEach((docSnap) => {
     if (docSnap.id === newReply.staffPhone) return;
@@ -446,6 +483,17 @@ function kstDateStr(date) {
   }).format(date);
 }
 
+// "HH:MM" — 스케줄의 startTime/endTime과 같은 형식(payroll.js의 5분 단위
+// 시각 선택기와 맞춰, 이 함수도 5분 간격으로만 돌리면 정확히 들어맞는다).
+function kstTimeStr(date) {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Seoul",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
 // 모리 키우기: 사장님이 주문완료 체크 후 제출(= orderBatches 문서 생성)할
 // 때마다 꿀단지 1개씩 적립 — 직원 쪽 체크베리/주먹밥과 똑같이 하루 최대
 // 2번까지만 적립된다(제출을 잘게 쪼개서 꿀단지를 우르르 받아내는 걸 막기
@@ -456,11 +504,12 @@ function kstDateStr(date) {
 // meta/mascot 문서가 아니라 오너 역할 계정들의 accounts 문서에 개인적으로
 // 쌓는다 — 그래야 이 가게의 먹이 알림이 사장님 화면에만 뜨고 직원들
 // 화면엔 안 뜬다(레벨/경험치는 여전히 meta/mascot에 공유로 남는다).
-exports.awardHoneyOnOrderBatch = onDocumentCreated("checks/{date}/orderBatches/{batchId}", async (event) => {
+exports.awardHoneyOnOrderBatch = onDocumentCreated("stores/{storeId}/checks/{date}/orderBatches/{batchId}", async (event) => {
+  const storeId = event.params.storeId;
   const date = event.params.date;
   if (date !== kstDateStr(new Date())) return; // only same-day completion counts
 
-  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").get();
+  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").where("storeId", "==", storeId).get();
   await Promise.all(
     ownersSnap.docs.map((ownerDoc) =>
       db.runTransaction(async (tx) => {
@@ -478,7 +527,7 @@ exports.awardHoneyOnOrderBatch = onDocumentCreated("checks/{date}/orderBatches/{
   );
 });
 
-exports.notifyOnNewReaction = onDocumentUpdated("shares/{date}/items/{itemId}", async (event) => {
+exports.notifyOnNewReaction = onDocumentUpdated("stores/{storeId}/shares/{date}/items/{itemId}", async (event) => {
   const itemDate = event.params.date;
   const before = event.data.before.data();
   const after = event.data.after.data();
@@ -593,6 +642,8 @@ function kstDaysBetween(dateStr, fromStr) {
 // 확인하고 제출(또는 필요없으면 취소)해야 실제로 사장님께 전달된다. 그래서
 // 여기서는 알림도 안 보낸다 — 실제 제출은 staff.js의 submitCategory가
 // 담당하고, 그때 평소처럼 requestBatches/알림/먹이가 생긴다.
+// 매장별로 자재 목록이 따로라(stores/{storeId}/materials), 매장마다 돌며
+// 각자의 자재 목록에서 이름을 찾아 각자의 checks에 담아준다.
 exports.autoRequestFixedMaterials = onSchedule(
   { schedule: "0 8 * * *", timeZone: "Asia/Seoul" },
   async () => {
@@ -600,28 +651,32 @@ exports.autoRequestFixedMaterials = onSchedule(
     const diff = kstDaysBetween(today, FIXED_INTERVAL_START);
     if (diff < 0 || diff % 2 !== 0) return; // 아직 시작 전이거나, 이틀 주기가 아닌 날
 
-    for (const name of FIXED_INTERVAL_MATERIAL_NAMES) {
-      const matSnap = await db.collection("materials").where("name", "==", name).limit(1).get();
-      if (matSnap.empty) {
-        console.warn(`autoRequestFixedMaterials: 자재관리에서 "${name}" 이름의 자재를 못 찾았어요 — 건너뜀`);
-        continue;
-      }
-      const m = matSnap.docs[0];
-      const data = m.data();
-      const ref = db.collection("checks").doc(today).collection("autoPending").doc(m.id);
-      try {
-        await ref.create({
-          materialName: data.name,
-          mainCategory: data.mainCategory,
-          subCategory: data.subCategory,
-          urgency: "normal",
-          note: "",
-          qty: "",
-          photoUrl: "",
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-      } catch (e) {
-        // 이미 그날 담아둔 적 있음 — 건드리지 않는다.
+    const storesSnap = await db.collection("stores").get();
+    for (const storeDoc of storesSnap.docs) {
+      const storeId = storeDoc.id;
+      for (const name of FIXED_INTERVAL_MATERIAL_NAMES) {
+        const matSnap = await db.collection("stores").doc(storeId).collection("materials").where("name", "==", name).limit(1).get();
+        if (matSnap.empty) {
+          console.warn(`autoRequestFixedMaterials: ${storeId} 자재관리에서 "${name}" 이름의 자재를 못 찾았어요 — 건너뜀`);
+          continue;
+        }
+        const m = matSnap.docs[0];
+        const data = m.data();
+        const ref = db.collection("stores").doc(storeId).collection("checks").doc(today).collection("autoPending").doc(m.id);
+        try {
+          await ref.create({
+            materialName: data.name,
+            mainCategory: data.mainCategory,
+            subCategory: data.subCategory,
+            urgency: "normal",
+            note: "",
+            qty: "",
+            photoUrl: "",
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        } catch (e) {
+          // 이미 그날 담아둔 적 있음 — 건드리지 않는다.
+        }
       }
     }
   }
@@ -634,9 +689,10 @@ exports.autoRequestFixedMaterials = onSchedule(
 async function notifyScheduledCashReminder(hour) {
   const today = kstDateStr(new Date());
   const timeStr = `${String(hour).padStart(2, "0")}:00`;
-  const schedSnap = await db.collection("schedules").where("date", "==", today).get();
+  const schedSnap = await db.collectionGroup("schedules").where("date", "==", today).get();
   const onDutyPhones = new Set();
   schedSnap.forEach((docSnap) => {
+    if (!docSnap.ref.path.startsWith("stores/")) return; // 마이그레이션 전 옛 평평한 경로 중복 데이터 무시
     const d = docSnap.data();
     if (d.staffPhone && d.startTime && d.endTime && d.startTime <= timeStr && d.endTime > timeStr) {
       onDutyPhones.add(d.staffPhone);
@@ -670,30 +726,37 @@ exports.notifyCashRegister6pm = onSchedule({ schedule: "0 18 * * 1-5", timeZone:
 // 보낼 이유가 없어 건너뛴다.
 exports.notifyOwnerOrderReminder = onSchedule({ schedule: "0 15 * * 1-6", timeZone: "Asia/Seoul" }, async () => {
   const today = kstDateStr(new Date());
-  const itemsSnap = await db.collection("checks").doc(today).collection("items").get();
-  if (itemsSnap.empty) return;
+  const storesSnap = await db.collection("stores").get();
+  await Promise.all(
+    storesSnap.docs.map(async (storeDoc) => {
+      const storeId = storeDoc.id;
+      const storeRef = db.collection("stores").doc(storeId);
+      const itemsSnap = await storeRef.collection("checks").doc(today).collection("items").get();
+      if (itemsSnap.empty) return;
 
-  const checkDocSnap = await db.collection("checks").doc(today).get();
-  const hasDayReceipt = (checkDocSnap.exists && checkDocSnap.data().receiptPhotos || []).length > 0;
+      const checkDocSnap = await storeRef.collection("checks").doc(today).get();
+      const hasDayReceipt = (checkDocSnap.exists && checkDocSnap.data().receiptPhotos || []).length > 0;
 
-  const needsReminder = itemsSnap.docs.some((docSnap) => {
-    const it = docSnap.data();
-    if (!it.ordered) return true;
-    const hasItemReceipt = hasDayReceipt || (it.ownerAttachedPhotos || []).length > 0;
-    return !hasItemReceipt;
-  });
-  if (!needsReminder) return;
+      const needsReminder = itemsSnap.docs.some((docSnap) => {
+        const it = docSnap.data();
+        if (!it.ordered) return true;
+        const hasItemReceipt = hasDayReceipt || (it.ownerAttachedPhotos || []).length > 0;
+        return !hasItemReceipt;
+      });
+      if (!needsReminder) return;
 
-  const ownersSnap = await db.collection("accounts").where("role", "==", "owner").get();
-  const phones = [];
-  const tokens = [];
-  ownersSnap.forEach((docSnap) => { phones.push(docSnap.id); tokens.push(...tokensOf(docSnap.data().fcmTokens)); });
-  await notify(phones, tokens, {
-    title: "발주 확인",
-    body: "오늘 자재 주문 하셨나요? 모리가 기다리고 있어요",
-    link: "/owner.html",
-    type: "orderReminder",
-  });
+      const ownersSnap = await db.collection("accounts").where("role", "==", "owner").where("storeId", "==", storeId).get();
+      const phones = [];
+      const tokens = [];
+      ownersSnap.forEach((docSnap) => { phones.push(docSnap.id); tokens.push(...tokensOf(docSnap.data().fcmTokens)); });
+      await notify(phones, tokens, {
+        title: "발주 확인",
+        body: "오늘 자재 주문 하셨나요? 모리가 기다리고 있어요",
+        link: "/owner.html",
+        type: "orderReminder",
+      });
+    })
+  );
 });
 
 // ---- 근무표 출근 전날 알림 (매일 밤 9시) ----
@@ -701,10 +764,11 @@ exports.notifyOwnerOrderReminder = onSchedule({ schedule: "0 15 * * 1-6", timeZo
 // 알림을 보낸다 — 다른 직원의 스케줄까지 알 필요는 없으므로 본인 항목만.
 exports.notifyTomorrowShift = onSchedule({ schedule: "0 21 * * *", timeZone: "Asia/Seoul" }, async () => {
   const tomorrow = kstDateStr(new Date(Date.now() + 24 * 60 * 60 * 1000));
-  const schedSnap = await db.collection("schedules").where("date", "==", tomorrow).get();
+  const schedSnap = await db.collectionGroup("schedules").where("date", "==", tomorrow).get();
   if (schedSnap.empty) return;
   await Promise.all(
     schedSnap.docs.map(async (docSnap) => {
+      if (!docSnap.ref.path.startsWith("stores/")) return; // 마이그레이션 전 옛 평평한 경로 중복 데이터 무시
       const d = docSnap.data();
       if (!d.staffPhone) return;
       const accSnap = await db.collection("accounts").doc(d.staffPhone).get();
@@ -720,13 +784,61 @@ exports.notifyTomorrowShift = onSchedule({ schedule: "0 21 * * *", timeZone: "As
   );
 });
 
+// ---- 출퇴근 도장 10분 전 알림 (5분마다) ----
+// 직원들이 도장 찍는 걸 자꾸 깜빡해서, 오늘 스케줄상 출근/퇴근 10분 전인
+// 사람에게 콕 집어 알려준다. 스케줄 시각 선택기가 5분 단위라(payroll.js
+// timeSelectHtml), 이 함수도 정확히 5분마다 돌면 "지금+10분"이 항상 스케줄
+// 시각과 정확히 맞아떨어진다 — 그래서 범위 비교 없이 문자열 그대로
+// 비교해도 된다. 시점 하나(그 10분 전 순간)에만 한 번 걸리므로 중복 알림
+// 걱정도 없다.
+exports.notifyShiftStampReminder = onSchedule({ schedule: "*/5 * * * *", timeZone: "Asia/Seoul" }, async () => {
+  const today = kstDateStr(new Date());
+  const target = kstTimeStr(new Date(Date.now() + 10 * 60 * 1000));
+  const schedSnap = await db.collectionGroup("schedules").where("date", "==", today).get();
+  const hits = schedSnap.docs.filter((docSnap) => {
+    if (!docSnap.ref.path.startsWith("stores/")) return false; // 마이그레이션 전 옛 평평한 경로 중복 데이터 무시
+    const d = docSnap.data();
+    return d.startTime === target || d.endTime === target;
+  });
+  if (hits.length === 0) return;
+  await Promise.all(
+    hits.map(async (docSnap) => {
+      const d = docSnap.data();
+      if (!d.staffPhone) return;
+      const isStart = d.startTime === target;
+      // Cloud Scheduler는 "최소 1번"만 보장해서, 가끔 같은 5분 틱이 두 번
+      // 실행될 때가 있다 — 트랜잭션으로 "이 target 시각엔 이미 보냈다"는
+      // 표시를 스케줄 문서에 선점해서, 먼저 들어온 실행만 알림을 보내고
+      // 뒤이어 들어온 중복 실행은 조용히 건너뛴다.
+      const markerField = isStart ? "startReminderSentAt" : "endReminderSentAt";
+      const alreadySent = await db.runTransaction(async (tx) => {
+        const fresh = await tx.get(docSnap.ref);
+        if (!fresh.exists) return true;
+        if (fresh.data()[markerField] === target) return true;
+        tx.update(docSnap.ref, { [markerField]: target });
+        return false;
+      });
+      if (alreadySent) return;
+      const accSnap = await db.collection("accounts").doc(d.staffPhone).get();
+      if (!accSnap.exists) return;
+      await notify([d.staffPhone], tokensOf(accSnap.data().fcmTokens), {
+        title: "⏰ 출퇴근 도장 알림",
+        body: `10분 후 ${isStart ? "출근" : "퇴근"} 시간이에요 — 도장 찍는 거 잊지 마세요!`,
+        link: "/staff.html?view=payroll",
+        type: "attendance",
+      });
+    })
+  );
+});
+
 // ---- 극한직업 일지 등록 알림 ----
 // 가볍게 공감하고 넘기는 게 목적인 기능이라, 작성자 본인을 뺀 전 직원(+사장님)
 // 에게 바로 알림을 보낸다 — 공유해요처럼 역할별로 열어줄 페이지가 다를 필요가
 // 없는 단일 화면 기능이라 링크도 /staff.html 하나로 고정.
-exports.notifyOnHumanityCrack = onDocumentCreated("humanityCracks/{crackId}", async (event) => {
+exports.notifyOnHumanityCrack = onDocumentCreated("stores/{storeId}/humanityCracks/{crackId}", async (event) => {
+  const storeId = event.params.storeId;
   const crack = event.data.data();
-  const accSnap = await db.collection("accounts").get();
+  const accSnap = await db.collection("accounts").where("storeId", "==", storeId).get();
   const phones = [];
   const tokens = [];
   accSnap.forEach((doc) => {
@@ -746,7 +858,8 @@ exports.notifyOnHumanityCrack = onDocumentCreated("humanityCracks/{crackId}", as
 
 // 공유해요의 답글(notifyOnNewReply)과 같은 규칙: @멘션이 있으면 멘션된
 // 사람에게만, 없으면 작성자를 뺀 전원에게 알림이 간다.
-exports.notifyOnNewHumanityReply = onDocumentUpdated("humanityCracks/{crackId}", async (event) => {
+exports.notifyOnNewHumanityReply = onDocumentUpdated("stores/{storeId}/humanityCracks/{crackId}", async (event) => {
+  const storeId = event.params.storeId;
   const before = event.data.before.data();
   const after = event.data.after.data();
   const beforeReplies = before.replies || [];
@@ -759,7 +872,7 @@ exports.notifyOnNewHumanityReply = onDocumentUpdated("humanityCracks/{crackId}",
   const mentionedPhones = new Set(newReply.mentions || []);
   const hasMention = newReply.mentionsAll || mentionedPhones.size > 0;
 
-  const accSnap = await db.collection("accounts").get();
+  const accSnap = await db.collection("accounts").where("storeId", "==", storeId).get();
   const sends = [];
   accSnap.forEach((docSnap) => {
     if (docSnap.id === newReply.staffPhone) return;
@@ -786,7 +899,7 @@ exports.notifyOnNewHumanityReply = onDocumentUpdated("humanityCracks/{crackId}",
 exports.cleanupOldDiscontinuedRecipes = onSchedule({ schedule: "0 4 * * *", timeZone: "Asia/Seoul" }, async () => {
   const cutoff = admin.firestore.Timestamp.fromMillis(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const snap = await db
-    .collection("recipes")
+    .collectionGroup("recipes")
     .where("status", "==", "discontinued")
     .where("createdAt", "<", cutoff)
     .get();
@@ -830,9 +943,14 @@ function todaysSongPicker(dateStr) {
   return SONG_PICKER_WEEKDAY_ORDER[((idx % n) + n) % n];
 }
 
+// 요일별 순번 자체가 이 매장 멤버 전화번호로 하드코딩돼 있어 애초에
+// 매장 하나만 전제한 기능이라, storeId도 그 매장 고정값으로 둔다 — 다른
+// 매장까지 지원하려면 이 순번 로직 자체를 매장별 설정으로 바꿔야 한다.
+const SONG_PICKER_STORE_ID = "mmth";
+
 exports.notifySongPickerMorning = onSchedule({ schedule: "0 6 * * *", timeZone: "Asia/Seoul" }, async () => {
   const today = kstDateStr(new Date());
-  const songSnap = await db.collection("songOfTheDay").doc(today).get();
+  const songSnap = await db.collection("stores").doc(SONG_PICKER_STORE_ID).collection("songOfTheDay").doc(today).get();
   if (songSnap.exists) return;
   const picker = todaysSongPicker(today);
   const accSnap = await db.collection("accounts").doc(picker.phone).get();
@@ -865,6 +983,98 @@ exports.cleanupOldNotifications = onSchedule({ schedule: "0 4 * * *", timeZone: 
   }
 });
 
+// ---- 게시판 고정 자동 만료 (매일 새벽 4시) ----
+// 고정(📌)은 "7일 지나도 계속 보존"이 목적이지 영구보존이 목적은 아니라서
+// (매장이 늘수록 포인터가 끝없이 쌓이는 걸 막기 위해), 고정한 지 30일
+// 지난 건 포인터만 지워서 게시판에서 빠지게 한다 — 원본 글 자체는 지우지
+// 않는다, 그냥 다시 평범한 과거 글로 돌아갈 뿐이다.
+exports.cleanupExpiredPinnedShareItems = onSchedule({ schedule: "0 4 * * *", timeZone: "Asia/Seoul" }, async () => {
+  const cutoff = admin.firestore.Timestamp.fromMillis(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const snap = await db.collectionGroup("pinnedShareItems").where("pinnedAt", "<", cutoff).get();
+  if (snap.empty) return;
+  await Promise.all(
+    snap.docs.map(async (docSnap) => {
+      const { date } = docSnap.data();
+      const storeId = docSnap.ref.parent.parent.id;
+      await docSnap.ref.delete();
+      if (date) {
+        await db.collection("stores").doc(storeId).collection("shares").doc(date).collection("items").doc(docSnap.id)
+          .update({ pinned: false })
+          .catch(() => {}); // 원본 글이 이미 지워졌으면 그냥 넘어간다.
+      }
+    })
+  );
+});
+
+// ---- 날짜별 운영 데이터 자동 정리 (자재요청목록/소통해요/시재등록) ----
+// 매장이 늘수록 하루하루 쌓이는 날짜별 기록(stores/{storeId}/{top}/{date}/...)
+// 이 끝없이 불어나는 걸 막는다. 날짜가 문서 ID라서 `collectionGroup(subName)`
+// 으로 서브컬렉션 전체를 훑은 뒤 경로에서 날짜를 뽑아 기준일보다 오래된
+// 것만 지운다 — checks/{date}, shares/{date} 같은 상위 날짜 문서는 항상
+// 실제로 쓰이는 게 아니라서(예: shares/{date}는 아예 생성된 적이 없을 수도
+// 있음) 하위 문서 기준으로 판단해야 빠짐없이 걸린다.
+function dateFromCollectionGroupPath(path, topName) {
+  const parts = path.split("/");
+  const idx = parts.indexOf(topName);
+  return idx !== -1 && idx + 1 < parts.length ? parts[idx + 1] : null;
+}
+
+async function deleteDocsInChunks(docs) {
+  if (docs.length === 0) return;
+  const chunks = [];
+  for (let i = 0; i < docs.length; i += 450) chunks.push(docs.slice(i, i + 450));
+  for (const chunk of chunks) {
+    const batch = db.batch();
+    chunk.forEach((d) => batch.delete(d.ref));
+    await batch.commit();
+  }
+}
+
+// topName의 날짜별 서브컬렉션들(subNames)에서 cutoffDateStr보다 오래된 걸
+// 지우고, 상위 날짜 문서(stores/{storeId}/{topName}/{date})도 있으면 같이
+// 지운다. skipIf(docSnap)가 true를 반환하면 그 문서는 보존한다(예: 고정된
+// 소통해요 글).
+async function cleanupOldDateBucketedDocs(topName, subNames, cutoffDateStr, skipIf) {
+  for (const subName of subNames) {
+    const snap = await db.collectionGroup(subName).get();
+    const toDelete = snap.docs.filter((d) => {
+      const date = dateFromCollectionGroupPath(d.ref.path, topName);
+      if (!date || date >= cutoffDateStr) return false;
+      if (skipIf && skipIf(d)) return false;
+      return true;
+    });
+    await deleteDocsInChunks(toDelete);
+  }
+  const storesSnap = await db.collection("stores").get();
+  for (const storeDoc of storesSnap.docs) {
+    const parentSnap = await db.collection("stores").doc(storeDoc.id).collection(topName).get();
+    const toDeleteParents = parentSnap.docs.filter((d) => d.id < cutoffDateStr);
+    await deleteDocsInChunks(toDeleteParents);
+  }
+}
+
+// 자재요청목록 — 90일 지난 건 순수 운영기록이라 더 들고 있을 필요가 없다.
+exports.cleanupOldChecks = onSchedule({ schedule: "0 4 * * *", timeZone: "Asia/Seoul" }, async () => {
+  const cutoff = kstDateStr(new Date(Date.now() - 90 * 24 * 60 * 60 * 1000));
+  await cleanupOldDateBucketedDocs("checks", ["items", "requestBatches", "orderBatches", "autoPending", "unorderedNudges"], cutoff);
+});
+
+// 소통해요/품절공유/메뉴공유 글 — 90일 지나도 📌 고정해둔 글은 보존한다
+// (게시판 기능과 짝을 이룸 — "계속 봐야 할 건 고정해두세요"가 전제).
+exports.cleanupOldShares = onSchedule({ schedule: "0 4 * * *", timeZone: "Asia/Seoul" }, async () => {
+  const cutoff = kstDateStr(new Date(Date.now() - 90 * 24 * 60 * 60 * 1000));
+  await cleanupOldDateBucketedDocs("shares", ["items"], cutoff, (d) => d.data().pinned === true);
+});
+
+// 시재등록 — 하루 단위로 리셋되는 기록이라(전날 시재가 오늘 계산에 안 쓰임)
+// 7일이면 충분하다. 선결제(topups)는 여기 포함 안 됨 — 손님별 누적 충전액을
+// 전체 기록 합산으로 계산하는 구조라, 오래된 기록을 지우면 잔액 계산이
+// 틀어진다(그래서 의도적으로 삭제 대상에서 제외).
+exports.cleanupOldCashRegister = onSchedule({ schedule: "0 4 * * *", timeZone: "Asia/Seoul" }, async () => {
+  const cutoff = kstDateStr(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000));
+  await cleanupOldDateBucketedDocs("cashRegister", ["entries", "expenses"], cutoff);
+});
+
 // ---- 급여 제출함 월간 자동 리셋 (매월 1일 자정) ----
 // 제출된 급여 요청은 날짜별로 안 나뉘고 하나의 컬렉션에 계속 쌓이기만
 // 해서, 사장님이 입금 처리할 때마다 일일이 지우지 않으면 계속 늘어난다.
@@ -872,7 +1082,7 @@ exports.cleanupOldNotifications = onSchedule({ schedule: "0 4 * * *", timeZone: 
 // 따로 보관할 필요 없이 전체를 비워서 급여 제출함을 깨끗한 상태로
 // 시작하게 한다.
 exports.resetPayrollRequestsMonthly = onSchedule({ schedule: "0 0 1 * *", timeZone: "Asia/Seoul" }, async () => {
-  const snap = await db.collection("payrollRequests").get();
+  const snap = await db.collectionGroup("payrollRequests").get();
   if (snap.empty) return;
   const chunks = [];
   for (let i = 0; i < snap.docs.length; i += 450) chunks.push(snap.docs.slice(i, i + 450));
@@ -901,8 +1111,12 @@ exports.downloadImage = onRequest({ cors: true }, async (req, res) => {
     const file = bucket.file(filePath);
     const [buf] = await file.download();
     const [meta] = await file.getMetadata();
-    res.set("Content-Type", meta.contentType || "application/octet-stream");
-    res.set("Content-Disposition", `attachment; filename="mamory_${Date.now()}.jpg"`);
+    const contentType = meta.contentType || "application/octet-stream";
+    // 영상 첨부 지원 전엔 사진만 다뤄서 확장자를 .jpg로 고정해도 됐는데,
+    // 이제 Content-Type에 맞는 확장자를 써야 저장된 파일이 올바르게 보인다.
+    const ext = contentType.split("/")[1]?.split(";")[0] || "jpg";
+    res.set("Content-Type", contentType);
+    res.set("Content-Disposition", `attachment; filename="mamory_${Date.now()}.${ext}"`);
     res.send(buf);
   } catch (e) {
     res.status(500).send("download failed");
@@ -961,3 +1175,167 @@ exports.searchYoutube = onRequest({ cors: true, secrets: [YOUTUBE_API_KEY] }, as
     res.status(500).json({ items: [] });
   }
 });
+
+// ================================================================
+// ---- 2단계: 로그인/가입 — PIN 검증을 서버(Admin SDK)에서만 한다 ----
+// 지금까지는 사장님 PIN/가입코드를 클라이언트가 먼저 Firestore에서 읽어온
+// 뒤 브라우저에서 비교했다 — 즉 입력한 PIN이 틀려도 진짜 PIN 값은 이미
+// 브라우저로 전송된 뒤였다. 이제 비교 자체가 여기 서버 안에서 끝나고,
+// 성공했을 때만 매장 정보(storeId)가 담긴 커스텀 토큰을 발급한다.
+// Firestore 규칙은 이 토큰의 request.auth.token.storeId로 실제 매장을
+// 가려낸다 — Firebase Auth UID는 전화번호를 그대로 쓴다(로그인 키라서).
+// ================================================================
+
+// 로그인 전(아직 인증 안 된) 단계에서 "이 번호가 가입됐는지/역할/개인
+// PIN이 있는지"만 돌려준다 — PIN 값 자체는 절대 안 준다. 이전엔
+// login.js가 accounts/{phone}을 직접 읽었는데, 이제 비인증 상태로는
+// Firestore 규칙이 그 읽기를 막아서 이 함수가 그 자리를 대신한다.
+exports.lookupAccountForLogin = onCall(async (req) => {
+  const phone = ((req.data && req.data.phone) || "").toString();
+  if (!/^010\d{8}$/.test(phone)) throw new HttpsError("invalid-argument", "전화번호 형식이 올바르지 않아요");
+  const snap = await db.collection("accounts").doc(phone).get();
+  if (!snap.exists) return { exists: false };
+  const data = snap.data();
+  if (data.role === "owner") {
+    const pinSnap = data.storeId
+      ? await db.collection("stores").doc(data.storeId).collection("config").doc("ownerPin").get()
+      : null;
+    return { exists: true, role: "owner", hasPin: !!(pinSnap && pinSnap.exists) };
+  }
+  return { exists: true, role: "staff", hasPin: !!data.pin };
+});
+
+exports.ownerLogin = onCall(async (req) => {
+  const phone = ((req.data && req.data.phone) || "").toString();
+  const pin = ((req.data && req.data.pin) || "").toString();
+  if (pin.length < 4) throw new HttpsError("invalid-argument", "PIN은 숫자 4자리 이상이어야 해요");
+  const accSnap = await db.collection("accounts").doc(phone).get();
+  if (!accSnap.exists || accSnap.data().role !== "owner") throw new HttpsError("not-found", "사장님 계정을 찾을 수 없어요");
+  const acc = accSnap.data();
+  const storeId = acc.storeId;
+  if (!storeId) throw new HttpsError("failed-precondition", "매장 정보가 없는 계정이에요. 문의해주세요");
+
+  const pinRef = db.collection("stores").doc(storeId).collection("config").doc("ownerPin");
+  const pinSnap = await pinRef.get();
+  if (!pinSnap.exists) {
+    // 아직 한 번도 PIN을 만든 적 없는 매장(레거시) — 이번 입력을 새 PIN으로 생성.
+    await pinRef.set({ pin, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+  } else if (pinSnap.data().pin !== pin) {
+    throw new HttpsError("permission-denied", "PIN이 올바르지 않아요");
+  }
+
+  const token = await admin.auth().createCustomToken(phone, { storeId, role: "owner", phone });
+  return { token, account: { phone, name: acc.name, role: "owner", storeId } };
+});
+
+exports.staffLogin = onCall(async (req) => {
+  const phone = ((req.data && req.data.phone) || "").toString();
+  const pin = ((req.data && req.data.pin) || "").toString();
+  if (pin.length < 4) throw new HttpsError("invalid-argument", "PIN은 숫자 4자리 이상이어야 해요");
+  const accSnap = await db.collection("accounts").doc(phone).get();
+  if (!accSnap.exists || accSnap.data().role !== "staff") throw new HttpsError("not-found", "직원 계정을 찾을 수 없어요");
+  const acc = accSnap.data();
+  if (!acc.pin) throw new HttpsError("failed-precondition", "아직 개인 PIN이 없는 계정이에요");
+  if (acc.pin !== pin) throw new HttpsError("permission-denied", "PIN이 올바르지 않아요");
+
+  const token = await admin.auth().createCustomToken(phone, { storeId: acc.storeId, role: "staff", phone });
+  return { token, account: { phone, name: acc.name, role: "staff", storeId: acc.storeId, pin: acc.pin } };
+});
+
+// 이 기능 배포 전부터 있던(=개인 PIN이 아직 없는) 직원 계정이 처음
+// 로그인할 때, PIN 생성 + 로그인을 한 번에 처리한다.
+exports.staffCreatePinAndLogin = onCall(async (req) => {
+  const phone = ((req.data && req.data.phone) || "").toString();
+  const pin = ((req.data && req.data.pin) || "").toString();
+  if (pin.length < 4) throw new HttpsError("invalid-argument", "PIN은 숫자 4자리 이상이어야 해요");
+  const ref = db.collection("accounts").doc(phone);
+  const accSnap = await ref.get();
+  if (!accSnap.exists || accSnap.data().role !== "staff") throw new HttpsError("not-found", "직원 계정을 찾을 수 없어요");
+  const acc = accSnap.data();
+  if (acc.pin) throw new HttpsError("failed-precondition", "이미 개인 PIN이 등록된 계정이에요");
+
+  await ref.update({ pin, pinUpdatedAt: admin.firestore.FieldValue.serverTimestamp() });
+  const token = await admin.auth().createCustomToken(phone, { storeId: acc.storeId, role: "staff", phone });
+  return { token, account: { phone, name: acc.name, role: "staff", storeId: acc.storeId, pin } };
+});
+
+// 가입 화면에서 PIN 입력 전에 코드가 맞는지만 미리 확인 — storeId는 안
+// 준다(실제 가입은 registerAccount에서 한 번 더 서버가 직접 조회).
+exports.checkAccessCode = onCall(async (req) => {
+  const code = ((req.data && req.data.code) || "").toString().trim();
+  if (!code) return { valid: false };
+  const snap = await db.collection("accessCodes").doc(code).get();
+  return { valid: snap.exists };
+});
+
+exports.registerAccount = onCall(async (req) => {
+  const phone = ((req.data && req.data.phone) || "").toString();
+  const name = ((req.data && req.data.name) || "").toString().trim();
+  const role = req.data && req.data.role;
+  const accessCode = ((req.data && req.data.accessCode) || "").toString().trim();
+  const pin = ((req.data && req.data.pin) || "").toString();
+
+  if (!/^010\d{8}$/.test(phone)) throw new HttpsError("invalid-argument", "전화번호 형식이 올바르지 않아요");
+  if (!name) throw new HttpsError("invalid-argument", "이름을 입력해주세요");
+  if (role !== "staff" && role !== "owner") throw new HttpsError("invalid-argument", "역할이 올바르지 않아요");
+  if (pin.length < 4) throw new HttpsError("invalid-argument", "PIN은 숫자 4자리 이상이어야 해요");
+
+  const accountRef = db.collection("accounts").doc(phone);
+  const existing = await accountRef.get();
+  if (existing.exists) throw new HttpsError("already-exists", "이미 등록된 번호예요");
+
+  const codeSnap = await db.collection("accessCodes").doc(accessCode).get();
+  if (!codeSnap.exists) throw new HttpsError("permission-denied", "가입 코드가 올바르지 않아요");
+  const storeId = codeSnap.data().storeId;
+
+  const account = { phone, name, role, storeId, createdAt: admin.firestore.FieldValue.serverTimestamp() };
+  if (role === "staff") {
+    account.pin = pin;
+  } else {
+    // 그 매장의 첫 사장님 가입이면 이번 입력이 그 매장의 사장님 PIN이
+    // 되고, 이미 있으면 그 값과 일치해야 한다(매장당 공유 PIN 하나).
+    const pinRef = db.collection("stores").doc(storeId).collection("config").doc("ownerPin");
+    const pinSnap = await pinRef.get();
+    if (!pinSnap.exists) {
+      await pinRef.set({ pin, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+    } else if (pinSnap.data().pin !== pin) {
+      throw new HttpsError("permission-denied", "PIN이 올바르지 않아요");
+    }
+  }
+
+  await accountRef.set(account);
+  const token = await admin.auth().createCustomToken(phone, { storeId, role, phone });
+  return { token, account: { phone, name, role, storeId, ...(role === "staff" ? { pin } : {}) } };
+});
+
+// 사장님 전용 — 가입 코드 변경. accessCodes/{old} 삭제 + {new} 생성 +
+// stores/{storeId}/config/accessCode 갱신을 트랜잭션으로 한 번에.
+exports.rotateAccessCode = onCall(async (req) => {
+  if (!req.auth || req.auth.token.role !== "owner") throw new HttpsError("permission-denied", "사장님만 가능해요");
+  const storeId = req.auth.token.storeId;
+  const newCode = ((req.data && req.data.newCode) || "").toString().trim();
+  if (!newCode) throw new HttpsError("invalid-argument", "가입 코드를 입력해주세요");
+
+  await db.runTransaction(async (tx) => {
+    const newCodeRef = db.collection("accessCodes").doc(newCode);
+    const storeConfigRef = db.collection("stores").doc(storeId).collection("config").doc("accessCode");
+    const [newCodeSnap, storeConfigSnap] = await Promise.all([tx.get(newCodeRef), tx.get(storeConfigRef)]);
+    if (newCodeSnap.exists && newCodeSnap.data().storeId !== storeId) {
+      throw new HttpsError("already-exists", "이미 다른 매장이 쓰고 있는 코드예요");
+    }
+    const oldCode = storeConfigSnap.exists ? storeConfigSnap.data().code : null;
+    if (oldCode && oldCode !== newCode) tx.delete(db.collection("accessCodes").doc(oldCode));
+    tx.set(newCodeRef, { storeId });
+    tx.set(storeConfigRef, { code: newCode, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+  });
+  return { code: newCode };
+});
+
+// 사장님 전용 — 자재관리 화면이 현재 가입 코드를 미리 채워 보여주기 위한 읽기.
+exports.getCurrentAccessCode = onCall(async (req) => {
+  if (!req.auth || req.auth.token.role !== "owner") throw new HttpsError("permission-denied", "사장님만 가능해요");
+  const storeId = req.auth.token.storeId;
+  const snap = await db.collection("stores").doc(storeId).collection("config").doc("accessCode").get();
+  return { code: snap.exists ? snap.data().code : null };
+});
+

@@ -266,7 +266,11 @@ export function openImageLightbox(srcOrGroup, altOrIndex) {
     <button class="img-lightbox-close" aria-label="닫기">✕</button>
     ${group.length > 1 ? `<div class="img-lightbox-count">${startIndex + 1} / ${group.length}</div>` : ""}
     <div class="img-lightbox-track">
-      ${group.map((g) => `<div class="img-lightbox-slide"><img src="${g.src}" alt="${escapeHtml(g.alt || "")}" class="img-lightbox-img" /></div>`).join("")}
+      ${group.map((g) => `<div class="img-lightbox-slide">${
+        g.type === "video"
+          ? `<video src="${g.src}" class="img-lightbox-img" controls playsinline></video>`
+          : `<img src="${g.src}" alt="${escapeHtml(g.alt || "")}" class="img-lightbox-img" />`
+      }</div>`).join("")}
     </div>
     <button class="img-lightbox-save" type="button">💾 저장</button>
   `;
@@ -292,7 +296,9 @@ export function openImageLightbox(srcOrGroup, altOrIndex) {
     }, { passive: true });
   }
 
-  overlay.querySelectorAll(".img-lightbox-img").forEach(wirePinchZoom);
+  // Pinch-zoom only makes sense for photos — video already has its own
+  // native controls/gestures and pinch-zooming it would fight them.
+  overlay.querySelectorAll("img.img-lightbox-img").forEach(wirePinchZoom);
 
   document.body.appendChild(overlay);
   if (startIndex > 0) track.scrollLeft = startIndex * track.clientWidth; // 애니메이션 없이 바로 그 장으로
@@ -396,8 +402,12 @@ async function saveImageToDevice(src) {
     const res = await fetch(fetchUrl);
     if (!res.ok) throw new Error("download failed");
     const blob = await res.blob();
-    const filename = `mamory_${Date.now()}.jpg`;
-    const file = new File([blob], filename, { type: blob.type || "image/jpeg" });
+    // Extension/type now come from the actual blob instead of being
+    // hardcoded to .jpg — saveImageToDevice also handles video attachments.
+    const type = blob.type || "image/jpeg";
+    const ext = type.split("/")[1]?.split(";")[0] || (type.startsWith("video/") ? "mp4" : "jpg");
+    const filename = `mamory_${Date.now()}.${ext}`;
+    const file = new File([blob], filename, { type });
     // 모바일 사파리는 <a download>를 블롭에 제대로 적용하지 않고, 대신
     // 파일 미리보기(QuickLook) 화면으로 아예 이동시켜버린다 — 누르자마자
     // "다른 페이지로 넘어간" 것처럼 느껴지는 게 이 때문. 파일 공유를 지원하는
@@ -430,6 +440,20 @@ export function escapeHtml(str) {
     '"': "&quot;",
     "'": "&#39;",
   }[c]));
+}
+
+// 이미 escapeHtml을 거친 문자열 위에서만 동작 — "&"가 "&amp;"로 바뀐 뒤라
+// URL 안의 &(예: ?a=1&b=2)는 "&amp;amp;"처럼 보이지만, 그래도 하나의
+// 유효한 URL 문자열로 매치/치환된다. href 속성값은 그대로 escaped 상태로
+// 들어가므로 별도 이스케이프가 필요 없다.
+export function linkifyUrls(escapedStr) {
+  return escapedStr.replace(/https?:\/\/[^\s<]+/g, (url) => {
+    // 문장 끝 구두점(마침표, 쉼표 등)이 URL에 딸려 들어가지 않게 분리
+    const trailing = url.match(/[).,!?;:]+$/);
+    const clean = trailing ? url.slice(0, -trailing[0].length) : url;
+    const tail = trailing ? trailing[0] : "";
+    return `<a href="${clean}" target="_blank" rel="noopener">${clean}</a>${tail}`;
+  });
 }
 
 // 남은 예비 수량 라벨 — "없음"일 땐 "없음 남음"처럼 어색하게 붙이지 않고

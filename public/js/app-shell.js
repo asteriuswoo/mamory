@@ -11,7 +11,7 @@
 // fetches a sibling view's file on first visit, lifts out its #mainContent
 // fragment, and caches it in memory so later switches don't refetch.
 import { requireAccount, logout } from "./auth.js";
-import { wireAccountHeaderAvatar } from "./avatar.js";
+import { wireAccountHeaderAvatar, setAccountsStoreId } from "./avatar.js";
 import { watchUnseenCount, hasUnseenShareActivity, markShareNavBadgeSeen } from "./shareboard.js";
 import { watchRegisterUnseen, hasUnseenRegisterActivity, markRegisterNavBadgeSeen } from "./registerboard.js";
 import { registerPushToken, watchForegroundPush, isPushDisabled } from "./push.js";
@@ -72,26 +72,18 @@ function forceFixedBarReflow() {
   setTimeout(nudge, 300);
 }
 
-// 위 reflow(콜드 런칭 보정)만으론 부족했다 — 실제로 더 자주 겹치는 건
-// 스크롤하는 도중/직후, iOS Safari가 주소창을 숨기거나 보이게 하면서
-// "레이아웃 뷰포트"와 실제 눈에 보이는 "비주얼 뷰포트"가 순간적으로
-// 어긋나는 경우다. 그 순간엔 CSS position:fixed 하나만 믿지 말고, 실제
-// 보이는 뷰포트 크기를 계속 재서 하단 탭바의 bottom 값을 직접 맞춰준다 —
-// visualViewport의 resize/scroll 이벤트가 바로 그 어긋남이 생기고 있는
-// 동안(애니메이션 도중까지) 계속 뜨므로, 끝나길 기다리지 않고 실시간으로
-// 따라간다.
-function pinBottomTabsToVisualViewport() {
-  const bar = document.querySelector(".bottom-tabs");
-  if (!bar || !window.visualViewport) return;
-  const vv = window.visualViewport;
-  const sync = () => {
-    const gap = window.innerHeight - vv.height - vv.offsetTop;
-    bar.style.bottom = `${Math.max(0, gap)}px`;
-  };
-  vv.addEventListener("resize", sync);
-  vv.addEventListener("scroll", sync);
-  sync();
-}
+// owner.html/admin.html/share.html/register.html/payroll.html도 이제
+// html/body를 고정(position:fixed)해서 스크롤 바운스를 막는다(각 파일의
+// <head> 참고, staff.html과 동일한 구조) — 이 함수가 보정하려던 "주소창
+// 숨김/보임으로 레이아웃 뷰포트와 비주얼 뷰포트가 어긋나는" 상황 자체가
+// 그 고정된 레이아웃에선 더 이상 일어나지 않는다. 그런데도 계속 돌면서
+// 실제론 없는 작은 간극을 측정해 탭바를 진짜 바닥에서 위로 띄워버리는
+// 부작용만 냈다 — bottom.style을 직접 건드리는 인라인 스타일이라 CSS의
+// .bottom-tabs { bottom: ... } 값을 전부 덮어써버렸던 것. staff.js에서
+// 똑같은 이유로 먼저 비워둔 적이 있어서(pinBottomTabsToVisualViewport의
+// 그 쪽 정의 참고) 여기도 동일하게 비운다 — 순수 CSS position:fixed +
+// bottom 값만으로 이제 충분하다.
+function pinBottomTabsToVisualViewport() {}
 pinBottomTabsToVisualViewport();
 
 function setActiveTab(path) {
@@ -160,15 +152,16 @@ window.addEventListener("popstate", () => {
 requireAccount("owner").then((acc) => {
   if (!acc) return;
   account = acc;
+  setAccountsStoreId(acc.storeId);
 
   const navBadge = document.getElementById("shareNavBadge");
-  watchUnseenCount({ name: acc.name, phone: acc.phone }, () => {
+  watchUnseenCount({ name: acc.name, phone: acc.phone, storeId: acc.storeId }, () => {
     if (hasUnseenShareActivity(acc.phone)) { navBadge.textContent = "N"; navBadge.style.display = "flex"; }
     else navBadge.style.display = "none";
   });
 
   const registerNavBadge = document.getElementById("registerNavBadge");
-  watchRegisterUnseen({ name: acc.name, phone: acc.phone }, () => {
+  watchRegisterUnseen({ name: acc.name, phone: acc.phone, storeId: acc.storeId }, () => {
     if (hasUnseenRegisterActivity()) { registerNavBadge.textContent = "N"; registerNavBadge.style.display = "flex"; }
     else registerNavBadge.style.display = "none";
   });
@@ -176,8 +169,8 @@ requireAccount("owner").then((acc) => {
   watchForegroundPush();
   watchAppBadgeClear();
   if ("Notification" in window && Notification.permission === "granted" && !isPushDisabled()) registerPushToken(acc.phone);
-  mountMascotWidget(acc.phone);
-  mountMusicBar(document.getElementById("musicBarRoot"), { name: acc.name, phone: acc.phone });
+  mountMascotWidget(acc.phone, acc.storeId);
+  mountMusicBar(document.getElementById("musicBarRoot"), { name: acc.name, phone: acc.phone, storeId: acc.storeId });
 
   switchTo(pathOf(location.pathname) || "owner.html", { push: false, isInitial: true });
   forceFixedBarReflow();

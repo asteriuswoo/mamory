@@ -509,7 +509,12 @@ header.topbar .sub {
 }
 
 body.has-bottom-tabs {
-  padding-bottom: 108px;
+  /* 탭바를 위해 공간을 미리 비워두지 않는다 — 플로팅 알약(.bottom-tabs)이
+     반투명 blur라 콘텐츠가 그 뒤로 그대로 스크롤되면서 비쳐 보이는 게
+     의도된 디자인인데, 고정 108px를 비워두면 마지막 카드 밑에 아무
+     콘텐츠도 없는 빈 크림색 여백만 남아서 오히려 "틀에 갇힌" 것처럼
+     보였다. 세이프에어리어만 보장해서 홈 인디케이터에 안 걸리게만 한다. */
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 /* The actual scrolling element on pages that pin html/body (see each such
@@ -528,7 +533,7 @@ body.has-bottom-tabs {
 }
 
 body.has-bottom-tabs #pageScroll {
-  padding-bottom: 108px;
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 /* Instagram-style floating pill — icons only, no labels, not edge-to-edge
@@ -536,7 +541,12 @@ body.has-bottom-tabs #pageScroll {
 .bottom-tabs {
   position: fixed;
   left: 50%;
-  bottom: calc(14px + env(safe-area-inset-bottom));
+  /* 14px 고정값을 safe-area 위에 더 얹으면, 노치 있는 아이폰처럼
+     safe-area 자체가 이미 34px쯤 되는 기기에서 탭바가 필요 이상으로
+     위로 떠버린다(화면 맨밑에 빈 여백이 크게 남음) — 순수 safe-area만
+     쓰고, safe-area가 0인 기기(안드로이드 등)를 위한 최소 여백만
+     8px로 둔다. */
+  bottom: max(8px, env(safe-area-inset-bottom));
   /* translateZ(0) forces its own compositing layer — without this, iOS
      Safari can visibly detach position:fixed bars from the true screen
      position for a moment after a JS-driven scroll/DOM update. */
@@ -544,12 +554,12 @@ body.has-bottom-tabs #pageScroll {
   z-index: 40;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 18px;
   background: var(--tabbar-bg);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border-radius: 999px;
-  padding: 8px 16px;
+  padding: 8px 26px;
   box-shadow: 0 8px 24px rgba(27,23,20,.16);
 }
 
@@ -1020,6 +1030,27 @@ button {
   overflow-x: auto;
   padding-bottom: 2px;
   touch-action: pan-x;
+}
+
+.day-window-head {
+  margin-bottom: 6px;
+}
+
+.day-window-nav {
+  display: flex;
+  gap: 4px;
+}
+
+.day-window-nav .icon-btn {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.day-window-nav .icon-btn:disabled {
+  opacity: 0.35;
 }
 
 .day-chip {
@@ -2084,6 +2115,13 @@ button {
   margin-left: 7px;
 }
 
+.category-title .board-expiry-hint {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+  margin-left: 7px;
+}
+
 .nudge-owner-chip {
   flex: none;
   border: 1px solid var(--toggle-blue);
@@ -2257,6 +2295,36 @@ button {
 }
 
 .post-edit-btn {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.post-pin-btn {
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 15px;
+  opacity: 0.55;
+  transform: rotate(0deg);
+  transition: opacity 0.15s, transform 0.15s;
+}
+
+.post-pin-btn.active {
+  opacity: 1;
+  transform: rotate(-20deg);
+}
+
+.board-item-actions {
+  width: fit-content;
+  margin-left: auto;
+  margin-top: 6px;
+}
+
+.board-unpin-btn {
   padding: 0;
   border: none;
   background: none;
@@ -2447,6 +2515,16 @@ img.avatar-circle {
 .account-header-name {
   font-size: 20px;
   font-weight: 800;
+}
+
+.name-edit-btn {
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 4px;
+  vertical-align: middle;
+  opacity: .6;
 }
 
 .account-header-role {
@@ -2642,13 +2720,31 @@ img.avatar-circle {
   display: inline-block;
 }
 
-.photo-preview img {
+.photo-preview img,
+.photo-preview video {
   display: block;
   width: 72px;
   height: 72px;
   object-fit: cover;
   border-radius: 8px;
   border: 1px solid var(--border);
+}
+
+.video-thumb-wrap {
+  position: relative;
+  display: inline-block;
+}
+
+.video-play-badge {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 18px;
+  text-shadow: 0 1px 4px rgba(0,0,0,.7);
+  pointer-events: none;
 }
 
 .photo-remove-btn {
@@ -2783,18 +2879,24 @@ img.avatar-circle {
   border-bottom: none;
 }
 
+.cash-submit-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
 .cash-reset-btn {
-  position: absolute;
-  top: 14px;
-  right: 14px;
+  flex: 2;
   border: 1px solid var(--toggle-blue);
   background: var(--toggle-blue-soft);
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 12px;
+  border-radius: 10px;
+  font-size: 13px;
   font-weight: 700;
   color: var(--toggle-blue);
-  z-index: 1;
+}
+
+.cash-submit-row #cashRegisterBtn {
+  flex: 8;
 }
 
 .receipt-mode-back-btn {
@@ -2835,12 +2937,17 @@ img.avatar-circle {
 .reply-input-row {
   display: flex;
   gap: 6px;
+  align-items: flex-end;
 }
 
 .reply-input {
   flex: 1;
   font-size: 12.5px;
   padding: 7px 10px;
+  resize: none;
+  max-height: 160px;
+  line-height: 1.4;
+  font-family: inherit;
 }
 
 .reply-send-btn {

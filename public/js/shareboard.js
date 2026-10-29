@@ -1,11 +1,19 @@
 // 공유하기 (품절 공유 / 공유해요) — 직원 화면(staff.js)과 사장님 화면(share.js)에서
 // 공통으로 쓰는 렌더링/데이터 모듈. mountShareBoard(el, account)로 붙여 쓴다.
-import { db, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, getDocs, query, orderBy, serverTimestamp, arrayUnion, arrayRemove, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
-import { todayStr, dateStrDaysAgo, dateStrOf, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, escapeHtml, resizeImageFile, dayAccentClass, openImageLightbox, MULTIPLE_FILE_ATTR } from "./util.js";
+import { db, collection, doc, addDoc, updateDoc, deleteDoc, setDoc, getDoc, onSnapshot, getDocs, query, orderBy, serverTimestamp, arrayUnion, arrayRemove, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
+import { todayStr, dateStrDaysAgo, dateStrOf, formatDateLabel, formatTimeLabel, formatTimestampLabel, toast, escapeHtml, linkifyUrls, resizeImageFile, dayAccentClass, openImageLightbox, MULTIPLE_FILE_ATTR } from "./util.js";
 import { avatarHtml, watchAccounts, allAccounts } from "./avatar.js";
 
 const date = todayStr();
-const recentDates = Array.from({ length: 7 }, (_, i) => dateStrDaysAgo(i));
+// 날짜칩 7개가 "오늘 포함 최근 7일" 고정이던 걸, 옆으로 넘겨서 더 이전
+// 구간도 볼 수 있게 — 7일 지나면 화면에서 안 보일 뿐 글 자체는 안
+// 지워지는데(소통해요), 정작 그걸 다시 찾아볼 방법이 없었다. 0이 최근
+// 7일, 1이 그 이전 7일... 식으로 한 주씩 뒤로 간다.
+let dayWindowOffset = 0;
+function computeRecentDates() {
+  return Array.from({ length: 7 }, (_, i) => dateStrDaysAgo(i + dayWindowOffset * 7));
+}
+let recentDates = computeRecentDates();
 const carryoverDates = Array.from({ length: 4 }, (_, i) => dateStrDaysAgo(i));
 
 // 품절공유/공유해요/레시피를 한 화면에 세로로 다 쌓아두면 댓글이 많이 달린
@@ -16,7 +24,7 @@ const SHARE_TAB_KEY = "mamory_shareTab";
 function loadShareTab() {
   try {
     const saved = sessionStorage.getItem(SHARE_TAB_KEY);
-    return saved === "soldout" || saved === "note" || saved === "recipe" ? saved : "soldout";
+    return saved === "soldout" || saved === "note" || saved === "recipe" || saved === "board" ? saved : "soldout";
   } catch (e) {
     return "soldout";
   }
@@ -28,13 +36,13 @@ function saveShareTab() {
     // sessionStorage 불가 환경이면 그냥 이번 로드는 기본 탭으로 넘어간다.
   }
 }
-let shareTab = loadShareTab(); // "soldout" | "note" | "recipe"
+let shareTab = loadShareTab(); // "soldout" | "note" | "recipe" | "board"
 
 // 알림을 눌러 들어왔을 때(functions/index.js가 링크에 실어 보낸 ?stab=…)
 // 저장된 탭 대신 그 알림이 가리키는 탭으로 바로 열리게 한다 — mountShareBoard
 // 호출 전에 한 번만 불러 쓴다(staff.js/share.js).
 export function setInitialShareTab(tab) {
-  if (tab === "soldout" || tab === "note" || tab === "recipe") {
+  if (tab === "soldout" || tab === "note" || tab === "recipe" || tab === "board") {
     shareTab = tab;
     saveShareTab();
   }
@@ -135,14 +143,14 @@ function ensurePhotoLightboxWired() {
   if (photoLightboxWired) return;
   photoLightboxWired = true;
   document.addEventListener("click", (e) => {
-    const img = e.target.closest("img.share-photo-trigger");
-    if (!img) return;
-    // 같은 사진묶음(게시글 본문/답글/레시피 등 .receipt-photo-row 하나) 안의
-    // 다른 사진들도 같이 모아서 넘겨주면, 라이트박스 안에서 닫았다 다시
-    // 여는 것 없이 옆으로 스와이프해서 묶음 전체를 볼 수 있다.
-    const group = Array.from(img.closest(".receipt-photo-row")?.querySelectorAll("img.share-photo-trigger") || [img]);
-    const urls = group.map((el) => ({ src: el.src, alt: el.alt }));
-    const startIndex = group.indexOf(img);
+    const media = e.target.closest(".share-photo-trigger");
+    if (!media) return;
+    // 같은 사진/영상묶음(게시글 본문/답글/레시피 등 .receipt-photo-row 하나)
+    // 안의 다른 항목들도 같이 모아서 넘겨주면, 라이트박스 안에서 닫았다
+    // 다시 여는 것 없이 옆으로 스와이프해서 묶음 전체를 볼 수 있다.
+    const group = Array.from(media.closest(".receipt-photo-row")?.querySelectorAll(".share-photo-trigger") || [media]);
+    const urls = group.map((el) => ({ src: el.src, alt: el.alt, type: el.tagName === "VIDEO" ? "video" : "image" }));
+    const startIndex = group.indexOf(media);
     openImageLightbox(urls, startIndex);
   });
 }
@@ -186,12 +194,23 @@ function reactionRow(it, actionsHtml) {
 const editingItems = new Map();
 const editingReplies = new Map();
 
+// 고정(📌)은 수정/삭제와 달리 작성자 제한이 없다 — "이건 나중에도 볼 수
+// 있게 남겨두자"는 판단은 누구나 할 수 있는 팀 공용 결정이라서다. 품절/
+// 메뉴공유는 이미 각자 별도 섹션(해제/단종)으로 분류돼 보존되니, 고정은
+// 소통해요(note) 글에만 둔다.
+function canPinShare(it) {
+  return it.type === "note";
+}
+
 function postActionsHtml(it) {
-  if (!canDeleteShare(it) || editingItems.has(it.id)) return "";
-  return `<div class="post-actions">
+  const pinBtn = canPinShare(it) && !editingItems.has(it.id)
+    ? `<button class="post-pin-btn ${it.pinned ? "active" : ""}" data-share-pin="${it.id}" title="${it.pinned ? "고정 해제" : "게시판에 고정"}">📌</button>`
+    : "";
+  const editDeleteBtns = (!canDeleteShare(it) || editingItems.has(it.id)) ? "" : `
     <button class="post-edit-btn" data-share-edit="${it.id}">수정</button>
-    <button class="post-delete-btn" data-share-remove="${it.id}">삭제</button>
-  </div>`;
+    <button class="post-delete-btn" data-share-remove="${it.id}">삭제</button>`;
+  if (!pinBtn && !editDeleteBtns) return "";
+  return `<div class="post-actions">${pinBtn}${editDeleteBtns}</div>`;
 }
 
 function postTopRowHtml(it, isToday) {
@@ -211,7 +230,7 @@ function postTopRowHtml(it, isToday) {
   }
   return `
     <div class="post-top-row">
-      <div class="name">${isToday && isNewToMe(it) ? `<span class="tag new">N</span>` : isToday && hasUnseenReply(it) ? `<span class="tag new">💬 N</span>` : ""}${it.isNotice ? `<span class="notice-badge">📢 공지</span> ` : ""}${highlightMentions(escapeHtml(it.content))}</div>
+      <div class="name">${isToday && isNewToMe(it) ? `<span class="tag new">N</span>` : isToday && hasUnseenReply(it) ? `<span class="tag new">💬 N</span>` : ""}${it.isNotice ? `<span class="notice-badge">📢 공지</span> ` : ""}${highlightMentions(linkifyUrls(escapeHtml(it.content)))}</div>
       <div class="who">${formatDateLabel(shareDate)}${formatTimeLabel(it.createdAt) ? ` · ${formatTimeLabel(it.createdAt)}` : ""}</div>
     </div>`;
 }
@@ -255,7 +274,7 @@ async function saveShareEdit(id, value) {
     toast("내용을 입력해주세요");
     return;
   }
-  await updateDoc(doc(db, "shares", shareDate, "items", id), { content: text });
+  await updateDoc(doc(db, "stores", account.storeId, "shares", shareDate, "items", id), { content: text });
   // Today has a live listener that already reflects this write — patching
   // the local copy too would just be redundant. Past dates have no
   // listener, so they still need the manual patch.
@@ -289,12 +308,34 @@ async function toggleReaction(itemId, key) {
       newReactions[r.key] = current;
     }
   }
-  await updateDoc(doc(db, "shares", shareDate, "items", itemId), updates);
+  await updateDoc(doc(db, "stores", account.storeId, "shares", shareDate, "items", itemId), updates);
   // Today's list re-renders itself once the live listener catches this write
   // — but a browsed past date has no listener (loadShareDate is a one-time
   // getDocs), so without patching the local copy here, a reaction on an old
   // post never visibly toggles.
   if (shareDate !== date) it.reactions = newReactions;
+  render();
+}
+
+// 고정은 shares/{date}/items 원본 문서에 pinned 플래그를 세우는 것과,
+// 날짜를 모르는 상태에서도(게시판 탭은 여러 날짜를 넘나든다) 고정된 글만
+// 바로 찾을 수 있게 하는 pinnedShareItems 포인터(itemId -> {date,
+// pinnedAt}) 두 가지를 같이 건드린다. 원본을 옮기거나 복사하지 않고
+// 포인터만 두는 이유 — 고정 후에도 수정/답글/반응이 원본 글 그대로 계속
+// 되고, 게시판 탭은 그 최신 상태를 포인터 통해 매번 다시 읽어오면 된다.
+async function togglePin(itemId, itemDate, currentlyPinned) {
+  const itemRef = doc(db, "stores", account.storeId, "shares", itemDate, "items", itemId);
+  const pointerRef = doc(db, "stores", account.storeId, "pinnedShareItems", itemId);
+  if (currentlyPinned) {
+    await Promise.all([updateDoc(itemRef, { pinned: false }), deleteDoc(pointerRef)]);
+  } else {
+    await Promise.all([
+      updateDoc(itemRef, { pinned: true }),
+      setDoc(pointerRef, { date: itemDate, pinnedAt: serverTimestamp() }),
+    ]);
+  }
+  const it = shareItems.find((x) => x.id === itemId);
+  if (it) it.pinned = !currentlyPinned;
   render();
 }
 
@@ -314,11 +355,22 @@ const replyDrafts = new Map();
 // 전송 전) 사진 URL들과, "@" 입력 중인지 상태를 따로 들고 있는다(답글
 // 입력창이 여러 개 동시에 열려 있을 수 있어서 글 하나짜리 상태로는 부족하다).
 const replyDraftPhotos = new Map();
+const replyDraftVideos = new Map();
 const replyMentionState = new Map(); // itemId -> { active, startIndex, query }
 
-function replyPhotosHtml(photoUrls) {
-  if (!photoUrls || photoUrls.length === 0) return "";
-  return `<div class="receipt-photo-row note-photo-row" style="margin-top:4px;">${photoUrls.map((url) => `<img src="${url}" class="note-photo-thumb share-photo-trigger" alt="답글 사진" style="width:72px; height:72px;" />`).join("")}</div>`;
+// 영상 썸네일 위에 재생 아이콘을 얹어서 사진과 구분되게 한다 — 탭하면
+// (사진과 동일하게) share-photo-trigger 위임 리스너가 확대보기를 띄운다.
+function videoThumbHtml(url, styleAttr = "") {
+  return `<span class="video-thumb-wrap"><video src="${url}" class="note-photo-thumb share-photo-trigger" muted playsinline preload="metadata" ${styleAttr}></video><span class="video-play-badge">▶</span></span>`;
+}
+
+function replyPhotosHtml(photoUrls, videoUrls) {
+  const photos = photoUrls || [];
+  const videos = videoUrls || [];
+  if (photos.length === 0 && videos.length === 0) return "";
+  const photoHtml = photos.map((url) => `<img src="${url}" class="note-photo-thumb share-photo-trigger" alt="답글 사진" style="width:72px; height:72px;" />`).join("");
+  const videoHtml = videos.map((url) => videoThumbHtml(url, 'style="width:72px; height:72px;"')).join("");
+  return `<div class="receipt-photo-row note-photo-row" style="margin-top:4px;">${photoHtml}${videoHtml}</div>`;
 }
 
 function repliesHtml(it) {
@@ -349,8 +401,8 @@ function repliesHtml(it) {
         <div class="reply-row">
           ${avatarHtml(r.staffPhone, r.staffName, 18)}
           <div class="reply-body">
-            <span class="reply-who">${isReplyNewToMe(r) ? `<span class="tag new">N</span> ` : ""}${escapeHtml(r.staffName || "")}님</span><span class="reply-content">${highlightMentions(escapeHtml(r.content))}</span>
-            ${replyPhotosHtml(r.photoUrls)}
+            <span class="reply-who">${isReplyNewToMe(r) ? `<span class="tag new">N</span> ` : ""}${escapeHtml(r.staffName || "")}님</span><span class="reply-content">${highlightMentions(linkifyUrls(escapeHtml(r.content)))}</span>
+            ${replyPhotosHtml(r.photoUrls, r.videoUrls)}
             ${mine ? `<div class="reply-actions"><button class="reply-edit-btn" data-reply-edit="${key}">수정</button><button class="reply-delete-btn" data-reply-delete-item="${it.id}" data-reply-delete-idx="${idx}">삭제</button></div>` : ""}
           </div>
         </div>`;
@@ -359,20 +411,26 @@ function repliesHtml(it) {
   }
   if (openReplyFor.has(it.id)) {
     const pendingPhotos = replyDraftPhotos.get(it.id) || [];
+    const pendingVideos = replyDraftVideos.get(it.id) || [];
     html += `
       <div class="reply-input-row">
-        <input type="text" class="reply-input" data-reply-for="${it.id}" placeholder="답글 달기 (@이름으로 멘션)" value="${escapeHtml(replyDrafts.get(it.id) || "")}" />
+        <textarea class="reply-input" rows="1" data-reply-for="${it.id}" placeholder="답글 달기 (@이름으로 멘션, 엔터로 줄바꿈)">${escapeHtml(replyDrafts.get(it.id) || "")}</textarea>
         <button class="reply-send-btn" data-reply-send="${it.id}">등록</button>
       </div>
       <div class="mention-suggest-box" data-reply-mention-box="${it.id}"></div>
       <div class="photo-attach-row" style="flex-wrap:wrap; margin-top:4px;">
-        <input type="file" accept="image/*" data-reply-photo-input="${it.id}" ${MULTIPLE_FILE_ATTR} style="display:none;" />
+        <input type="file" accept="image/*,video/*" data-reply-photo-input="${it.id}" ${MULTIPLE_FILE_ATTR} style="display:none;" />
         ${pendingPhotos.map((url, i) => `
           <div class="photo-preview">
             <img src="${url}" alt="첨부 사진" class="share-photo-trigger" />
             <button class="photo-remove-btn" data-reply-photo-remove="${it.id}" data-reply-photo-remove-idx="${i}">✕</button>
           </div>`).join("")}
-        <button class="photo-add-btn" data-reply-photo-add="${it.id}">📷 사진 첨부</button>
+        ${pendingVideos.map((url, i) => `
+          <div class="photo-preview">
+            ${videoThumbHtml(url)}
+            <button class="photo-remove-btn" data-reply-video-remove="${it.id}" data-reply-video-remove-idx="${i}">✕</button>
+          </div>`).join("")}
+        <button class="photo-add-btn" data-reply-photo-add="${it.id}">📷 사진/영상 첨부</button>
       </div>`;
   } else {
     html += `<button class="reply-toggle-btn" data-reply-toggle="${it.id}">댓글달기</button>`;
@@ -382,22 +440,30 @@ function repliesHtml(it) {
 
 async function onReplyPhotosSelected(itemId, files) {
   if (!files || files.length === 0) return;
-  toast(files.length > 1 ? `사진 ${files.length}장 업로드 중...` : "사진 업로드 중...");
+  const images = files.filter((f) => f.type.startsWith("image/"));
+  const videos = files.filter((f) => f.type.startsWith("video/"));
+  if (images.length === 0 && videos.length === 0) return;
+  toast(images.length + videos.length > 1 ? "첨부파일 업로드 중..." : "업로드 중...");
   try {
     const urls = [];
-    for (const file of files) {
+    for (const file of images) {
       const blob = await resizeImageFile(file);
-      const path = `notePhotos/${date}/reply_${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
+      const path = `stores/${account.storeId}/notePhotos/${date}/reply_${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
       const fileRef = ref(storage, path);
       await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
       urls.push(await getDownloadURL(fileRef));
     }
-    replyDraftPhotos.set(itemId, [...(replyDraftPhotos.get(itemId) || []), ...urls]);
+    if (urls.length > 0) replyDraftPhotos.set(itemId, [...(replyDraftPhotos.get(itemId) || []), ...urls]);
+    const videoUrls = [];
+    for (const file of videos) {
+      videoUrls.push(await uploadShareVideo(file, "reply"));
+    }
+    if (videoUrls.length > 0) replyDraftVideos.set(itemId, [...(replyDraftVideos.get(itemId) || []), ...videoUrls]);
     render();
-    toast("사진을 첨부했어요");
+    toast("첨부했어요");
   } catch (e) {
     console.error(e);
-    toast("사진 업로드에 실패했어요");
+    toast("업로드에 실패했어요");
   }
 }
 
@@ -438,11 +504,12 @@ function insertReplyMention(itemId, name) {
 // 사이 더 입력된) 내용이 중복 등록될 수 있었다.
 const replySending = new Set();
 
-async function addReply(itemId, content, photoUrls) {
+async function addReply(itemId, content, photoUrls, videoUrls) {
   if (replySending.has(itemId)) return;
   const text = (content || "").trim();
   const photos = photoUrls || [];
-  if (!text && photos.length === 0) {
+  const videos = videoUrls || [];
+  if (!text && photos.length === 0 && videos.length === 0) {
     toast("답글 내용을 입력해주세요");
     return;
   }
@@ -452,13 +519,14 @@ async function addReply(itemId, content, photoUrls) {
     const reply = {
       content: text,
       photoUrls: photos,
+      videoUrls: videos,
       mentions,
       mentionsAll,
       staffName: account.name,
       staffPhone: account.phone,
       createdAt: Date.now(),
     };
-    await updateDoc(doc(db, "shares", shareDate, "items", itemId), {
+    await updateDoc(doc(db, "stores", account.storeId, "shares", shareDate, "items", itemId), {
       replies: arrayUnion(reply),
     });
     // Today's live listener already picks this write up on its own —
@@ -471,6 +539,7 @@ async function addReply(itemId, content, photoUrls) {
     }
     replyDrafts.delete(itemId);
     replyDraftPhotos.delete(itemId);
+    replyDraftVideos.delete(itemId);
     replyMentionState.delete(itemId);
     // render() silently no-ops while this input still has focus (true for
     // the Enter-key path, since Enter doesn't blur it) — without this, the
@@ -498,7 +567,7 @@ async function saveReplyEdit(key, value) {
   }
   const newReplies = [...it.replies];
   newReplies[idx] = { ...reply, content: text };
-  await updateDoc(doc(db, "shares", shareDate, "items", itemId), { replies: newReplies });
+  await updateDoc(doc(db, "stores", account.storeId, "shares", shareDate, "items", itemId), { replies: newReplies });
   if (shareDate !== date) it.replies = newReplies; // past dates have no live listener to pick this up otherwise
   editingReplies.delete(key);
   render();
@@ -514,7 +583,7 @@ async function deleteReplyAt(itemId, idx) {
     return;
   }
   if (!confirm("답글을 삭제할까요?")) return;
-  await updateDoc(doc(db, "shares", shareDate, "items", itemId), {
+  await updateDoc(doc(db, "stores", account.storeId, "shares", shareDate, "items", itemId), {
     replies: arrayRemove(reply),
   });
   if (shareDate !== date) it.replies = it.replies.filter((_, i) => i !== idx); // past dates have no live listener to pick this up otherwise
@@ -599,7 +668,7 @@ function hasUnseenReply(it) {
 function markSeen(items, forDate) {
   items.forEach((it) => {
     if (isNewToMe(it)) {
-      updateDoc(doc(db, "shares", forDate, "items", it.id), { seenBy: arrayUnion(account.phone) }).catch(() => {});
+      updateDoc(doc(db, "stores", account.storeId, "shares", forDate, "items", it.id), { seenBy: arrayUnion(account.phone) }).catch(() => {});
     }
   });
 }
@@ -708,6 +777,32 @@ function noteTabHtml(noteList, isToday) {
   let html = `
     <div class="category-title section-title-note">💬 소통해요<span class="sub">${noteList.length}건</span></div>
     <div class="card section-note">`;
+  if (isToday) {
+    html += `
+      <div class="note-compose" style="margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--border);">
+        <label class="notice-toggle-row">
+          <input type="checkbox" id="noteNoticeCheck" ${noteIsNotice ? "checked" : ""} />
+          <span>📢 공지로 등록</span>
+        </label>
+        <textarea id="noteInput" rows="3" placeholder="근무 중이 아닌 직원도 볼 수 있게 특이사항을 남겨주세요 (@이름으로 멘션할 수 있어요)" style="width:100%;">${escapeHtml(noteDraftText)}</textarea>
+        <div id="mentionSuggestBox" class="mention-suggest-box"></div>
+        <div class="photo-attach-row" style="flex-wrap:wrap;">
+          <input type="file" accept="image/*,video/*" id="noteImageInput" ${MULTIPLE_FILE_ATTR} style="display:none;" />
+          ${notePhotoUrls.map((url, i) => `
+            <div class="photo-preview">
+              <img src="${url}" alt="첨부 사진" class="share-photo-trigger" />
+              <button class="photo-remove-btn" data-note-photo-remove="${i}">✕</button>
+            </div>`).join("")}
+          ${noteVideoUrls.map((url, i) => `
+            <div class="photo-preview">
+              ${videoThumbHtml(url)}
+              <button class="photo-remove-btn" data-note-video-remove="${i}">✕</button>
+            </div>`).join("")}
+          <button class="photo-add-btn" id="noteImageAddBtn">📷 사진/영상 첨부</button>
+        </div>
+        <button class="btn gold block" id="noteAddBtn" style="margin-top:8px;">공유하기</button>
+      </div>`;
+  }
   if (noteList.length === 0) {
     html += `<div class="empty">공유된 특이사항이 없어요.</div>`;
   } else {
@@ -722,36 +817,16 @@ function noteTabHtml(noteList, isToday) {
             ${postTopRowHtml(it, isToday)}
           </div>
           <div class="post-body">
-            ${sharePhotoUrlsOf(it).length > 0 ? `
+            ${sharePhotoUrlsOf(it).length > 0 || shareVideoUrlsOf(it).length > 0 ? `
             <div class="receipt-photo-row note-photo-row">
               ${sharePhotoUrlsOf(it).map((url) => `<img src="${url}" class="note-photo-thumb share-photo-trigger" alt="첨부 사진" />`).join("")}
+              ${shareVideoUrlsOf(it).map((url) => videoThumbHtml(url)).join("")}
             </div>` : ""}
             ${reactionRow(it, postActionsHtml(it))}
             ${repliesHtml(it)}
           </div>
         </div>`;
     }
-  }
-  if (isToday) {
-    html += `
-      <div style="margin-top:12px;">
-        <label class="notice-toggle-row">
-          <input type="checkbox" id="noteNoticeCheck" ${noteIsNotice ? "checked" : ""} />
-          <span>📢 공지로 등록</span>
-        </label>
-        <textarea id="noteInput" rows="3" placeholder="근무 중이 아닌 직원도 볼 수 있게 특이사항을 남겨주세요 (@이름으로 멘션할 수 있어요)" style="width:100%;">${escapeHtml(noteDraftText)}</textarea>
-        <div id="mentionSuggestBox" class="mention-suggest-box"></div>
-        <div class="photo-attach-row" style="flex-wrap:wrap;">
-          <input type="file" accept="image/*" id="noteImageInput" ${MULTIPLE_FILE_ATTR} style="display:none;" />
-          ${notePhotoUrls.map((url, i) => `
-            <div class="photo-preview">
-              <img src="${url}" alt="첨부 사진" class="share-photo-trigger" />
-              <button class="photo-remove-btn" data-note-photo-remove="${i}">✕</button>
-            </div>`).join("")}
-          <button class="photo-add-btn" id="noteImageAddBtn">📷 사진 첨부</button>
-        </div>
-        <button class="btn gold block" id="noteAddBtn" style="margin-top:8px;">공유하기</button>
-      </div>`;
   }
   html += `</div>`;
   return html;
@@ -809,13 +884,20 @@ function render() {
       <button type="button" class="${shareTab === "note" ? "active" : ""}" data-share-tab="note">💬 소통해요${tabNBadgeHtml("note")}</button>
       <button type="button" class="${shareTab === "soldout" ? "active" : ""}" data-share-tab="soldout">📦 품절공유${tabNBadgeHtml("soldout")}</button>
       <button type="button" class="${shareTab === "recipe" ? "active" : ""}" data-share-tab="recipe">📖 메뉴공유${tabNBadgeHtml("recipe")}</button>
+      <button type="button" class="${shareTab === "board" ? "active" : ""}" data-share-tab="board">📌 게시판</button>
     </div>`;
 
-  if (shareTab !== "recipe") {
+  if (shareTab !== "recipe" && shareTab !== "board") {
     html += `
       <div class="card">
         <div class="field" style="margin:0">
-          <label>최근 7일</label>
+          <div class="row-between day-window-head">
+            <label>${dayWindowLabel()}</label>
+            <div class="day-window-nav">
+              <button type="button" class="icon-btn" id="shareDayWindowPrev">‹ 이전</button>
+              <button type="button" class="icon-btn" id="shareDayWindowNext" ${dayWindowOffset === 0 ? "disabled" : ""}>다음 ›</button>
+            </div>
+          </div>
           <div class="day-chip-row" id="shareDayChips"></div>
         </div>
       </div>`;
@@ -823,10 +905,17 @@ function render() {
 
   if (shareTab === "soldout") html += soldoutTabHtml(soldoutListAll, isToday);
   else if (shareTab === "note") html += noteTabHtml(noteList, isToday);
+  else if (shareTab === "board") html += boardTabHtml();
   else html += recipeTabHtml();
 
   rootEl.innerHTML = html;
-  if (shareTab !== "recipe") wireShareDayChips();
+  if (shareTab !== "recipe" && shareTab !== "board") {
+    wireShareDayChips();
+    const prevBtn = document.getElementById("shareDayWindowPrev");
+    const nextBtn = document.getElementById("shareDayWindowNext");
+    if (prevBtn) prevBtn.addEventListener("click", () => shiftDayWindow(1));
+    if (nextBtn) nextBtn.addEventListener("click", () => shiftDayWindow(-1));
+  }
 
   rootEl.querySelectorAll("[data-share-tab]").forEach((el) => {
     el.addEventListener("click", () => {
@@ -843,6 +932,7 @@ function render() {
 
   if (shareTab === "soldout") wireSoldoutTab();
   else if (shareTab === "note") wireNoteTab();
+  else if (shareTab === "board") wireBoardTab();
   else wireRecipeTab();
 }
 
@@ -886,7 +976,7 @@ function wireSoldoutTab() {
       // 있으니, 원글 날짜로 보여주면 언제 해제됐는지가 거짓으로 보인다.
       await Promise.all(checkedItems.map((it) => {
         const text = (soldoutResolveTextDraft.has(it.id) ? soldoutResolveTextDraft.get(it.id) : it.content).trim();
-        return updateDoc(doc(db, "shares", it.date, "items", it.id), {
+        return updateDoc(doc(db, "stores", account.storeId, "shares", it.date, "items", it.id), {
           resolved: true,
           content: text || it.content,
           resolvedByPhone: account.phone,
@@ -957,6 +1047,12 @@ function wireNoteTab() {
       render();
     });
   });
+  rootEl.querySelectorAll("[data-note-video-remove]").forEach((el) => {
+    el.addEventListener("click", () => {
+      noteVideoUrls.splice(Number(el.dataset.noteVideoRemove), 1);
+      render();
+    });
+  });
   const noteAddBtn = rootEl.querySelector("#noteAddBtn");
   if (noteAddBtn) {
     noteAddBtn.addEventListener("click", async () => {
@@ -966,9 +1062,10 @@ function wireNoteTab() {
         return;
       }
       const { mentions, mentionsAll } = extractMentions(text);
-      await addShareItem("note", text, notePhotoUrls, { isNotice: noteIsNotice, mentions, mentionsAll });
+      await addShareItem("note", text, notePhotoUrls, { isNotice: noteIsNotice, mentions, mentionsAll, videoUrls: noteVideoUrls });
       noteDraftText = "";
       notePhotoUrls = [];
+      noteVideoUrls = [];
       noteIsNotice = false;
       mentionActive = false;
       render();
@@ -988,9 +1085,14 @@ function wireNoteTab() {
   rootEl.querySelectorAll("[data-reply-send]").forEach((el) => {
     const itemId = el.dataset.replySend;
     const input = rootEl.querySelector(`.reply-input[data-reply-for="${itemId}"]`);
-    el.addEventListener("click", () => addReply(itemId, input.value, replyDraftPhotos.get(itemId) || []));
+    el.addEventListener("click", () => addReply(itemId, input.value, replyDraftPhotos.get(itemId) || [], replyDraftVideos.get(itemId) || []));
+    // 답글 입력창이 <textarea>라 엔터는 그냥 줄바꿈 — 등록은 오직 "등록"
+    // 버튼으로만 한다(전엔 Enter가 바로 전송돼서, 여러 줄 쓰려고 엔터 치면
+    // 의도와 다르게 중간에 등록돼버렸다).
     input.addEventListener("input", (e) => {
       replyDrafts.set(itemId, e.target.value);
+      e.target.style.height = "auto";
+      e.target.style.height = `${e.target.scrollHeight}px`;
       const cursor = e.target.selectionStart;
       const before = e.target.value.slice(0, cursor);
       const atIndex = before.lastIndexOf("@");
@@ -1000,9 +1102,6 @@ function wireNoteTab() {
         replyMentionState.set(itemId, { active: false, startIndex: -1, query: "" });
       }
       renderReplyMentionSuggestions(itemId);
-    });
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.isComposing) addReply(itemId, input.value, replyDraftPhotos.get(itemId) || []);
     });
   });
   rootEl.querySelectorAll("[data-reply-photo-add]").forEach((el) => {
@@ -1026,6 +1125,16 @@ function wireNoteTab() {
       const arr = replyDraftPhotos.get(itemId) || [];
       arr.splice(idx, 1);
       replyDraftPhotos.set(itemId, arr);
+      render();
+    });
+  });
+  rootEl.querySelectorAll("[data-reply-video-remove]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const itemId = el.dataset.replyVideoRemove;
+      const idx = Number(el.dataset.replyVideoRemoveIdx);
+      const arr = replyDraftVideos.get(itemId) || [];
+      arr.splice(idx, 1);
+      replyDraftVideos.set(itemId, arr);
       render();
     });
   });
@@ -1068,6 +1177,13 @@ function wireNoteTab() {
 // 있는 탭에 맞게 한 번만 와이어링한다 — 다른 탭엔 해당 요소가 없으니 그냥
 // 매치가 0건일 뿐 해롭지 않다.
 function wireCommonPostActions() {
+  rootEl.querySelectorAll("[data-share-pin]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const it = shareItems.find((x) => x.id === el.dataset.sharePin);
+      if (!it) return;
+      togglePin(it.id, shareDate, !!it.pinned);
+    });
+  });
   rootEl.querySelectorAll("[data-share-remove]").forEach((el) => {
     el.addEventListener("click", () => deleteShareItem(el.dataset.shareRemove));
   });
@@ -1097,6 +1213,90 @@ function wireCommonPostActions() {
       editingItems.delete(el.dataset.editCancel);
       render();
     });
+  });
+}
+
+// ---- 게시판(고정된 글 모아보기) ----
+// 최근 7일이 지나도 보존해야 할 글(맛집리스트, 비밀번호 등)을 📌로
+// 고정해두면 여기 모인다. 포인터 컬렉션(pinnedShareItems)만 날짜 상관없이
+// 구독하고, 실제 내용은 그때그때 원본 문서에서 다시 읽어온다 — 그래야
+// 고정 후에 원글이 수정되거나 답글/반응이 달려도 게시판에 최신 상태로
+// 보인다. 고정이 풀리면(수동으로, 또는 30일 지나 서버가 자동으로)
+// 포인터만 없어지고 원본 글 자체는 그대로 남는다 — 그냥 다시 "평범한 옛날
+// 글"로 돌아갈 뿐 삭제되는 게 아니다.
+let boardPointers = []; // [{id, date, pinnedAt}]
+let boardItems = []; // 위 포인터로 다시 읽어온 실제 글 — resolve 끝나기 전엔 null로 채워짐
+let boardUnsub = null;
+let boardLoading = false;
+
+async function resolveBoardItems() {
+  boardLoading = true;
+  const resolved = await Promise.all(
+    boardPointers.map(async (p) => {
+      try {
+        const snap = await getDoc(doc(db, "stores", account.storeId, "shares", p.date, "items", p.id));
+        return snap.exists() ? { id: p.id, date: p.date, ...snap.data() } : null;
+      } catch (e) {
+        return null;
+      }
+    })
+  );
+  // 고정한 시각이 아니라 원글이 올라온 시각 기준 최신순 — 나중에 고정했다고
+  // 더 옛날 글이 목록 위로 올라오면 "최근 거부터"라는 기대와 어긋난다.
+  boardItems = resolved.filter(Boolean).sort((a, b) => tsMillis(b.createdAt) - tsMillis(a.createdAt));
+  boardLoading = false;
+  if (shareTab === "board") render();
+}
+
+function ensureBoardStarted() {
+  if (boardUnsub) return;
+  boardUnsub = onSnapshot(query(collection(db, "stores", account.storeId, "pinnedShareItems"), orderBy("pinnedAt", "desc")), (snap) => {
+    boardPointers = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    resolveBoardItems();
+  });
+}
+
+function boardTabHtml() {
+  ensureBoardStarted();
+  let html = `<div class="category-title section-title-note">📌 게시판<span class="sub">${boardItems.length}건</span><span class="board-expiry-hint">30일 후 고정이 해제돼요</span></div><div class="card section-note">`;
+  if (boardPointers.length === 0) {
+    html += `<div class="empty">아직 고정된 글이 없어요. 소통해요 글의 📌 버튼으로 고정할 수 있어요.</div>`;
+  } else if (boardLoading && boardItems.length === 0) {
+    html += `<div class="empty">불러오는 중...</div>`;
+  } else {
+    for (const it of boardItems) {
+      html += `
+        <div class="item-row">
+          <div class="post-head">
+            <div class="post-avatar-col">
+              ${avatarHtml(it.staffPhone, it.staffName, 36)}
+              <div class="post-author-name">${escapeHtml(it.staffName || "")}</div>
+            </div>
+            <div class="post-top-row">
+              <div class="name">${highlightMentions(linkifyUrls(escapeHtml(it.content || "")))}</div>
+              <div class="who">${formatDateLabel(it.date)}</div>
+            </div>
+          </div>
+          <div class="post-body">
+            ${sharePhotoUrlsOf(it).length > 0 || shareVideoUrlsOf(it).length > 0 ? `
+            <div class="receipt-photo-row note-photo-row">
+              ${sharePhotoUrlsOf(it).map((url) => `<img src="${url}" class="note-photo-thumb share-photo-trigger" alt="첨부 사진" />`).join("")}
+              ${shareVideoUrlsOf(it).map((url) => videoThumbHtml(url)).join("")}
+            </div>` : ""}
+            <div class="post-actions board-item-actions">
+              <button class="board-unpin-btn" data-board-unpin="${it.id}" data-board-date="${it.date}">📌 고정 해제</button>
+            </div>
+          </div>
+        </div>`;
+    }
+  }
+  html += `</div>`;
+  return html;
+}
+
+function wireBoardTab() {
+  rootEl.querySelectorAll("[data-board-unpin]").forEach((el) => {
+    el.addEventListener("click", () => togglePin(el.dataset.boardUnpin, el.dataset.boardDate, true));
   });
 }
 
@@ -1133,7 +1333,7 @@ async function loadShareDate(targetDate) {
     return;
   }
   try {
-    const snap = await getDocs(collection(db, "shares", targetDate, "items"));
+    const snap = await getDocs(collection(db, "stores", account.storeId, "shares", targetDate, "items"));
     shareItems = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     chipCounts[targetDate] = shareItems.length;
     // Selecting a past date's tab is itself the "I've checked this" action —
@@ -1148,7 +1348,7 @@ async function loadShareDate(targetDate) {
 function loadAllShareChipCounts() {
   recentDates.forEach((d) => {
     if (d === date) return; // live count already tracked from onSnapshot
-    getDocs(collection(db, "shares", d, "items"))
+    getDocs(collection(db, "stores", account.storeId, "shares", d, "items"))
       .then((snap) => {
         chipCounts[d] = snap.size;
         chipUnseen[d] = snap.docs.some((doc) => itemHasUnseenActivity(doc.data(), account.phone));
@@ -1162,6 +1362,27 @@ function loadAllShareChipCounts() {
       })
       .catch(() => {});
   });
+}
+
+// "최근 7일" 구간을 한 주씩 앞뒤로 옮긴다 — offset 0(최근 7일)보다 미래로는
+//못 가게 막는다(다음 버튼은 offset이 0보다 클 때만 활성화). 과거로는 특별히
+// 막지 않는다 — 데이터가 없으면 그냥 빈 칩으로 보일 뿐이다.
+function shiftDayWindow(delta) {
+  const next = dayWindowOffset + delta;
+  if (next < 0) return;
+  dayWindowOffset = next;
+  recentDates = computeRecentDates();
+  shareDate = recentDates[0];
+  loadShareDate(shareDate);
+  loadAllShareChipCounts();
+  render();
+}
+
+function dayWindowLabel() {
+  if (dayWindowOffset === 0) return "최근 7일";
+  const sorted = [...recentDates].sort();
+  const label = (d) => { const [, m, dd] = d.split("-"); return `${Number(m)}.${Number(dd)}`; };
+  return `${label(sorted[0])} ~ ${label(sorted[sorted.length - 1])}`;
 }
 
 // Refresh just the day-chip row (e.g. after a background chip-count/unseen
@@ -1178,10 +1399,11 @@ async function addShareItem(type, content, photoUrls, options) {
     return;
   }
   const opts = options || {};
-  await addDoc(collection(db, "shares", date, "items"), {
+  await addDoc(collection(db, "stores", account.storeId, "shares", date, "items"), {
     type,
     content: text,
     photoUrls: photoUrls && photoUrls.length > 0 ? photoUrls : [],
+    videoUrls: opts.videoUrls && opts.videoUrls.length > 0 ? opts.videoUrls : [],
     isNotice: !!opts.isNotice,
     mentions: opts.mentions || [],
     mentionsAll: !!opts.mentionsAll,
@@ -1201,11 +1423,16 @@ function sharePhotoUrlsOf(it) {
   return it.photoUrl ? [it.photoUrl] : [];
 }
 
+function shareVideoUrlsOf(it) {
+  return it.videoUrls || [];
+}
+
 // Draft state for the "공유해요" composer — kept outside render() so
 // re-rendering (e.g. from an unrelated reaction elsewhere) doesn't wipe
 // whatever the user is mid-typing or already attached.
 let noteDraftText = "";
 let notePhotoUrls = [];
+let noteVideoUrls = [];
 let noteIsNotice = false;
 
 // @멘션 자동완성 입력 상태 — "@"를 입력하는 순간부터 커서가 공백을 만날
@@ -1243,22 +1470,41 @@ function insertMention(name) {
   input.setSelectionRange(newCursor, newCursor);
 }
 
+// 사진과 달리 영상은 캔버스로 다시 인코딩할 방법이 없으니(resizeImageFile은
+// <img>에 로드하는 방식이라 영상 파일을 못 읽는다) 원본 그대로 올린다 —
+// 그만큼 용량이 커서 notePhotos와는 별도 경로(noteVideos)와 더 넉넉한 용량
+// 제한(storage.rules)을 쓴다. 확장자/Content-Type도 실제 파일 걸 그대로
+// 쓴다(사진 쪽처럼 .jpg로 강제하면 안 됨).
+async function uploadShareVideo(file, prefix) {
+  const ext = (file.name.split(".").pop() || "mp4").toLowerCase().replace(/[^a-z0-9]/g, "") || "mp4";
+  const path = `stores/${account.storeId}/noteVideos/${date}/${prefix}_${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
+  const fileRef = ref(storage, path);
+  await uploadBytes(fileRef, file, { contentType: file.type || "video/mp4" });
+  return getDownloadURL(fileRef);
+}
+
 async function onNotePhotosSelected(files) {
   if (!files || files.length === 0) return;
-  toast(files.length > 1 ? `사진 ${files.length}장 업로드 중...` : "사진 업로드 중...");
+  const images = files.filter((f) => f.type.startsWith("image/"));
+  const videos = files.filter((f) => f.type.startsWith("video/"));
+  if (images.length === 0 && videos.length === 0) return;
+  toast(images.length + videos.length > 1 ? "첨부파일 업로드 중..." : "업로드 중...");
   try {
-    for (const file of files) {
+    for (const file of images) {
       const blob = await resizeImageFile(file);
-      const path = `notePhotos/${date}/share_${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
+      const path = `stores/${account.storeId}/notePhotos/${date}/share_${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
       const fileRef = ref(storage, path);
       await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
       notePhotoUrls.push(await getDownloadURL(fileRef));
     }
+    for (const file of videos) {
+      noteVideoUrls.push(await uploadShareVideo(file, "share"));
+    }
     render();
-    toast("사진을 첨부했어요");
+    toast("첨부했어요");
   } catch (e) {
     console.error(e);
-    toast("사진 업로드에 실패했어요");
+    toast("업로드에 실패했어요");
   }
 }
 
@@ -1270,7 +1516,7 @@ async function deleteShareItem(id) {
     return;
   }
   if (!confirm("삭제할까요?")) return;
-  await deleteDoc(doc(db, "shares", shareDate, "items", id));
+  await deleteDoc(doc(db, "stores", account.storeId, "shares", shareDate, "items", id));
   // past dates have no live listener to pick this up otherwise
   shareItems = shareItems.filter((x) => x.id !== id);
   if (shareDate === date) shareTodayItems = shareTodayItems.filter((x) => x.id !== id);
@@ -1284,7 +1530,7 @@ let recentMaterialNames = [];
 
 async function loadRecentMaterialNames() {
   try {
-    const snap = await getDocs(collection(db, "materials"));
+    const snap = await getDocs(collection(db, "stores", account.storeId, "materials"));
     const labels = new Set();
     snap.forEach((doc) => {
       const m = doc.data();
@@ -1312,7 +1558,7 @@ function ensureStarted() {
   if (started) return;
   started = true;
   loadRecentMaterialNames();
-  onSnapshot(collection(db, "shares", date, "items"), (snap) => {
+  onSnapshot(collection(db, "stores", account.storeId, "shares", date, "items"), (snap) => {
     shareTodayItems = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     chipCounts[date] = shareTodayItems.length;
     chipUnseen[date] = shareTodayItems.some((it) => itemHasUnseenActivity(it, account.phone));
@@ -1462,7 +1708,7 @@ let editRecipeDraft = { menuName: "", instructions: "", status: null, photoUrls:
 
 function ensureRecipesStarted() {
   if (recipeUnsub) return;
-  recipeUnsub = onSnapshot(query(collection(db, "recipes"), orderBy("createdAt", "desc")), (snap) => {
+  recipeUnsub = onSnapshot(query(collection(db, "stores", account.storeId, "recipes"), orderBy("createdAt", "desc")), (snap) => {
     recipeList = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     if (shareTab === "recipe") render();
   });
@@ -1472,7 +1718,7 @@ async function uploadRecipePhotos(files) {
   const urls = [];
   for (const file of files) {
     const blob = await resizeImageFile(file);
-    const path = `notePhotos/recipes/${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
+    const path = `stores/${account.storeId}/notePhotos/recipes/${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
     const fileRef = ref(storage, path);
     await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
     urls.push(await getDownloadURL(fileRef));
@@ -1534,7 +1780,7 @@ async function submitRecipe() {
     toast("신메뉴/기존메뉴 상태를 선택해주세요");
     return;
   }
-  await addDoc(collection(db, "recipes"), {
+  await addDoc(collection(db, "stores", account.storeId, "recipes"), {
     menuName,
     instructions,
     status: recipeDraftStatus,
@@ -1560,7 +1806,7 @@ async function submitDiscontinued() {
     toast("메뉴 이름을 입력해주세요");
     return;
   }
-  await addDoc(collection(db, "recipes"), {
+  await addDoc(collection(db, "stores", account.storeId, "recipes"), {
     menuName,
     instructions: discoDraftNote.trim(),
     status: "discontinued",
@@ -1614,7 +1860,7 @@ async function saveEditRecipe() {
     toast("신메뉴/기존메뉴 상태를 선택해주세요");
     return;
   }
-  await updateDoc(doc(db, "recipes", editingRecipeId), {
+  await updateDoc(doc(db, "stores", account.storeId, "recipes", editingRecipeId), {
     menuName,
     instructions,
     status: editRecipeDraft.status,
@@ -1632,7 +1878,7 @@ async function deleteRecipe(id) {
     return;
   }
   if (!confirm("이 레시피를 삭제할까요?")) return;
-  await deleteDoc(doc(db, "recipes", id));
+  await deleteDoc(doc(db, "stores", account.storeId, "recipes", id));
 }
 
 function recipeStatusBadgeHtml(status) {

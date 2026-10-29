@@ -12,6 +12,8 @@ import {
   deleteDoc,
   onSnapshot,
   serverTimestamp,
+  query,
+  where,
 } from "./firebase-init.js";
 import { getAccessCode, setAccessCodeDoc } from "./auth.js";
 import { toast, escapeHtml, sortMaterials, sortByOrder, formatPhone } from "./util.js";
@@ -20,6 +22,7 @@ import { avatarHtml } from "./avatar.js";
 let accessCodeField, accessCodeSaveBtn, staffAccountList, newSub, existingSubChips, newName, addBtn, listEl, subCategoryList, seedCard, seedBtn, mainCatSeg, tabBasic, tabFood, subcatOrderCard, subcatOrderList;
 
 let myPhone = "";
+let myStoreId = "";
 let materialsUnsub = null;
 let accountsUnsub = null;
 let subcatUnsub = null;
@@ -172,7 +175,7 @@ async function onAddBtnClick() {
     return;
   }
   await readyAuth;
-  await addDoc(collection(db, "materials"), {
+  await addDoc(collection(db, "stores", myStoreId, "materials"), {
     name,
     mainCategory: selectedMainCat,
     subCategory,
@@ -187,7 +190,7 @@ async function onSeedBtnClick() {
   await readyAuth;
   const base = Date.now();
   for (let i = 0; i < DEFAULT_MATERIALS.length; i++) {
-    await addDoc(collection(db, "materials"), { ...DEFAULT_MATERIALS[i], sortOrder: base + i, createdAt: serverTimestamp() });
+    await addDoc(collection(db, "stores", myStoreId, "materials"), { ...DEFAULT_MATERIALS[i], sortOrder: base + i, createdAt: serverTimestamp() });
   }
   toast("기본 자재를 불러왔어요");
 }
@@ -210,7 +213,7 @@ async function saveEdit(id, value) {
     toast("자재 이름을 입력해주세요");
     return;
   }
-  await updateDoc(doc(db, "materials", id), { name: trimmed });
+  await updateDoc(doc(db, "stores", myStoreId, "materials", id), { name: trimmed });
   editingId = null;
   toast("이름을 수정했어요");
   render();
@@ -228,7 +231,7 @@ async function setReceiptAlias(id) {
     m.receiptAlias || ""
   );
   if (input === null) return;
-  await updateDoc(doc(db, "materials", id), { receiptAlias: input.trim() });
+  await updateDoc(doc(db, "stores", myStoreId, "materials", id), { receiptAlias: input.trim() });
   toast(input.trim() ? "영수증 검색어를 저장했어요" : "영수증 검색어를 해제했어요");
 }
 
@@ -236,7 +239,7 @@ async function removeMaterial(id) {
   const m = materials.find((x) => x.id === id);
   if (!m) return;
   if (!confirm(`'${m.name}'을(를) 삭제할까요?`)) return;
-  await deleteDoc(doc(db, "materials", id));
+  await deleteDoc(doc(db, "stores", myStoreId, "materials", id));
   toast("삭제했어요");
 }
 
@@ -353,7 +356,7 @@ async function onDragEnd() {
   drag = null;
   if (!changed) return;
   const base = Date.now();
-  await Promise.all(ids.map((id, i) => updateDoc(doc(db, "materials", id), { sortOrder: base + i })));
+  await Promise.all(ids.map((id, i) => updateDoc(doc(db, "stores", myStoreId, "materials", id), { sortOrder: base + i })));
 }
 
 function renderSubList() {
@@ -405,7 +408,7 @@ async function moveSubcategory(subName, direction) {
   const targetIdx = idx + direction;
   if (targetIdx < 0 || targetIdx >= subs.length) return;
   [subs[idx], subs[targetIdx]] = [subs[targetIdx], subs[idx]];
-  await setDoc(doc(db, "config", "subcategoryOrder"), { [listFilterCat]: subs }, { merge: true });
+  await setDoc(doc(db, "stores", myStoreId, "config", "subcategoryOrder"), { [listFilterCat]: subs }, { merge: true });
 }
 
 function render() {
@@ -506,6 +509,7 @@ function render() {
 
 export function mount(account) {
   myPhone = account.phone;
+  myStoreId = account.storeId;
 
   document.getElementById("pageSub").textContent = "자재 카탈로그 관리";
 
@@ -560,14 +564,14 @@ export function mount(account) {
   addBtn.addEventListener("click", onAddBtnClick);
   seedBtn.addEventListener("click", onSeedBtnClick);
 
-  materialsUnsub = onSnapshot(collection(db, "materials"), (snap) => {
+  materialsUnsub = onSnapshot(collection(db, "stores", myStoreId, "materials"), (snap) => {
     materials = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     render();
   });
-  accountsUnsub = onSnapshot(collection(db, "accounts"), (snap) => {
+  accountsUnsub = onSnapshot(query(collection(db, "accounts"), where("storeId", "==", myStoreId)), (snap) => {
     renderAccounts(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
   });
-  subcatUnsub = onSnapshot(doc(db, "config", "subcategoryOrder"), (snap) => {
+  subcatUnsub = onSnapshot(doc(db, "stores", myStoreId, "config", "subcategoryOrder"), (snap) => {
     subcategoryOrder = snap.exists() ? snap.data() : {};
     render();
   });

@@ -18,6 +18,7 @@ import { computeTrendData, trendInsightsHtml, trendListHtml } from "./ordertrend
 const RECEIPT_REQUIRED_TO_CHECK = false;
 
 let myOwnerPhone = "";
+let myStoreId = "";
 
 let datePick, todayBtn, dayChips, receiptClipRowEl, orderList, newRequestCard, newRequestText, urgentCount, shareBtn, previewCard, sharePreview, copyBtn, notifyBtn, notifyBadgeEl, quickOrderLinksEl, pageSub;
 
@@ -56,7 +57,7 @@ let trendData = [];
 async function loadOrderTrend() {
   trendLoading = true;
   renderTrendOverlay();
-  trendData = await computeTrendData(recentDates);
+  trendData = await computeTrendData(recentDates, myStoreId);
   trendLoading = false;
   renderTrendOverlay();
 }
@@ -114,7 +115,7 @@ async function loadChipCounts() {
   await Promise.all(
     recentDates.map(async (date) => {
       try {
-        const snap = await getDocs(collection(db, "checks", date, "items"));
+        const snap = await getDocs(collection(db, "stores", myStoreId, "checks", date, "items"));
         chipCounts[date] = snap.size;
         chipUnordered[date] = snap.docs.some((d) => !d.data().ordered);
       } catch (e) {
@@ -155,7 +156,7 @@ function renderChips() {
 function subscribe() {
   if (unsub) unsub();
   orderedPending.clear();
-  unsub = onSnapshot(collection(db, "checks", datePick.value, "items"), (snap) => {
+  unsub = onSnapshot(collection(db, "stores", myStoreId, "checks", datePick.value, "items"), (snap) => {
     items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     // Once an item comes back from Firestore as ordered, it's locked — drop
     // any local pending mark for it (it's already shared and confirmed).
@@ -170,7 +171,7 @@ function subscribe() {
   if (receiptUnsub) receiptUnsub();
   receiptPhotos = [];
   allReceiptPhotosHistory = [];
-  receiptUnsub = onSnapshot(doc(db, "checks", datePick.value), (snap) => {
+  receiptUnsub = onSnapshot(doc(db, "stores", myStoreId, "checks", datePick.value), (snap) => {
     receiptPhotos = (snap.exists() && snap.data().receiptPhotos) || [];
     allReceiptPhotosHistory = (snap.exists() && snap.data().allReceiptPhotosHistory) || [];
     // 영수증이 막 첨부/해제되면 그 사실 자체가 발주 목록의 체크박스
@@ -318,7 +319,7 @@ async function submitReceiptAttachment() {
     const paths = [];
     for (const p of receiptPendingFiles) {
       const blob = await resizeImageFile(p.file);
-      const path = `receiptPhotos/${datePick.value}/${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
+      const path = `stores/${myStoreId}/receiptPhotos/${datePick.value}/${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
       const fileRef = ref(storage, path);
       await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
       urls.push(await getDownloadURL(fileRef));
@@ -326,7 +327,7 @@ async function submitReceiptAttachment() {
     }
     if (receiptMode === "all") {
       await setDoc(
-        doc(db, "checks", datePick.value),
+        doc(db, "stores", myStoreId, "checks", datePick.value),
         { receiptPhotos: [...receiptPhotos, ...urls], allReceiptPhotosHistory: [...allReceiptPhotosHistory, ...urls] },
         { merge: true }
       );
@@ -352,7 +353,7 @@ async function submitReceiptAttachment() {
       await Promise.all([...receiptSelectedIds].map((id) => {
         const it = items.find((x) => x.id === id);
         const existing = (it && it.ownerAttachedPhotos) || [];
-        return updateDoc(doc(db, "checks", datePick.value, "items", id), { ownerAttachedPhotos: [...existing, ...urls] });
+        return updateDoc(doc(db, "stores", myStoreId, "checks", datePick.value, "items", id), { ownerAttachedPhotos: [...existing, ...urls] });
       }));
       toast("첨부완료");
     }
@@ -587,7 +588,7 @@ function reconcileOrderedPending() {
 async function deleteOverallReceiptPhoto(url) {
   if (!confirm("삭제하면 아직 공유 전인 발주들은 체크를 다시 해야 해요. 삭제할까요?")) return;
   await setDoc(
-    doc(db, "checks", datePick.value),
+    doc(db, "stores", myStoreId, "checks", datePick.value),
     {
       receiptPhotos: receiptPhotos.filter((u) => u !== url),
       allReceiptPhotosHistory: allReceiptPhotosHistory.filter((u) => u !== url),
@@ -602,7 +603,7 @@ async function deleteItemReceiptPhoto(itemId, url) {
   const it = items.find((x) => x.id === itemId);
   if (!it) return;
   const next = (it.ownerAttachedPhotos || []).filter((u) => u !== url);
-  await updateDoc(doc(db, "checks", datePick.value, "items", itemId), { ownerAttachedPhotos: next });
+  await updateDoc(doc(db, "stores", myStoreId, "checks", datePick.value, "items", itemId), { ownerAttachedPhotos: next });
   toast("삭제완료");
 }
 
@@ -636,7 +637,7 @@ async function shareOrderedChecks() {
       // 복사해 붙이지 않고, 그날 모아보는 영수증 모음(allReceiptPhotosHistory)
       // 쪽에만 남긴다.
       const photosForItem = (it && it.ownerAttachedPhotos && it.ownerAttachedPhotos.length > 0) ? it.ownerAttachedPhotos : [];
-      await updateDoc(doc(db, "checks", datePick.value, "items", id), { ordered: true, orderedAt: serverTimestamp(), receiptPhotos: photosForItem });
+      await updateDoc(doc(db, "stores", myStoreId, "checks", datePick.value, "items", id), { ordered: true, orderedAt: serverTimestamp(), receiptPhotos: photosForItem });
       orderedPending.delete(id);
       if (it && it.staffPhone) {
         const key = it.staffPhone;
@@ -648,7 +649,7 @@ async function shareOrderedChecks() {
     }
   }
   for (const [staffPhone, info] of Object.entries(byStaff)) {
-    await addDoc(collection(db, "checks", datePick.value, "orderBatches"), {
+    await addDoc(collection(db, "stores", myStoreId, "checks", datePick.value, "orderBatches"), {
       staffPhone,
       staffName: info.staffName,
       itemCount: info.count,
@@ -659,11 +660,11 @@ async function shareOrderedChecks() {
   // 이번에 첨부한 영수증은 이번 체크분에만 유효 — 공유 후에 새로 들어오는
   // 요청들은 그 사이에 실제로 결제했다는 보장이 없으니, 다음 체크를 위해선
   // 다시 영수증을 첨부하게 잠금을 되돌린다.
-  await setDoc(doc(db, "checks", datePick.value), { receiptPhotos: [] }, { merge: true });
+  await setDoc(doc(db, "stores", myStoreId, "checks", datePick.value), { receiptPhotos: [] }, { merge: true });
   receiptPhotos = [];
   renderReceiptCard();
   toast("체크한 항목을 직원에게 공유했어요");
-  recordSubmitToday();
+  recordSubmitToday(myStoreId);
   render();
 }
 
@@ -910,6 +911,7 @@ function isLastDayOfMonth() {
 
 export function mount(account) {
   myOwnerPhone = account.phone;
+  myStoreId = account.storeId;
   mountHumanityTrigger(document.getElementById("humanityBtn"), document.getElementById("humanityOverlayRoot"), account);
 
   const monthEndBanner = document.getElementById("monthEndBanner");
@@ -955,7 +957,7 @@ export function mount(account) {
   subscribe();
   loadChipCounts();
 
-  materialsUnsub = onSnapshot(collection(db, "materials"), (snap) => {
+  materialsUnsub = onSnapshot(collection(db, "stores", myStoreId, "materials"), (snap) => {
     const mats = sortMaterials(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     materialsOrder = {};
     materialFirstAppearanceRank = {};
@@ -969,7 +971,7 @@ export function mount(account) {
     render();
   });
 
-  subcatUnsub = onSnapshot(doc(db, "config", "subcategoryOrder"), (snap) => {
+  subcatUnsub = onSnapshot(doc(db, "stores", myStoreId, "config", "subcategoryOrder"), (snap) => {
     subcategoryOrder = snap.exists() ? snap.data() : {};
     render();
   });

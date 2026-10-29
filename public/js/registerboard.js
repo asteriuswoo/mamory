@@ -161,7 +161,7 @@ function primeCashDraftFromLatest() {
 async function primeCashDraftFromYesterday() {
   if (cashDraftDirty || cashEntriesToday.length > 0) return;
   try {
-    const snap = await getDocs(collection(db, "cashRegister", dateStrDaysAgo(1), "entries"));
+    const snap = await getDocs(collection(db, "stores", account.storeId, "cashRegister", dateStrDaysAgo(1), "entries"));
     if (cashDraftDirty || cashEntriesToday.length > 0) return; // 그 사이 상황이 바뀌었으면 건너뜀
     const latest = latestEntry(snap.docs.map((d) => d.data()));
     if (!latest) return;
@@ -193,7 +193,7 @@ function latestEntry(entries) {
 // 등록됐던 금액이 로그에서 사라지지 않도록 등록 기록 하나로 옮겨 넣는다.
 // 트랜잭션으로 감싸 여러 기기에서 동시에 열어도 중복 이관되지 않게 막는다.
 async function migrateLegacyCashDoc(dateStr) {
-  const legacyRef = doc(db, "cashRegister", dateStr);
+  const legacyRef = doc(db, "stores", account.storeId, "cashRegister", dateStr);
   try {
     await runTransaction(db, async (tx) => {
       const snap = await tx.get(legacyRef);
@@ -205,7 +205,7 @@ async function migrateLegacyCashDoc(dateStr) {
         const count = data[`bill${denom}`] || 0;
         if (count > 0) breakdown[denom] = count;
       });
-      const entryRef = doc(collection(db, "cashRegister", dateStr, "entries"));
+      const entryRef = doc(collection(db, "stores", account.storeId, "cashRegister", dateStr, "entries"));
       tx.set(entryRef, {
         breakdown,
         total: data.total,
@@ -228,7 +228,7 @@ async function migrateLegacyCashDoc(dateStr) {
 async function deleteCashEntry(entryId) {
   if (account.role !== "owner") return;
   if (!confirm("이 시재 등록 기록을 삭제할까요?")) return;
-  await deleteDoc(doc(db, "cashRegister", cashDate, "entries", entryId));
+  await deleteDoc(doc(db, "stores", account.storeId, "cashRegister", cashDate, "entries", entryId));
   // 오늘 날짜는 live 리스너가 알아서 다시 그려주지만, 과거 날짜는 한 번
   // 불러온 스냅샷이라 직접 지워줘야 목록에서 바로 사라진다.
   if (cashDate !== date) {
@@ -249,7 +249,7 @@ async function registerCashDraft() {
   if (!confirm(`선택한 장수로 ${total.toLocaleString()}원으로 시재를 등록하시겠습니까?`)) return;
   const breakdown = {};
   BILL_DENOMS.forEach((denom) => { if (cashDraft[denom] > 0) breakdown[denom] = cashDraft[denom]; });
-  await addDoc(collection(db, "cashRegister", date, "entries"), {
+  await addDoc(collection(db, "stores", account.storeId, "cashRegister", date, "entries"), {
     breakdown,
     total,
     staffName: account.name,
@@ -270,7 +270,7 @@ async function registerCashDraft() {
 // 0원이 되고 누가 언제 리셋했는지도 로그에 그대로 남는다.
 async function resetCashRegister() {
   if (!confirm("시재를 0원으로 리셋할까요?")) return;
-  await addDoc(collection(db, "cashRegister", date, "entries"), {
+  await addDoc(collection(db, "stores", account.storeId, "cashRegister", date, "entries"), {
     breakdown: {},
     total: 0,
     staffName: account.name,
@@ -348,13 +348,15 @@ function cashCardHtml(isToday) {
           </div>`).join("")}
       </div>
       <div class="cash-total-row">합계 <strong id="cashTotalDisplay">${cashDraftTotal().toLocaleString()}원</strong></div>
-      <button class="btn gold block" id="cashRegisterBtn">시재 등록</button>`
+      <div class="cash-submit-row">
+        ${account.role === "owner" ? `<button type="button" class="cash-reset-btn" id="cashResetBtn">Reset</button>` : ""}
+        <button class="btn gold" id="cashRegisterBtn">시재 등록</button>
+      </div>`
     : "";
 
   return `
     <div class="category-title section-title-cash">💰 ${isToday ? "오늘의 시재" : `${formatDateLabel(cashDate)} 시재`}</div>
-    <div class="card cash-register-card section-cash" style="position:relative;">
-      ${isToday ? `<button type="button" class="cash-reset-btn" id="cashResetBtn">Reset</button>` : ""}
+    <div class="card cash-register-card section-cash">
       ${summary}
       ${form}
       ${cashHistoryHtml(cashEntries)}
@@ -390,7 +392,7 @@ async function loadCashDate(targetDate) {
     return;
   }
   try {
-    const snap = await getDocs(collection(db, "cashRegister", targetDate, "entries"));
+    const snap = await getDocs(collection(db, "stores", account.storeId, "cashRegister", targetDate, "entries"));
     cashEntries = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     const latest = latestEntry(cashEntries);
     cashChipTotals[targetDate] = latest ? latest.total : 0;
@@ -398,7 +400,7 @@ async function loadCashDate(targetDate) {
     cashEntries = [];
   }
   try {
-    const expSnap = await getDocs(collection(db, "cashRegister", targetDate, "expenses"));
+    const expSnap = await getDocs(collection(db, "stores", account.storeId, "cashRegister", targetDate, "expenses"));
     cashExpenses = expSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
   } catch (e) {
     cashExpenses = [];
@@ -409,7 +411,7 @@ async function loadCashDate(targetDate) {
 function loadAllCashChipTotals() {
   recentDates.forEach((d) => {
     if (d === date) return;
-    getDocs(collection(db, "cashRegister", d, "entries"))
+    getDocs(collection(db, "stores", account.storeId, "cashRegister", d, "entries"))
       .then((snap) => {
         const entries = snap.docs.map((doc) => doc.data());
         const latest = latestEntry(entries);
@@ -448,7 +450,7 @@ async function onExpenseReceiptsSelected(files) {
   try {
     for (const file of files) {
       const blob = await resizeImageFile(file);
-      const path = `notePhotos/${date}/expense_${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
+      const path = `stores/${account.storeId}/notePhotos/${date}/expense_${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
       const fileRef = ref(storage, path);
       await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
       expenseReceiptUrls.push(await getDownloadURL(fileRef));
@@ -472,7 +474,7 @@ async function submitExpense() {
     toast("금액을 입력해주세요");
     return;
   }
-  await addDoc(collection(db, "cashRegister", date, "expenses"), {
+  await addDoc(collection(db, "stores", account.storeId, "cashRegister", date, "expenses"), {
     description: desc,
     amount,
     receiptUrls: expenseReceiptUrls,
@@ -497,12 +499,12 @@ async function onExpenseRowReceiptsSelected(id, files) {
     const urls = existing ? expenseReceiptUrlsOf(existing) : [];
     for (const file of files) {
       const blob = await resizeImageFile(file);
-      const path = `notePhotos/${cashDate}/expense_${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
+      const path = `stores/${account.storeId}/notePhotos/${cashDate}/expense_${account.phone}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
       const fileRef = ref(storage, path);
       await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
       urls.push(await getDownloadURL(fileRef));
     }
-    await updateDoc(doc(db, "cashRegister", cashDate, "expenses", id), { receiptUrls: urls });
+    await updateDoc(doc(db, "stores", account.storeId, "cashRegister", cashDate, "expenses", id), { receiptUrls: urls });
     if (cashDate !== date) {
       // 과거 날짜는 live 리스너가 없어서 직접 반영해야 화면에 바로 보인다.
       const target = cashExpenses.find((e) => e.id === id);
@@ -520,7 +522,7 @@ async function onExpenseRowReceiptsSelected(id, files) {
 async function deleteExpense(id) {
   if (account.role !== "owner") return;
   if (!confirm("이 지출 기록을 삭제할까요?")) return;
-  await deleteDoc(doc(db, "cashRegister", cashDate, "expenses", id));
+  await deleteDoc(doc(db, "stores", account.storeId, "cashRegister", cashDate, "expenses", id));
   if (cashDate !== date) {
     cashExpenses = cashExpenses.filter((e) => e.id !== id);
     render();
@@ -633,7 +635,7 @@ function topupChipNames() {
 // 이름이든 실제 충전 이력이 있는 이름이든 전부 이 방식 하나로 처리된다.
 async function hideTopupCustomer(name) {
   if (!confirm(`${name}님을 손님 목록에서 삭제할까요?\n(지금까지의 충전 기록은 그대로 남아있어요)`)) return;
-  await setDoc(doc(db, "config", "topupCustomers"), { hiddenNames: arrayUnion(name) }, { merge: true });
+  await setDoc(doc(db, "stores", account.storeId, "config", "topupCustomers"), { hiddenNames: arrayUnion(name) }, { merge: true });
   if (topupSelectedName === name) topupSelectedName = null;
   toast(`${name}님을 목록에서 삭제했어요`);
 }
@@ -647,9 +649,9 @@ async function renameTopupCustomer(oldName) {
   if (!newName || newName === oldName) return;
   const matching = topups.filter((t) => (t.customerName || "").trim() === oldName);
   const batch = writeBatch(db);
-  matching.forEach((t) => batch.update(doc(db, "topups", t.id), { customerName: newName }));
+  matching.forEach((t) => batch.update(doc(db, "stores", account.storeId, "topups", t.id), { customerName: newName }));
   batch.set(
-    doc(db, "config", "topupCustomers"),
+    doc(db, "stores", account.storeId, "config", "topupCustomers"),
     { names: arrayUnion(newName), hiddenNames: arrayUnion(oldName) },
     { merge: true }
   );
@@ -718,7 +720,7 @@ async function addNewTopupCustomer() {
   // 기록 때문에 topupChipNames()가 계속 걸러내버려서 칩이 안 보이는 버그가
   // 있었다 — 추가할 때 hiddenNames에서도 같이 빼서, 다시 추가한 이름은
   // 확실히 보이게 한다.
-  await setDoc(doc(db, "config", "topupCustomers"), { names: arrayUnion(name), hiddenNames: arrayRemove(name) }, { merge: true });
+  await setDoc(doc(db, "stores", account.storeId, "config", "topupCustomers"), { names: arrayUnion(name), hiddenNames: arrayRemove(name) }, { merge: true });
   toast(`${name}님을 추가했어요`);
 }
 
@@ -771,7 +773,7 @@ function topupBoardHtml() {
 async function deleteTopupEntry(entryId) {
   if (account.role !== "owner") return;
   if (!confirm("이 충전 등록 기록을 삭제할까요?")) return;
-  await deleteDoc(doc(db, "topups", entryId));
+  await deleteDoc(doc(db, "stores", account.storeId, "topups", entryId));
   toast("삭제했어요");
 }
 
@@ -783,7 +785,7 @@ async function submitTopup() {
     toast("충전 금액을 입력해주세요");
     return;
   }
-  await addDoc(collection(db, "topups"), {
+  await addDoc(collection(db, "stores", account.storeId, "topups"), {
     customerName: name,
     amount,
     staffName: account.name,
@@ -942,7 +944,7 @@ function render() {
 function ensureStarted() {
   if (started) return;
   started = true;
-  onSnapshot(collection(db, "cashRegister", date, "entries"), (snap) => {
+  onSnapshot(collection(db, "stores", account.storeId, "cashRegister", date, "entries"), (snap) => {
     cashEntriesToday = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     const latestToday = latestEntry(cashEntriesToday);
     cashChipTotals[date] = latestToday ? latestToday.total : 0;
@@ -952,18 +954,18 @@ function ensureStarted() {
     notifyRegisterBadgeListeners();
     if (cashEntriesToday.length === 0) migrateLegacyCashDoc(date).then(() => { /* onSnapshot picks up the migrated entries automatically */ });
   });
-  onSnapshot(collection(db, "cashRegister", date, "expenses"), (snap) => {
+  onSnapshot(collection(db, "stores", account.storeId, "cashRegister", date, "expenses"), (snap) => {
     cashExpensesToday = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     if (cashDate === date) cashExpenses = cashExpensesToday;
     render();
     notifyRegisterBadgeListeners();
   });
-  onSnapshot(query(collection(db, "topups"), orderBy("createdAt", "desc")), (snap) => {
+  onSnapshot(query(collection(db, "stores", account.storeId, "topups"), orderBy("createdAt", "desc")), (snap) => {
     topups = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     render();
     notifyRegisterBadgeListeners();
   });
-  onSnapshot(doc(db, "config", "topupCustomers"), (snap) => {
+  onSnapshot(doc(db, "stores", account.storeId, "config", "topupCustomers"), (snap) => {
     const d = snap.exists() ? snap.data() : {};
     customTopupNames = d.names || [];
     topupHiddenNames = d.hiddenNames || [];

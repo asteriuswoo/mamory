@@ -2,17 +2,26 @@
 // keeps a single live map of phone -> {name, avatarUrl} so a photo change
 // shows up everywhere a name is rendered, and centralizes the upload flow so
 // there's exactly one place a user can set their own picture (the header).
-import { db, doc, updateDoc, collection, onSnapshot, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
+import { db, doc, updateDoc, collection, query, where, onSnapshot, storage, ref, uploadBytes, getDownloadURL } from "./firebase-init.js";
 import { toast, escapeHtml, resizeImageFile, showActionSheet, openImageLightbox } from "./util.js";
 
 let accountsMap = {};
 const listeners = [];
 let started = false;
+let myStoreId = null;
+
+// 로그인 직후(app-shell.js/staff.js) 계정이 확인되는 시점에 한 번 호출해서
+// storeId를 알려준다 — 이게 없으면 전체 매장 계정을 다 긁어오게 돼서
+// (다른 매장 정보 누출), 새 firestore.rules에서는 쿼리 자체가 막힌다.
+export function setAccountsStoreId(storeId) {
+  myStoreId = storeId;
+  ensureAccountsWatched();
+}
 
 function ensureAccountsWatched() {
-  if (started) return;
+  if (started || !myStoreId) return;
   started = true;
-  onSnapshot(collection(db, "accounts"), (snap) => {
+  onSnapshot(query(collection(db, "accounts"), where("storeId", "==", myStoreId)), (snap) => {
     const next = {};
     snap.docs.forEach((d) => { next[d.id] = d.data(); });
     accountsMap = next;
@@ -118,6 +127,13 @@ export async function resetAvatarToDefault(phone) {
   toast("기본 이미지로 변경했어요");
 }
 
+async function editMyName(phone, currentName) {
+  const next = (window.prompt("이름을 입력하세요", currentName) || "").trim();
+  if (!next || next === currentName) return;
+  await updateDoc(doc(db, "accounts", phone), { name: next });
+  toast("이름을 변경했어요");
+}
+
 // Renders "avatar + (이름님 / 역할 캡션)" inside `el` (the page header's
 // #accountName) and makes the avatar itself the click target for changing
 // the SIGNED-IN account's own photo. This is the one place a user sets
@@ -127,10 +143,18 @@ export async function resetAvatarToDefault(phone) {
 export function wireAccountHeaderAvatar(el, account, roleLabel) {
   el.classList.add("account-header-row");
   return watchAccounts(() => {
+    // accountsMap은 가입할 때 성까지 붙여 "김진우"처럼 풀네임으로 입력한
+    // 사람도 나중에 다른 사람들처럼 "진우"로 직접 고칠 수 있게, 실시간
+    // 캐시에서 이름을 읽는다 — account.name(마운트 시점에 캡처된 값)만
+    // 쓰면 방금 수정한 이름이 새로고침 전까지 안 보인다.
+    const liveName = (accountsMap[account.phone] && accountsMap[account.phone].name) || account.name;
     el.innerHTML = `
       ${avatarHtml(account.phone, account.name, 44)}
       <div>
-        <div class="account-header-name">${escapeHtml(account.name)}님</div>
+        <div class="account-header-name">
+          ${escapeHtml(liveName)}님
+          <button type="button" class="name-edit-btn" aria-label="이름 수정">✏️</button>
+        </div>
         ${roleLabel ? `<div class="account-header-role">${escapeHtml(roleLabel)}</div>` : ""}
       </div>
       <input type="file" accept="image/*" capture="environment" class="header-avatar-camera-input" style="display:none;" />
@@ -139,6 +163,10 @@ export function wireAccountHeaderAvatar(el, account, roleLabel) {
     const avatarEl = el.querySelector(".avatar-circle");
     const cameraInput = el.querySelector(".header-avatar-camera-input");
     const galleryInput = el.querySelector(".header-avatar-gallery-input");
+    el.querySelector(".name-edit-btn").addEventListener("click", (e) => {
+      e.stopPropagation();
+      editMyName(account.phone, liveName);
+    });
     avatarEl.classList.add("account-header-avatar");
     avatarEl.title = "탭해서 프로필 사진 변경";
     avatarEl.addEventListener("click", async () => {

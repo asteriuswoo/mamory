@@ -92,7 +92,7 @@ export function mountMusicBar(el, acc) {
   playing = false;
   hasStartedPlayback = false;
   loadYoutubeApi();
-  unsub = onSnapshot(doc(db, "songOfTheDay", todayStr()), (snap) => {
+  unsub = onSnapshot(doc(db, "stores", account.storeId, "songOfTheDay", todayStr()), (snap) => {
     todaySong = snap.exists() ? snap.data() : null;
     render();
     if (todaySong) loadYoutubeApi().then(ensurePlayer);
@@ -175,7 +175,7 @@ async function runSearch() {
 }
 
 async function pickSong(item) {
-  await setDoc(doc(db, "songOfTheDay", todayStr()), {
+  await setDoc(doc(db, "stores", account.storeId, "songOfTheDay", todayStr()), {
     videoId: item.videoId,
     title: item.title,
     channelTitle: item.channelTitle,

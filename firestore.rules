@@ -1,8 +1,90 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // 이 링크를 아는 사람만 접근할 수 있는 내부용 앱입니다.
-    // 익명(anonymous) 로그인된 사용자만 읽고 쓸 수 있도록 최소한의 보호를 겁니다.
+
+    // ---- 매장별 데이터 (stores/{storeId}/...) ----
+    // 로그인 토큰(custom token)에 실린 storeId와 경로의 storeId가 같아야만
+    // 접근 가능 — 이걸로 매장 간 데이터 격리가 실제로 강제된다. config
+    // 하위 문서(사장님 PIN/가입코드)는 이 재귀 규칙에서 제외하고 완전히
+    // 막아서(바로 아래), 이제 Cloud Function(Admin SDK)만 건드리게 한다.
+    // 주의: Firestore 규칙은 한 경로에 매치되는 모든 match 블록을 OR로
+    // 합친다 — "거부" 블록이 있어도 다른 블록이 허용하면 결국 허용된다.
+    // 그래서 config를 막으려면 이 재귀 규칙 자체에서 빼야 한다(그냥 별도
+    // 블록을 if false로 추가하는 걸로는 안 막힌다).
+    match /stores/{storeId} {
+      allow read, write: if request.auth != null && request.auth.token.storeId == storeId;
+    }
+    match /stores/{storeId}/{document=**} {
+      allow read, write: if request.auth != null
+        && request.auth.token.storeId == storeId
+        && document[0] != "config";
+    }
+    match /stores/{storeId}/config/{doc} {
+      allow read, write: if false; // Cloud Function(Admin SDK) 전용
+    }
+
+    // ---- 계정 (accounts/{phone}) ----
+    // 매장이 늘어도 전화번호가 고유 로그인 키라 전역 평면 구조를 유지한다.
+    // uid는 로그인 시 발급하는 custom token에서 전화번호 그대로 썼다
+    // (admin.auth().createCustomToken(phone, ...)).
+    match /accounts/{phone} {
+      allow read: if request.auth != null
+        && (request.auth.uid == phone
+            || (request.auth.token.role == "owner" && request.auth.token.storeId == resource.data.storeId));
+
+      // 본인 쓰기/같은 매장 사장님 쓰기 외에, fcmTokens 필드만 바꾸는
+      // 쓰기는 같은 매장이면 누구나 허용한다 — push.js의
+      // registerPushToken()이 기기 공유 시 "이전 사용자" 계정의 토큰을
+      // 지워주는 동작이 실제로 있어서(다른 사람 계정을 건드림) 이 예외가
+      // 꼭 필요하다(public/js/push.js의 lastPhone 처리 부분).
+      allow write: if request.auth != null
+        && (request.auth.uid == phone
+            || (request.auth.token.role == "owner" && request.auth.token.storeId == resource.data.storeId)
+            || (request.auth.token.storeId == resource.data.storeId
+                && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["fcmTokens"])));
+
+      match /shifts/{shiftId} {
+        allow read, write: if request.auth != null && request.auth.uid == phone;
+      }
+      match /attendance/{stampId} {
+        allow read, write: if request.auth != null && request.auth.uid == phone;
+      }
+      match /notifications/{notifId} {
+        allow read, write: if request.auth != null && request.auth.uid == phone;
+      }
+    }
+
+    // 사장님용 collectionGroup(db, "attendance") 쿼리(모든 직원의 오늘/이번달
+    // 도장을 한 번에 훑어보기)는 위의 accounts/{phone}/attendance 경로별
+    // 규칙이 아니라 이 재귀 와일드카드 규칙으로 별도 허용해야 동작한다 —
+    // Firestore 규칙은 collection group 쿼리를 경로 한정 규칙과 다르게
+    // 취급한다. attendance 문서마다 storeId 필드가 찍혀있어서(클락인 시
+    // 클라이언트가 직접 기록) 그걸로 매장을 가른다 — 쓰기는 위
+    // accounts/{phone}/attendance 규칙(본인만)으로 이미 충분하다.
+    match /{path=**}/attendance/{stampId} {
+      allow read: if request.auth != null && request.auth.token.storeId == resource.data.storeId;
+    }
+
+    // ---- 가입 코드 색인 — Cloud Function(registerAccount/rotateAccessCode)
+    // 전용. 클라이언트는 절대 직접 안 건드린다. ----
+    match /accessCodes/{code} {
+      allow read, write: if false;
+    }
+
+    // ---- 2단계(로그인 구조 전환)로 더 이상 클라이언트가 안 건드리는 옛
+    // 전역 설정 문서 — 사장님 PIN/가입코드는 이제 Cloud Function이
+    // stores/{storeId}/config로 옮겨서 관리한다. ----
+    match /config/{doc} {
+      allow read, write: if false;
+    }
+    match /meta/{doc} {
+      allow read, write: if false;
+    }
+
+    // ---- 아래는 마이그레이션 전 옛 평평한(flat) 경로들 — 새 코드는 이제
+    // 전부 stores/{storeId}/ 경로만 쓰지만, 혹시 배포를 롤백해야 할 경우를
+    // 대비해 1~2주 정도 규칙을 남겨둔다(실제 데이터도 아직 안 지웠음).
+    // 문제 없음이 확인되면 이 블록과 옛 데이터를 함께 정리한다.
     match /materials/{materialId} {
       allow read, write: if request.auth != null;
     }
@@ -56,31 +138,6 @@ service cloud.firestore {
       match /items/{itemId} {
         allow read, write: if request.auth != null;
       }
-    }
-    match /accounts/{phone} {
-      allow read, write: if request.auth != null;
-      match /shifts/{shiftId} {
-        allow read, write: if request.auth != null;
-      }
-      match /attendance/{stampId} {
-        allow read, write: if request.auth != null;
-      }
-      match /notifications/{notifId} {
-        allow read, write: if request.auth != null;
-      }
-    }
-    // 사장님용 collectionGroup(db, "attendance") 쿼리(모든 직원의 오늘 도장을
-    // 한 번에 훑어보기)는 위의 accounts/{phone}/attendance 경로별 규칙이
-    // 아니라 이 재귀 와일드카드 규칙으로 별도 허용해야 동작한다 — Firestore
-    // 규칙은 collection group 쿼리를 경로 한정 규칙과 다르게 취급한다.
-    match /{path=**}/attendance/{stampId} {
-      allow read: if request.auth != null;
-    }
-    match /config/{doc} {
-      allow read, write: if request.auth != null;
-    }
-    match /meta/{doc} {
-      allow read, write: if request.auth != null;
     }
   }
 }

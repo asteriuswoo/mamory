@@ -17,12 +17,12 @@ import { escapeHtml } from "./util.js";
 // 경우(소요시간은 짧은데 반복됨). 그래서 updatedAt(요청/마지막 수정
 // 시각)과 orderedAt(주문완료 시각) 간격도 같이 모아, 둘을 구분해서 말해줄
 // 수 있게 한다.
-export async function computeTrendData(recentDates) {
+export async function computeTrendData(recentDates, storeId) {
   const stats = new Map(); // name -> { count, days:Set, urgentCount, gapHours:number[] }
   await Promise.all(
     recentDates.map(async (d) => {
       try {
-        const snap = await getDocs(collection(db, "checks", d, "items"));
+        const snap = await getDocs(collection(db, "stores", storeId, "checks", d, "items"));
         snap.forEach((doc) => {
           const data = doc.data();
           const name = data.materialName;

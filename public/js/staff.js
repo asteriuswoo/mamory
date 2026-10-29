@@ -5,7 +5,7 @@ import { mountShareBoard, hasUnseenShareActivity, watchUnseenCount, setInitialSh
 import { mountRegisterBoard, watchRegisterUnseen, hasUnseenRegisterActivity, markRegisterNavBadgeSeen } from "./registerboard.js";
 import { mountPayrollBoard, mountClockWidget } from "./payroll.js";
 import { registerPushToken, watchForegroundPush, watchNotificationBadge, openNotificationPanel } from "./push.js";
-import { wireAccountHeaderAvatar } from "./avatar.js";
+import { wireAccountHeaderAvatar, setAccountsStoreId } from "./avatar.js";
 import { watchAppBadgeClear } from "./badge.js";
 import { mountMascotWidget, earnFood } from "./mascot.js";
 import { mountHumanityTrigger } from "./humanityboard.js";
@@ -61,6 +61,7 @@ let itemsCol;
 let staffName = "";
 let staffPhone = "";
 let staffRole = "staff";
+let staffStoreId = "";
 
 // nav state
 let view = "main"; // main | sub | items | cart | share
@@ -418,10 +419,10 @@ async function loadCartDate(targetDate) {
     return;
   }
   try {
-    const snap = await getDocs(collection(db, "checks", targetDate, "items"));
+    const snap = await getDocs(collection(db, "stores", staffStoreId, "checks", targetDate, "items"));
     cartItems = snap.docs.map((d) => ({ id: d.id, ...d.data(), submitted: true }));
     chipCounts[targetDate] = cartItems.length;
-    const checkDocSnap = await getDoc(doc(db, "checks", targetDate));
+    const checkDocSnap = await getDoc(doc(db, "stores", staffStoreId, "checks", targetDate));
     cartDateReceiptCount = (checkDocSnap.exists() && checkDocSnap.data().allReceiptPhotosHistory || []).length;
   } catch (e) {
     cartItems = [];
@@ -433,7 +434,7 @@ async function loadCartDate(targetDate) {
 function loadAllChipCounts() {
   recentDates.forEach((d) => {
     if (d === date) return; // live count already tracked from onSnapshot
-    getDocs(collection(db, "checks", d, "items"))
+    getDocs(collection(db, "stores", staffStoreId, "checks", d, "items"))
       .then((snap) => { chipCounts[d] = snap.size; if (view === "cart") render(); })
       .catch(() => {});
   });
@@ -450,7 +451,7 @@ async function openOwnerReceiptsOverlay() {
   ownerReceiptsLoading = true;
   render();
   try {
-    const snap = await getDoc(doc(db, "checks", cartDate));
+    const snap = await getDoc(doc(db, "stores", staffStoreId, "checks", cartDate));
     ownerDayReceiptPhotos = (snap.exists() && snap.data().allReceiptPhotosHistory) || [];
   } catch (e) {
     ownerDayReceiptPhotos = [];
@@ -475,7 +476,7 @@ async function nudgeOwnerAboutUnordered() {
     return;
   }
   try {
-    await addDoc(collection(db, "checks", date, "unorderedNudges"), {
+    await addDoc(collection(db, "stores", staffStoreId, "checks", date, "unorderedNudges"), {
       count: n,
       staffPhone,
       createdAt: serverTimestamp(),
@@ -511,7 +512,7 @@ function ownerReceiptsOverlayHtml() {
 // own catalog ID, so this is a direct id -> data map.
 async function loadYesterdayItems() {
   try {
-    const snap = await getDocs(collection(db, "checks", dateStrDaysAgo(1), "items"));
+    const snap = await getDocs(collection(db, "stores", staffStoreId, "checks", dateStrDaysAgo(1), "items"));
     yesterdayItems = {};
     snap.docs.forEach((d) => { yesterdayItems[d.id] = d.data(); });
   } catch (e) {
@@ -537,7 +538,7 @@ async function loadCarryoverItems() {
   carryoverLoaded = true;
   let changed = false;
   try {
-    const snap = await getDocs(collection(db, "checks", dateStrDaysAgo(1), "items"));
+    const snap = await getDocs(collection(db, "stores", staffStoreId, "checks", dateStrDaysAgo(1), "items"));
     snap.docs.forEach((docSnap) => {
       const data = docSnap.data();
       const id = docSnap.id;
@@ -994,8 +995,10 @@ function cartGroupedItemsHtml(items, isTodayCart, searchQuery) {
   function cartItemRowHtml(it, showSub) {
     // 제출된(공유된) 자재는 제출한 사람만 상태(보통/긴급/품절)를 바꿀 수
     // 있다 — canDelete와 같은 기준: staffPhone이 없는(자동 담김) 자재는
-    // 누구 것도 아니라서 누구나 바꿀 수 있게 둔다.
-    const canChangeStatus = isTodayCart && !it.ordered && (!it.staffPhone || it.staffPhone === staffPhone);
+    // 누구 것도 아니라서 누구나 바꿀 수 있게 둔다. 이월된 자재(carriedOverFrom)는
+    // staffPhone이 어제 요청자로 그대로 남아있지만(위 주석 참고), 오늘 담당자가
+    // 다르더라도 미제출 상태인 동안은 상태를 바꿀 수 있어야 한다.
+    const canChangeStatus = isTodayCart && !it.ordered && (!it.staffPhone || it.staffPhone === staffPhone || it.carriedOverFrom);
     const pickerOpen = statusPickerFor.has(it.id);
     const otherUrgencies = URGENCY_ORDER.filter((u) => u !== it.urgency);
     // 아직 제출 전(로컬 pending)인 자재는 남은 수량을 담은 뒤에도 "수정"
@@ -1136,7 +1139,7 @@ function cartGroupedItemsHtml(items, isTodayCart, searchQuery) {
 async function changeCartItemUrgency(id, newUrgency) {
   const it = cartItems.find((x) => x.id === id);
   if (!it || it.ordered) return;
-  if (it.staffPhone && it.staffPhone !== staffPhone) return;
+  if (it.staffPhone && it.staffPhone !== staffPhone && !it.carriedOverFrom) return;
   if (it.submitted) {
     await updateDoc(doc(itemsCol, id), { urgency: newUrgency });
   } else if (pending[id]) {
@@ -1154,7 +1157,7 @@ function renderShare() {
       <span class="step-label">공유하기</span>
     </div>
     <div id="shareBoardRoot"></div>`;
-  mountShareBoard(document.getElementById("shareBoardRoot"), { name: staffName, phone: staffPhone });
+  mountShareBoard(document.getElementById("shareBoardRoot"), { name: staffName, phone: staffPhone, storeId: staffStoreId });
 }
 
 function renderRegister() {
@@ -1163,7 +1166,7 @@ function renderRegister() {
       <span class="step-label">등록해요</span>
     </div>
     <div id="registerBoardRoot"></div>`;
-  mountRegisterBoard(document.getElementById("registerBoardRoot"), { name: staffName, phone: staffPhone, role: staffRole });
+  mountRegisterBoard(document.getElementById("registerBoardRoot"), { name: staffName, phone: staffPhone, role: staffRole, storeId: staffStoreId });
 }
 
 function renderPayroll() {
@@ -1172,7 +1175,7 @@ function renderPayroll() {
       <span class="step-label">${staffRole === "owner" ? "직원 급여 제출함" : "출근기록"}</span>
     </div>
     <div id="payrollBoardRoot"></div>`;
-  mountPayrollBoard(document.getElementById("payrollBoardRoot"), { name: staffName, phone: staffPhone, role: staffRole });
+  mountPayrollBoard(document.getElementById("payrollBoardRoot"), { name: staffName, phone: staffPhone, role: staffRole, storeId: staffStoreId });
 }
 
 function wireCartNav() {
@@ -1262,7 +1265,7 @@ async function saveCartQtyEdit(id, isAuto, value) {
   if (isAuto) {
     if (!autoPending[id]) return;
     autoPending[id] = { ...autoPending[id], qty: value };
-    await updateDoc(doc(db, "checks", date, "autoPending", id), { qty: value || "" }).catch(() => {});
+    await updateDoc(doc(db, "stores", staffStoreId, "checks", date, "autoPending", id), { qty: value || "" }).catch(() => {});
   } else {
     if (!pending[id]) return;
     pending[id] = { ...pending[id], qty: value };
@@ -1286,7 +1289,7 @@ async function onCartOrderQtyDelta(id, isAuto, delta) {
     autoPending[id] = { ...a, orderQty: next };
     cartItems = buildTodayCartItems();
     render();
-    await updateDoc(doc(db, "checks", date, "autoPending", id), { orderQty: next });
+    await updateDoc(doc(db, "stores", staffStoreId, "checks", date, "autoPending", id), { orderQty: next });
     return;
   }
   const p = pending[id];
@@ -1317,7 +1320,7 @@ async function cancelPendingCartItem(id) {
   const a = autoPending[id];
   if (!a) return;
   if (!confirm(`'${a.materialName}'을(를) 장바구니에서 뺄까요?`)) return;
-  await deleteDoc(doc(db, "checks", date, "autoPending", id));
+  await deleteDoc(doc(db, "stores", staffStoreId, "checks", date, "autoPending", id));
 }
 
 function canDelete(m) {
@@ -1391,7 +1394,7 @@ async function onPhotosSelected(id, files) {
     const urls = [];
     for (const file of files) {
       const blob = await resizeImageFile(file);
-      const path = `notePhotos/${date}/${staffPhone}_${id}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
+      const path = `stores/${staffStoreId}/notePhotos/${date}/${staffPhone}_${id}_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
       const fileRef = ref(storage, path);
       await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
       urls.push(await getDownloadURL(fileRef));
@@ -1621,7 +1624,7 @@ async function submitCategory(main) {
       staffPhone,
       updatedAt: serverTimestamp(),
     }, { merge: true });
-    await deleteDoc(doc(db, "checks", date, "autoPending", id));
+    await deleteDoc(doc(db, "stores", staffStoreId, "checks", date, "autoPending", id));
     addedCount++;
   }));
   for (const [id] of entries) delete pending[id];
@@ -1630,7 +1633,7 @@ async function submitCategory(main) {
   // 개별 자재 문서와는 별도로 "제출 이벤트" 문서 하나를 추가로 남긴다 —
   // functions/index.js의 notifyOwnerOnNewRequest가 이 문서 생성을 구독한다.
   if (addedCount > 0) {
-    await addDoc(collection(db, "checks", date, "requestBatches"), {
+    await addDoc(collection(db, "stores", staffStoreId, "checks", date, "requestBatches"), {
       staffName,
       staffPhone,
       mainCategory: main,
@@ -1654,6 +1657,8 @@ async function main() {
   staffName = account.name;
   staffPhone = account.phone;
   staffRole = account.role;
+  staffStoreId = account.storeId;
+  setAccountsStoreId(account.storeId);
   // Owner accounts can land here too (self-ordering on a solo shift) — auth.js
   // lets that through as a special case, so surface a way back and label the
   // account caption accurately instead of always saying "직원 계정".
@@ -1682,21 +1687,21 @@ async function main() {
 
   watchForegroundPush();
   watchAppBadgeClear();
-  mountMascotWidget(staffPhone);
-  mountMusicBar(document.getElementById("musicBarRoot"), { name: staffName, phone: staffPhone });
-  if (!isOwnerVisiting) mountClockWidget(document.getElementById("clockWidgetRoot"), { name: staffName, phone: staffPhone });
+  mountMascotWidget(staffPhone, staffStoreId);
+  mountMusicBar(document.getElementById("musicBarRoot"), { name: staffName, phone: staffPhone, storeId: staffStoreId });
+  if (!isOwnerVisiting) mountClockWidget(document.getElementById("clockWidgetRoot"), { name: staffName, phone: staffPhone, storeId: staffStoreId });
   if ("Notification" in window && Notification.permission === "granted") registerPushToken(staffPhone);
 
   loadPending();
   loadDismissedCarryovers();
-  itemsCol = collection(db, "checks", date, "items");
+  itemsCol = collection(db, "stores", staffStoreId, "checks", date, "items");
 
-  onSnapshot(collection(db, "materials"), (snap) => {
+  onSnapshot(collection(db, "stores", staffStoreId, "materials"), (snap) => {
     materials = sortMaterials(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     render();
   });
 
-  onSnapshot(doc(db, "config", "subcategoryOrder"), (snap) => {
+  onSnapshot(doc(db, "stores", staffStoreId, "config", "subcategoryOrder"), (snap) => {
     subcategoryOrder = snap.exists() ? snap.data() : {};
     render();
   });
@@ -1723,7 +1728,7 @@ async function main() {
     render();
   });
 
-  onSnapshot(collection(db, "checks", date, "autoPending"), (snap) => {
+  onSnapshot(collection(db, "stores", staffStoreId, "checks", date, "autoPending"), (snap) => {
     autoPending = {};
     snap.docs.forEach((d) => { autoPending[d.id] = d.data(); });
     if (view === "cart" && cartDate === date) {
@@ -1732,7 +1737,7 @@ async function main() {
     render();
   });
 
-  onSnapshot(doc(db, "checks", date), (snap) => {
+  onSnapshot(doc(db, "stores", staffStoreId, "checks", date), (snap) => {
     todayOwnerReceiptCount = (snap.exists() && snap.data().allReceiptPhotosHistory || []).length;
     render();
   });
@@ -1740,7 +1745,7 @@ async function main() {
   // Start the share-board listener right away so the bottom tab's
   // unseen-count badge is live even before the user opens 공유하기.
   const shareNavBadge = document.getElementById("shareNavBadge");
-  watchUnseenCount({ name: staffName, phone: staffPhone }, () => {
+  watchUnseenCount({ name: staffName, phone: staffPhone, storeId: staffStoreId }, () => {
     if (hasUnseenShareActivity(staffPhone)) { shareNavBadge.textContent = "N"; shareNavBadge.style.display = "flex"; }
     else shareNavBadge.style.display = "none";
   });
@@ -1748,7 +1753,7 @@ async function main() {
   // 등록해요(시재/선결제) 탭도 같은 방식으로 — 열어보지 않아도 변화가
   // 있으면 바로 N배지가 뜬다.
   const registerNavBadge = document.getElementById("registerNavBadge");
-  watchRegisterUnseen({ name: staffName, phone: staffPhone }, () => {
+  watchRegisterUnseen({ name: staffName, phone: staffPhone, storeId: staffStoreId }, () => {
     if (hasUnseenRegisterActivity()) { registerNavBadge.textContent = "N"; registerNavBadge.style.display = "flex"; }
     else registerNavBadge.style.display = "none";
   });

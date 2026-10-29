@@ -12,13 +12,19 @@
 <link rel="icon" href="icons/icon-192.png?v=4" />
 <title>MAMORY</title>
 <style>html,body{background:#1f1f1f}</style>
-<link rel="stylesheet" href="css/style.css?v=158" />
+<link rel="stylesheet" href="css/style.css?v=167" />
 <style>
   /* Login screen never needs to scroll — pinning html/body removes the
      scrollable viewport entirely, which stops iOS's native elastic bounce
      from revealing the white native canvas above the page content. */
-  html{position:fixed; inset:0; height:100%; overflow:hidden;}
-  body{position:fixed; inset:0; width:100%; height:100%; overflow:hidden; overscroll-behavior:none; padding-bottom:0; -webkit-overflow-scrolling:auto;}
+  /* background는 명시적으로 다시 지정 — 안 그러면 공용 style.css의
+     "html, body { background: var(--cream); }" 규칙(모든 페이지 공통)이
+     이 문서 순서상 나중에 로드돼서 이겨버린다. 특히 다크모드에서
+     --cream이 #18181b라 이 화면의 #1f1f1f와 미묘하게 달라서, 콘텐츠가
+     꽉 안 채우는 상단 세이프에어리어/하단 여백에 그 색 차이가 그대로
+     드러났다(회색 그라데이션처럼 보이는 상단 띠 + 하단 여백 버그). */
+  html{position:fixed; inset:0; height:100%; overflow:hidden; background:#1f1f1f;}
+  body{position:fixed; inset:0; width:100%; height:100%; overflow:hidden; overscroll-behavior:none; padding-bottom:0; -webkit-overflow-scrolling:auto; background:#1f1f1f;}
 </style>
 </head>
 <body>

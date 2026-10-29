@@ -5,7 +5,7 @@ import { mountPayrollBoard } from "./payroll.js";
 
 export function mount(account) {
   document.getElementById("pageSub").textContent = "직원 출퇴근 · 급여 제출함";
-  mountPayrollBoard(document.getElementById("payrollBoardRoot"), { name: account.name, phone: account.phone, role: account.role });
+  mountPayrollBoard(document.getElementById("payrollBoardRoot"), { name: account.name, phone: account.phone, role: account.role, storeId: account.storeId });
 }
 
 export function unmount() {}

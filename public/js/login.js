@@ -311,3 +311,51 @@ ownerLoginPin.addEventListener("keydown", (e) => { if (e.key === "Enter") ownerL
 staffLoginPin.addEventListener("keydown", (e) => { if (e.key === "Enter" && staffLoginPinConfirm.style.display === "none") staffLoginConfirm.click(); });
 staffLoginPinConfirm.addEventListener("keydown", (e) => { if (e.key === "Enter") staffLoginConfirm.click(); });
 phoneInput.addEventListener("keydown", (e) => { if (e.key === "Enter") phoneNext.click(); });
+
+// 로그인 화면은 html/body를 고정해서(스크롤 자체가 없음 — iOS 바운스
+// 방지, index.html의 <head> 참고) 다른 화면들처럼 register-sw.js의
+// scrollIntoView() 포커스 핸들러가 먹히지 않는다 — 스크롤할 대상 자체가
+// 없기 때문. 그래서 키보드가 처음 올라올 때 입력창을 가려도 아무것도
+// 못 움직이다가, 키보드가 이미 떠있는 상태로 다시 탭하면(브라우저의
+// 네이티브 보정이 뒤늦게 걸리는 걸로 추정) 그제서야 보이는 현상이
+// 생겼다. visualViewport로 키보드가 실제로 줄인 높이를 직접 재서,
+// 포커스된 입력창이 그 안에 들어오도록 .role-hero를 위로 밀어 올린다.
+(function setupLoginKeyboardAvoidance() {
+  if (!window.visualViewport) return;
+  const roleHero = document.querySelector(".role-hero");
+  if (!roleHero) return;
+  const vv = window.visualViewport;
+  let focusedEl = null;
+
+  function reposition() {
+    if (!focusedEl) return;
+    // 매번 원래(안 밀린) 위치 기준으로 다시 계산한다 — 이전에 적용한
+    // translateY 값 위에 또 더하면(누적) resize 이벤트가 여러 번 걸릴 때
+    // (키보드 애니메이션 도중 계속 발생) 매번 더 밀려서 과하게 올라간다.
+    roleHero.style.transform = "";
+    const rect = focusedEl.getBoundingClientRect();
+    const visibleBottom = vv.height + vv.offsetTop;
+    const overlap = rect.bottom - visibleBottom;
+    roleHero.style.transform = overlap > 0 ? `translateY(-${overlap + 16}px)` : "";
+  }
+
+  document.addEventListener("focusin", (e) => {
+    if (!e.target.matches || !e.target.matches("input, textarea")) return;
+    focusedEl = e.target;
+    roleHero.style.transition = "transform .2s ease";
+    // 키보드 애니메이션이 끝나기 전에 재면 visualViewport.height가 아직
+    // 줄어들기 전 값이라 잘못 계산된다 — resize 이벤트가 그 변화를
+    // 실시간으로 계속 알려주므로 그쪽이 메인이고, 이건 이미 키보드가
+    // 떠있는 상태에서 다른 입력창으로 옮겨가는 경우를 위한 즉시 보정.
+    requestAnimationFrame(reposition);
+  });
+
+  document.addEventListener("focusout", (e) => {
+    if (focusedEl !== e.target) return;
+    focusedEl = null;
+    roleHero.style.transform = "";
+  });
+
+  vv.addEventListener("resize", reposition);
+  vv.addEventListener("scroll", reposition);
+})();

@@ -64,7 +64,7 @@ export function mountHumanityTrigger(triggerBtn, overlayRootEl, acc) {
 
 function ensureStarted() {
   if (unsub) return;
-  unsub = onSnapshot(query(collection(db, "humanityCracks"), orderBy("createdAt", "desc")), (snap) => {
+  unsub = onSnapshot(query(collection(db, "stores", account.storeId, "humanityCracks"), orderBy("createdAt", "desc")), (snap) => {
     list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     renderBadge();
     if (showOverlay) renderOverlay();
@@ -81,7 +81,7 @@ function isNewToMe(it) {
 function markAllSeen() {
   list.forEach((it) => {
     if (isNewToMe(it)) {
-      updateDoc(doc(db, "humanityCracks", it.id), { seenBy: arrayUnion(account.phone) }).catch(() => {});
+      updateDoc(doc(db, "stores", account.storeId, "humanityCracks", it.id), { seenBy: arrayUnion(account.phone) }).catch(() => {});
     }
   });
 }
@@ -119,7 +119,7 @@ async function submit() {
     toast("무슨 일이 있었는지 적어주세요");
     return;
   }
-  await addDoc(collection(db, "humanityCracks"), {
+  await addDoc(collection(db, "stores", account.storeId, "humanityCracks"), {
     reason: text,
     staffName: account.name,
     staffPhone: account.phone,
@@ -135,7 +135,7 @@ async function removeEntry(id) {
   const it = list.find((x) => x.id === id);
   if (!it || it.staffPhone !== account.phone) return;
   if (!confirm("삭제할까요?")) return;
-  await deleteDoc(doc(db, "humanityCracks", id));
+  await deleteDoc(doc(db, "stores", account.storeId, "humanityCracks", id));
 }
 
 // 슬퍼요 하나뿐이라 토글(눌렀으면 취소, 안 눌렀으면 추가)로만 동작한다 —
@@ -146,7 +146,7 @@ async function toggleSad(id) {
   if (!it) return;
   const sadBy = it.sadBy || [];
   const mine = sadBy.includes(account.phone);
-  await updateDoc(doc(db, "humanityCracks", id), {
+  await updateDoc(doc(db, "stores", account.storeId, "humanityCracks", id), {
     sadBy: mine ? arrayRemove(account.phone) : arrayUnion(account.phone),
   });
 }
@@ -159,7 +159,7 @@ async function addReply(id, content) {
   }
   const { mentions, mentionsAll } = extractMentions(text);
   const reply = { content: text, mentions, mentionsAll, staffName: account.name, staffPhone: account.phone, createdAt: Date.now() };
-  await updateDoc(doc(db, "humanityCracks", id), { replies: arrayUnion(reply) });
+  await updateDoc(doc(db, "stores", account.storeId, "humanityCracks", id), { replies: arrayUnion(reply) });
   replyDrafts.delete(id);
   replyMentionState.delete(id);
   renderOverlay();
@@ -174,7 +174,7 @@ async function deleteReplyAt(id, idx) {
     return;
   }
   if (!confirm("댓글을 삭제할까요?")) return;
-  await updateDoc(doc(db, "humanityCracks", id), { replies: arrayRemove(reply) });
+  await updateDoc(doc(db, "stores", account.storeId, "humanityCracks", id), { replies: arrayRemove(reply) });
 }
 
 function repliesHtml(it) {

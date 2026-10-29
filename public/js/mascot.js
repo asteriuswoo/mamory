@@ -142,6 +142,7 @@ function deriveState(mascotData, accountData) {
 }
 
 let myPhone = "";
+let myStoreId = "";
 let mascotData = null; // meta/mascot — 공유 레벨/경험치
 let accountData = null; // accounts/{myPhone} — 내 계정에 쌓인 먹이
 let unsubMascot = null;
@@ -254,7 +255,7 @@ async function feedMascot() {
   if (feeding) return;
   feeding = true;
   try {
-    const mascotRef = doc(db, "meta", "mascot");
+    const mascotRef = doc(db, "stores", myStoreId, "meta", "mascot");
     const accountRef = doc(db, "accounts", myPhone);
     const result = await runTransaction(db, async (tx) => {
       // 읽기는 전부 쓰기보다 먼저 — Firestore 트랜잭션 규칙상 get()들을
@@ -367,8 +368,8 @@ function showFeedPopup(text, imgSrc) {
 
 // Called by owner.js every time a 주문완료 체크 + 공유 submit goes through
 // (full or partial) so the sad-mascot check has something to measure against.
-export function recordSubmitToday() {
-  setDoc(doc(db, "meta", "mascot"), { lastSubmitDate: todayStr() }, { merge: true }).catch(() => {});
+export function recordSubmitToday(storeId) {
+  setDoc(doc(db, "stores", storeId, "meta", "mascot"), { lastSubmitDate: todayStr() }, { merge: true }).catch(() => {});
 }
 
 // Called by staff.js right after a 발주 요청하기 submit goes through — 요청을
@@ -400,8 +401,9 @@ export async function earnFood(kind) {
   }
 }
 
-export function mountMascotWidget(phone) {
+export function mountMascotWidget(phone, storeId) {
   if (phone) myPhone = phone;
+  if (storeId) myStoreId = storeId;
   if (document.getElementById("mascotFab")) return; // already mounted on this page
   const host = document.createElement("div");
   host.innerHTML = WIDGET_HTML;
@@ -420,7 +422,7 @@ export function mountMascotWidget(phone) {
   document.getElementById("mascotFeedBtn").addEventListener("click", feedMascot);
 
   if (unsubMascot) unsubMascot();
-  unsubMascot = onSnapshot(doc(db, "meta", "mascot"), (snap) => {
+  unsubMascot = onSnapshot(doc(db, "stores", myStoreId, "meta", "mascot"), (snap) => {
     mascotData = snap.exists() ? snap.data() : null;
     recomputeAndRender();
   });

@@ -452,7 +452,7 @@ async function submitPayrollRequest() {
   }
   const { gross, deduction, net } = payslipTotals(cycleShifts);
   if (!confirm(`${cycleLabel} 급여(실수령액 ${Math.round(net).toLocaleString()}원)를 사장님께 제출할까요?`)) return;
-  await addDoc(collection(db, "payrollRequests"), {
+  await addDoc(collection(db, "stores", account.storeId, "payrollRequests"), {
     staffName: account.name,
     staffPhone: account.phone,
     cycleLabel,
@@ -1124,7 +1124,7 @@ function ensureStarted() {
     shifts = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     render();
   });
-  onSnapshot(query(collection(db, "payrollRequests"), where("staffPhone", "==", account.phone)), (snap) => {
+  onSnapshot(query(collection(db, "stores", account.storeId, "payrollRequests"), where("staffPhone", "==", account.phone)), (snap) => {
     myPayrollRequests = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     render();
   });
@@ -1150,7 +1150,7 @@ function loadAdminAttendanceForMonth() {
   const monthStart = ymd(new Date(adminAttCalYear, adminAttCalMonth, 1));
   const monthEnd = ymd(new Date(adminAttCalYear, adminAttCalMonth + 1, 0));
   adminAttUnsub = onSnapshot(
-    query(collectionGroup(db, "attendance"), where("date", ">=", monthStart), where("date", "<=", monthEnd), orderBy("date")),
+    query(collectionGroup(db, "attendance"), where("date", ">=", monthStart), where("date", "<=", monthEnd), where("storeId", "==", account.storeId), orderBy("date")),
     (snap) => {
       adminAttendanceAll = snap.docs.map((d) => ({ id: d.id, staffPhone: d.ref.parent.parent.id, ...d.data() }));
       renderAdmin();
@@ -1300,7 +1300,7 @@ function groupRequestsByStaff(list) {
 
 async function deletePayrollRequest(id) {
   if (!confirm("이 급여 제출 기록을 삭제할까요? (처리 완료했을 때 지우면 돼요)")) return;
-  await deleteDoc(doc(db, "payrollRequests", id));
+  await deleteDoc(doc(db, "stores", account.storeId, "payrollRequests", id));
   toast("삭제했어요");
 }
 
@@ -1512,14 +1512,14 @@ function downloadPayrollImage(req) {
 function ensureAdminStarted() {
   if (adminStarted) return;
   adminStarted = true;
-  onSnapshot(query(collection(db, "payrollRequests"), orderBy("createdAt", "desc")), (snap) => {
+  onSnapshot(query(collection(db, "stores", account.storeId, "payrollRequests"), orderBy("createdAt", "desc")), (snap) => {
     adminRequests = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     renderAdmin();
   });
   // collectionGroup — 모든 직원의 accounts/{phone}/attendance 서브컬렉션을
   // 한 번에 훑어서 오늘 날짜인 도장만 모아온다.
   const todayStr = ymd(new Date());
-  onSnapshot(query(collectionGroup(db, "attendance"), where("date", "==", todayStr)), (snap) => {
+  onSnapshot(query(collectionGroup(db, "attendance"), where("date", "==", todayStr), where("storeId", "==", account.storeId)), (snap) => {
     adminTodayAttendance = snap.docs.map((d) => ({ id: d.id, staffPhone: d.ref.parent.parent.id, ...d.data() }));
     renderAdmin();
   });
@@ -1817,6 +1817,7 @@ async function recordAttendanceStamp(type) {
       date: stampDate,
       time,
       staffName: clockAccount.name,
+      storeId: clockAccount.storeId,
       createdAt: serverTimestamp(),
     });
     await updateDoc(doc(db, "accounts", clockAccount.phone), { lastClockType: type });
@@ -1864,7 +1865,7 @@ function ensureClockStarted() {
     renderClockWidget();
   });
   onSnapshot(
-    query(collection(db, "schedules"), where("date", "==", ymd(new Date())), where("staffPhone", "==", clockAccount.phone)),
+    query(collection(db, "stores", clockAccount.storeId, "schedules"), where("date", "==", ymd(new Date())), where("staffPhone", "==", clockAccount.phone)),
     (snap) => {
       clockScheduleToday = snap.docs.map((d) => d.data());
       renderClockWidget();
@@ -2034,7 +2035,7 @@ function loadScheduleForMonth() {
   const monthStart = ymd(new Date(scheduleCalYear, scheduleCalMonth, 1));
   const monthEnd = ymd(new Date(scheduleCalYear, scheduleCalMonth + 1, 0));
   scheduleUnsub = onSnapshot(
-    query(collection(db, "schedules"), where("date", ">=", monthStart), where("date", "<=", monthEnd), orderBy("date")),
+    query(collection(db, "stores", account.storeId, "schedules"), where("date", ">=", monthStart), where("date", "<=", monthEnd), orderBy("date")),
     (snap) => {
       scheduleEntries = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       rerenderCurrent();
@@ -2044,7 +2045,7 @@ function loadScheduleForMonth() {
 
 async function loadStaffAccountsList() {
   if (staffAccountsList.length > 0) return;
-  const snap = await getDocs(collection(db, "accounts"));
+  const snap = await getDocs(query(collection(db, "accounts"), where("storeId", "==", account.storeId)));
   staffAccountsList = snap.docs.map((d) => ({ phone: d.id, name: d.data().name || "" }));
   rerenderCurrent();
 }
@@ -2115,7 +2116,7 @@ async function submitScheduleEntry() {
     return;
   }
   if (editingScheduleId) {
-    await updateDoc(doc(db, "schedules", editingScheduleId), {
+    await updateDoc(doc(db, "stores", account.storeId, "schedules", editingScheduleId), {
       shiftType: scheduleFormShiftType,
       staffPhone: scheduleFormStaffPhone,
       staffName: scheduleFormStaffName,
@@ -2124,7 +2125,7 @@ async function submitScheduleEntry() {
     });
     toast("근무를 수정했어요");
   } else {
-    await addDoc(collection(db, "schedules"), {
+    await addDoc(collection(db, "stores", account.storeId, "schedules"), {
       date: scheduleSelectedDate,
       shiftType: scheduleFormShiftType,
       staffPhone: scheduleFormStaffPhone,
@@ -2155,7 +2156,7 @@ async function deleteScheduleEntry(id) {
     return;
   }
   if (!confirm("이 근무 일정을 삭제할까요?")) return;
-  await deleteDoc(doc(db, "schedules", id));
+  await deleteDoc(doc(db, "stores", account.storeId, "schedules", id));
   toast("삭제했어요");
 }
 
@@ -2316,7 +2317,7 @@ async function submitRecurringSchedule() {
 
   await Promise.all(
     dates.map((d) =>
-      addDoc(collection(db, "schedules"), {
+      addDoc(collection(db, "stores", account.storeId, "schedules"), {
         date: d,
         shiftType: recurringShiftType,
         staffPhone: recurringStaffPhone,

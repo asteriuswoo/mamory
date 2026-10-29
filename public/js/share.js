@@ -12,7 +12,7 @@ export function mount(account) {
   const linkedParams = new URLSearchParams(location.search);
   setInitialShareTab(linkedParams.get("stab"));
   setInitialShareDate(linkedParams.get("sdate"));
-  mountShareBoard(document.getElementById("shareBoardRoot"), { name: account.name, phone: account.phone });
+  mountShareBoard(document.getElementById("shareBoardRoot"), { name: account.name, phone: account.phone, storeId: account.storeId });
 }
 
 export function unmount() {}
