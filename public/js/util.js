@@ -268,7 +268,7 @@ export function openImageLightbox(srcOrGroup, altOrIndex) {
     <div class="img-lightbox-track">
       ${group.map((g) => `<div class="img-lightbox-slide">${
         g.type === "video"
-          ? `<video src="${g.src}" class="img-lightbox-img" controls playsinline></video>`
+          ? `<video src="${g.src}" class="img-lightbox-img" controls playsinline onloadedmetadata="this.currentTime=0.1"></video>`
           : `<img src="${g.src}" alt="${escapeHtml(g.alt || "")}" class="img-lightbox-img" />`
       }</div>`).join("")}
     </div>

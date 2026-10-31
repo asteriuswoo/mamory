@@ -2087,8 +2087,11 @@ function openScheduleForm(entry) {
   } else {
     editingScheduleId = null;
     scheduleFormShiftType = "오픈";
-    scheduleFormStaffPhone = "";
-    scheduleFormStaffName = "";
+    // 직원 계정은 담당자를 고를 필요 없이 본인으로 바로 고정 — 다른
+    // 직원 이름으로 등록해버리는 실수를 원천 차단한다. 사장님만 전체
+    // 직원 중에서 고를 수 있다.
+    scheduleFormStaffPhone = account.role === "owner" ? "" : account.phone;
+    scheduleFormStaffName = account.role === "owner" ? "" : account.name;
     scheduleFormStartHour = "";
     scheduleFormStartMin = "";
     scheduleFormEndHour = "";
@@ -2219,10 +2222,14 @@ function scheduleFormHtml() {
     </div>
     <div class="field">
       <label>담당자</label>
+      ${account.role === "owner" ? `
       <select id="scheduleStaffSelect">
         <option value="">선택하세요</option>
         ${staffAccountsList.map((a) => `<option value="${a.phone}" ${scheduleFormStaffPhone === a.phone ? "selected" : ""}>${escapeHtml(a.name)}</option>`).join("")}
-      </select>
+      </select>` : `
+      <select disabled>
+        <option selected>${escapeHtml(account.name)} (본인)</option>
+      </select>`}
     </div>
     <div class="field" style="margin-bottom:0;">
       <label>근무 시간</label>
@@ -2272,8 +2279,8 @@ function scheduleDayOverlayHtml() {
 function openRecurringForm() {
   recurringWeekdays = new Set();
   recurringShiftType = "오픈";
-  recurringStaffPhone = "";
-  recurringStaffName = "";
+  recurringStaffPhone = account.role === "owner" ? "" : account.phone;
+  recurringStaffName = account.role === "owner" ? "" : account.name;
   recurringStartHour = "";
   recurringStartMin = "";
   recurringEndHour = "";
@@ -2355,10 +2362,14 @@ function recurringFormOverlayHtml() {
         </div>
         <div class="field">
           <label>담당자</label>
+          ${account.role === "owner" ? `
           <select id="recurringStaffSelect">
             <option value="">선택하세요</option>
             ${staffAccountsList.map((a) => `<option value="${a.phone}" ${recurringStaffPhone === a.phone ? "selected" : ""}>${escapeHtml(a.name)}</option>`).join("")}
-          </select>
+          </select>` : `
+          <select disabled>
+            <option selected>${escapeHtml(account.name)} (본인)</option>
+          </select>`}
         </div>
         <div class="field" style="margin-bottom:0;">
           <label>근무 시간</label>

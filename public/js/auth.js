@@ -8,12 +8,18 @@ export async function fetchAccount(phone) {
   return snap.exists() ? snap.data() : null;
 }
 
+// storeId를 "mmth"로 고정 — 1단계 마이그레이션 이후 가입한 계정에
+// storeId가 안 찍히던 버그(2026-10-30, 강화영님 계정에서 발견)의 임시
+// 패치. 2단계(로그인 구조 전환, Task #63)에서 이 함수 자체가 Cloud
+// Function 호출로 교체되면서 가입코드로 실제 storeId를 조회하는 방식으로
+// 바뀔 예정 — 그 전까지, 매장이 하나뿐인 지금은 이렇게 고정값으로
+// 막아둔다. 두 번째 매장이 생기기 전에 반드시 Task #63로 교체할 것.
 export async function registerAccount({ phone, name, role, pin }) {
   await readyAuth;
-  const account = { phone, name, role, createdAt: serverTimestamp() };
+  const account = { phone, name, role, storeId: "mmth", createdAt: serverTimestamp() };
   if (pin) account.pin = pin;
   await setDoc(doc(db, "accounts", phone), account);
-  return { phone, name, role, ...(pin ? { pin } : {}) };
+  return { phone, name, role, storeId: "mmth", ...(pin ? { pin } : {}) };
 }
 
 // 직원 계정 전용 개인 PIN — 사장님 PIN(config/ownerPin, 전체 공유)과 달리

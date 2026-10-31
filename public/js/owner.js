@@ -904,18 +904,10 @@ function onNotifyBtnClick() {
   openNotificationPanel(myOwnerPhone);
 }
 
-function isLastDayOfMonth() {
-  const today = new Date();
-  return today.getDate() === new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
-}
-
 export function mount(account) {
   myOwnerPhone = account.phone;
   myStoreId = account.storeId;
   mountHumanityTrigger(document.getElementById("humanityBtn"), document.getElementById("humanityOverlayRoot"), account);
-
-  const monthEndBanner = document.getElementById("monthEndBanner");
-  if (monthEndBanner) monthEndBanner.style.display = isLastDayOfMonth() ? "block" : "none";
 
   pageSub = document.getElementById("pageSub");
   datePick = document.getElementById("datePick");

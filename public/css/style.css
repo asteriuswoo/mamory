@@ -509,12 +509,16 @@ header.topbar .sub {
 }
 
 body.has-bottom-tabs {
-  /* 탭바를 위해 공간을 미리 비워두지 않는다 — 플로팅 알약(.bottom-tabs)이
-     반투명 blur라 콘텐츠가 그 뒤로 그대로 스크롤되면서 비쳐 보이는 게
-     의도된 디자인인데, 고정 108px를 비워두면 마지막 카드 밑에 아무
-     콘텐츠도 없는 빈 크림색 여백만 남아서 오히려 "틀에 갇힌" 것처럼
-     보였다. 세이프에어리어만 보장해서 홈 인디케이터에 안 걸리게만 한다. */
-  padding-bottom: env(safe-area-inset-bottom);
+  /* 콘텐츠가 플로팅 알약(.bottom-tabs) 뒤로 비쳐 보이는 건 패딩과 무관하게
+     스크롤 중엔 항상 일어난다(알약이 position:fixed라 어차피 그 위에
+     얹힐 뿐) — 패딩이 영향을 주는 건 "진짜 마지막 콘텐츠" 뒤로 남는
+     여유분뿐이다. 108px 전부를 없앴더니(이전 버전) 그 여유분이 전혀
+     없어져서, 근무내역 캘린더처럼 알약 높이 근처에서 콘텐츠가 끝나는
+     화면은 마지막 줄이 알약 바로 아래 걸려서 그 위로 스크롤해 올릴
+     방법이 없어졌다(하린님/화영님이 겪은 버그). 알약 자기 높이(~62px)
+     + 약간의 여유만큼만 보장해서, 다 스크롤해도 마지막 콘텐츠가 알약
+     위로 올라올 수 있게 한다. */
+  padding-bottom: calc(70px + env(safe-area-inset-bottom));
 }
 
 /* The actual scrolling element on pages that pin html/body (see each such
@@ -533,7 +537,7 @@ body.has-bottom-tabs {
 }
 
 body.has-bottom-tabs #pageScroll {
-  padding-bottom: env(safe-area-inset-bottom);
+  padding-bottom: calc(70px + env(safe-area-inset-bottom));
 }
 
 /* Instagram-style floating pill — icons only, no labels, not edge-to-edge

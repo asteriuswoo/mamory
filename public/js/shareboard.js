@@ -361,7 +361,12 @@ const replyMentionState = new Map(); // itemId -> { active, startIndex, query }
 // 영상 썸네일 위에 재생 아이콘을 얹어서 사진과 구분되게 한다 — 탭하면
 // (사진과 동일하게) share-photo-trigger 위임 리스너가 확대보기를 띄운다.
 function videoThumbHtml(url, styleAttr = "") {
-  return `<span class="video-thumb-wrap"><video src="${url}" class="note-photo-thumb share-photo-trigger" muted playsinline preload="metadata" ${styleAttr}></video><span class="video-play-badge">▶</span></span>`;
+  // preload="metadata"만으로는 iOS Safari에서 재생 전까지 흰 화면만 보인다
+  // — 메타데이터(길이/크기)만 받아올 뿐 첫 프레임을 실제로 그려주진
+  // 않기 때문. 메타데이터가 로드되는 순간 아주 살짝(0.1초) 탐색해주면
+  // 그 지점의 프레임을 디코드해서 그려주므로, 재생 버튼을 누르기 전에도
+  // 진짜 썸네일처럼 보인다.
+  return `<span class="video-thumb-wrap"><video src="${url}" class="note-photo-thumb share-photo-trigger" muted playsinline preload="metadata" onloadedmetadata="this.currentTime=0.1" ${styleAttr}></video><span class="video-play-badge">▶</span></span>`;
 }
 
 function replyPhotosHtml(photoUrls, videoUrls) {
