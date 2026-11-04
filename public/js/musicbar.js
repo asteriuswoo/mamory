@@ -10,12 +10,17 @@ import { toast, escapeHtml, todayStr } from "./util.js";
 
 const SEARCH_URL = "https://asia-northeast3-mmth-order.cloudfunctions.net/searchYoutube";
 
-// 2026-10-07(수)부터 진우 시작 — 평일마다 한 명씩 넘어가고 주말은 건너뛴다.
-const SONG_PICKER_START_DATE = "2026-10-07";
+// 2026-11-03(화)부터 진우 시작 — 평일마다 한 명씩 넘어가고 주말은 건너뛴다.
+// 화영님을 추가하면서 3일 주기 -> 4일 주기로 길이가 바뀌어, 기준 날짜를
+// 이 변경이 적용되는 날로 다시 앵커링했다 — 안 그러면 나머지 세 명의
+// 요일별 차례가 과거 기준 그대로 유지되지 않고 뒤섞여버린다(이미 Firestore에
+// 저장된 지난 날짜들의 곡 기록 자체는 그대로라 영향 없음).
+const SONG_PICKER_START_DATE = "2026-11-03";
 const SONG_PICKER_WEEKDAY_ORDER = [
   { phone: "01064082901", name: "진우" },
   { phone: "01083477412", name: "하린" },
   { phone: "01038355240", name: "유리" },
+  { phone: "01063285245", name: "화영" },
 ];
 const SONG_PICKER_WEEKEND = { phone: "01071362938", name: "지안" };
 

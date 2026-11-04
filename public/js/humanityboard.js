@@ -196,7 +196,7 @@ function repliesHtml(it) {
   if (openReplyFor.has(it.id)) {
     html += `
       <div class="reply-input-row">
-        <input type="text" class="reply-input" data-humanity-reply-for="${it.id}" placeholder="댓글 달기 (@이름으로 멘션할 수 있어요)" value="${escapeHtml(replyDrafts.get(it.id) || "")}" />
+        <textarea class="reply-input" rows="1" data-humanity-reply-for="${it.id}" placeholder="댓글 달기 (@이름으로 멘션, 엔터로 줄바꿈)">${escapeHtml(replyDrafts.get(it.id) || "")}</textarea>
         <button class="reply-send-btn" data-humanity-reply-send="${it.id}">등록</button>
       </div>
       <div class="mention-suggest-box" data-humanity-reply-mention-box="${it.id}"></div>`;
@@ -323,8 +323,14 @@ function wireOverlay() {
     const id = el.dataset.humanityReplySend;
     const replyInput = overlay.querySelector(`.reply-input[data-humanity-reply-for="${id}"]`);
     el.addEventListener("click", () => addReply(id, replyInput.value));
+    // 답글 입력창이 <textarea>라 엔터는 그냥 줄바꿈 — 등록은 오직 "등록"
+    // 버튼으로만 한다(전엔 Enter가 바로 전송돼서, 여러 줄 쓰려고 엔터 치면
+    // 의도와 다르게 중간에 등록돼버렸다). shareboard.js의 답글 입력창과
+    // 동일한 패턴.
     replyInput.addEventListener("input", (e) => {
       replyDrafts.set(id, e.target.value);
+      e.target.style.height = "auto";
+      e.target.style.height = `${e.target.scrollHeight}px`;
       const cursor = e.target.selectionStart;
       const before = e.target.value.slice(0, cursor);
       const atIndex = before.lastIndexOf("@");
@@ -334,9 +340,6 @@ function wireOverlay() {
         replyMentionState.set(id, { active: false, startIndex: -1, query: "" });
       }
       renderReplyMentionSuggestions(id);
-    });
-    replyInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.isComposing) addReply(id, replyInput.value);
     });
   });
   overlay.querySelectorAll("[data-humanity-reply-delete]").forEach((el) => {

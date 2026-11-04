@@ -15,7 +15,7 @@ import {
   query,
   where,
 } from "./firebase-init.js";
-import { getAccessCode, setAccessCodeDoc } from "./auth.js";
+import { getCurrentAccessCode, rotateAccessCode } from "./auth.js";
 import { toast, escapeHtml, sortMaterials, sortByOrder, formatPhone } from "./util.js";
 import { avatarHtml } from "./avatar.js";
 
@@ -542,13 +542,15 @@ export function mount(account) {
     }
     accessCodeSaveBtn.disabled = true;
     try {
-      await setAccessCodeDoc(code);
+      await rotateAccessCode(code);
       toast("가입 코드가 저장됐어요");
+    } catch (e) {
+      toast(e.message || "가입 코드 저장에 실패했어요");
     } finally {
       accessCodeSaveBtn.disabled = false;
     }
   });
-  getAccessCode().then((code) => { if (code) accessCodeField.value = code; });
+  getCurrentAccessCode().then((code) => { if (code) accessCodeField.value = code; });
 
   mainCatSeg.querySelectorAll("button").forEach((btn) => {
     btn.addEventListener("click", () => {

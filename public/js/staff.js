@@ -40,10 +40,6 @@ const screenEl = document.getElementById("screen");
 
 const date = todayStr();
 const PENDING_KEY = "cafe_pending_" + date;
-// 이월된(어제 미주문) 자재를 "취소"로 뺀 적 있으면 기억해둔다 — 안 그러면
-// 새로고침마다 loadCarryoverItems()가 "아직 pending에 없네"라고 보고 매번
-// 다시 집어넣어버린다. 날짜별 키라 다음날엔 자연히 초기화된다.
-const DISMISSED_CARRYOVER_KEY = "cafe_dismissed_carryover_" + date;
 
 let materials = [];
 let yesterdayItems = {}; // materialId -> yesterday's checks/items doc data, for the "어제 요청/주문완료" hint
@@ -135,16 +131,19 @@ function savePending() {
   localStorage.setItem(PENDING_KEY, JSON.stringify(pending));
 }
 
+// 이월된(어제 미주문) 자재를 누군가 "취소"로 뺐으면 매장 전체가 공유하는
+// Firestore 컬렉션에 기록해서, 다른 직원 기기에서도 다시 떠오르지 않게
+// 한다 — 예전엔 localStorage에만 저장해서 뺀 사람 기기에서만 사라지고
+// 다른 직원들한테는 계속 다시 떴다. 날짜별 서브컬렉션이라 다음날엔 자연히
+// 비워진다.
 let dismissedCarryovers = new Set();
-function loadDismissedCarryovers() {
+async function loadDismissedCarryovers() {
   try {
-    dismissedCarryovers = new Set(JSON.parse(localStorage.getItem(DISMISSED_CARRYOVER_KEY) || "[]"));
+    const snap = await getDocs(collection(db, "stores", staffStoreId, "checks", date, "dismissedCarryovers"));
+    dismissedCarryovers = new Set(snap.docs.map((d) => d.id));
   } catch (e) {
     dismissedCarryovers = new Set();
   }
-}
-function saveDismissedCarryovers() {
-  localStorage.setItem(DISMISSED_CARRYOVER_KEY, JSON.stringify([...dismissedCarryovers]));
 }
 
 // 옛 발주 항목은 photoUrl(단수) 하나였고, 지금은 여러 장을 담는
@@ -536,6 +535,7 @@ let carryoverLoaded = false;
 async function loadCarryoverItems() {
   if (carryoverLoaded) return;
   carryoverLoaded = true;
+  await loadDismissedCarryovers();
   let changed = false;
   try {
     const snap = await getDocs(collection(db, "stores", staffStoreId, "checks", dateStrDaysAgo(1), "items"));
@@ -548,7 +548,16 @@ async function loadCarryoverItems() {
       // 안 한 것뿐이라 또 요청할 필요가 없다.
       if (data.ownerAttachedPhotos && data.ownerAttachedPhotos.length > 0) return;
       if (synced[id]) return; // 오늘 이미 제출/확정된 자재는 건너뛴다
-      if (dismissedCarryovers.has(id)) return; // 오늘 이미 "취소"로 뺀 적 있으면 다시 안 넣는다
+      if (dismissedCarryovers.has(id)) {
+        // 다른 직원이 먼저 취소한 경우 — 이 기기의 localStorage에는 그보다
+        // 전에 이미 담겨 있을 수 있어서, 새로 안 넣는 것만으론 부족하다.
+        // 이미 담겨 있던 것도 지워야 새로고침해도 진짜로 사라진다.
+        if (pending[id] && pending[id].carriedOverFrom) {
+          delete pending[id];
+          changed = true;
+        }
+        return;
+      }
       if (pending[id]) {
         // 예전 버그로 요청자 이름이 지금 보는 사람 이름으로 잘못 저장돼
         // 있던 이월 항목을, 다시 추가하는 대신 조용히 고쳐준다 — 그 외
@@ -1307,11 +1316,16 @@ async function cancelPendingCartItem(id) {
     if (!confirm(`'${p.materialName}'을(를) 장바구니에서 뺄까요?`)) return;
     delete pending[id];
     savePending();
-    // 이월된 자재였다면, 다음 새로고침 때 loadCarryoverItems()가 또
-    // 집어넣지 않도록 "오늘은 이미 뺐다"고 기억해둔다.
+    // 이월된 자재였다면, 매장 전체가 보는 공유 컬렉션에 "오늘은 이미
+    // 뺐다"고 기록해서 — 나뿐 아니라 다른 직원의 다음 loadCarryoverItems()
+    // 호출에서도 다시 집어넣지 않게 한다.
     if (p.carriedOverFrom) {
       dismissedCarryovers.add(id);
-      saveDismissedCarryovers();
+      setDoc(doc(db, "stores", staffStoreId, "checks", date, "dismissedCarryovers", id), {
+        dismissedBy: staffPhone,
+        dismissedByName: staffName,
+        dismissedAt: serverTimestamp(),
+      }).catch(() => {});
     }
     cartItems = buildTodayCartItems();
     render();
@@ -1693,7 +1707,6 @@ async function main() {
   if ("Notification" in window && Notification.permission === "granted") registerPushToken(staffPhone);
 
   loadPending();
-  loadDismissedCarryovers();
   itemsCol = collection(db, "stores", staffStoreId, "checks", date, "items");
 
   onSnapshot(collection(db, "stores", staffStoreId, "materials"), (snap) => {

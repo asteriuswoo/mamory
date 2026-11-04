@@ -98,7 +98,7 @@ async function bumpAppBadge() {
   }
 }
 
-const CACHE_NAME = "cafe-order-v152";
+const CACHE_NAME = "cafe-order-v169";
 const APP_SHELL = [
   "index.html",
   "staff.html",

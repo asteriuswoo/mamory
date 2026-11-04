@@ -395,6 +395,31 @@ function storagePathFromUrl(url) {
   return m ? decodeURIComponent(m[1]) : null;
 }
 
+// 모바일 사파리는 <a download>를 블롭에 제대로 적용하지 않고, 대신
+// 파일 미리보기(QuickLook) 화면으로 아예 이동시켜버리거나 — standalone
+// PWA에서는 이동할 곳이 없어 그냥 아무 반응 없이 끝나버린다("눌러도 저장이
+// 안 됨"). 파일 공유를 지원하는 환경(iOS 15+ 등)에서는 그 자리에서 네이티브
+// 공유시트를 띄우는 게 훨씬 자연스럽다("이미지 저장"이 그 시트 안에 바로
+// 있다). 지원 안 하는 환경(대부분의 데스크톱 브라우저)에서만 기존 blob
+// 앵커 다운로드로 대체한다. Storage에서 받아온 사진뿐 아니라, 캔버스로
+// 그 자리에서 합성한 이미지(급여내역 등)를 저장할 때도 동일하게 쓴다.
+export async function shareOrDownloadBlob(blob, filename) {
+  const type = blob.type || "application/octet-stream";
+  const file = new File([blob], filename, { type });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    await navigator.share({ files: [file] });
+    return;
+  }
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = blobUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(blobUrl);
+}
+
 async function saveImageToDevice(src) {
   try {
     const path = storagePathFromUrl(src);
@@ -407,26 +432,7 @@ async function saveImageToDevice(src) {
     const type = blob.type || "image/jpeg";
     const ext = type.split("/")[1]?.split(";")[0] || (type.startsWith("video/") ? "mp4" : "jpg");
     const filename = `mamory_${Date.now()}.${ext}`;
-    const file = new File([blob], filename, { type });
-    // 모바일 사파리는 <a download>를 블롭에 제대로 적용하지 않고, 대신
-    // 파일 미리보기(QuickLook) 화면으로 아예 이동시켜버린다 — 누르자마자
-    // "다른 페이지로 넘어간" 것처럼 느껴지는 게 이 때문. 파일 공유를 지원하는
-    // 환경(iOS 15+ 등)에서는 그 자리에서 네이티브 공유시트를 띄우는 게
-    // 훨씬 자연스럽다("이미지 저장"이 그 시트 안에 바로 있다). 지원 안
-    // 하는 환경(대부분의 데스크톱 브라우저)에서만 기존 blob 앵커 다운로드로
-    // 대체한다.
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      await navigator.share({ files: [file] });
-      return;
-    }
-    const blobUrl = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = blobUrl;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(blobUrl);
+    await shareOrDownloadBlob(blob, filename);
   } catch (e) {
     if (e.name !== "AbortError") toast("사진 저장에 실패했어요"); // 공유시트를 취소한 건 실패가 아니다
   }

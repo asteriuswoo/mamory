@@ -1,4 +1,4 @@
-import { fetchAccount, registerAccount, setStaffPin, getOwnerPin, setOwnerPinDoc, getAccessCode, normalizePhone } from "./auth.js";
+import { fetchAccount, lookupAccountForLogin, ownerLogin, staffLogin, staffCreatePinAndLogin, checkAccessCode, registerAccount, normalizePhone } from "./auth.js";
 import { getAccount, setAccount, clearAccount, toast } from "./util.js";
 
 const phoneStep = document.getElementById("phoneStep");
@@ -30,9 +30,6 @@ const lockNote = document.getElementById("lockNote");
 
 let pendingPhone = null;
 let pendingRole = null; // "owner" | "staff" — which role is being registered in the pinBox step
-let pendingOwnerAccount = null;
-let pendingStaffAccount = null;
-let isCreatingPin = false; // owner registration: reusing the shared owner PIN vs creating it
 let isCreatingStaffLoginPin = false; // existing staff account logging in but has no personal PIN yet
 
 function goTo(role) {
@@ -79,20 +76,18 @@ phoneNext.addEventListener("click", async () => {
   phoneNext.disabled = true;
   phoneNext.textContent = "확인 중...";
   try {
-    const existing = await fetchAccount(phone);
-    if (existing) {
-      if (existing.role === "owner") {
-        pendingOwnerAccount = existing;
-        const realPin = await getOwnerPin();
-        ownerLoginLabel.textContent = realPin
+    const info = await lookupAccountForLogin(phone);
+    pendingPhone = phone;
+    if (info.exists) {
+      if (info.role === "owner") {
+        ownerLoginLabel.textContent = info.hasPin
           ? "사장님 계정이에요. PIN을 입력하세요"
           : "PIN이 아직 없어요. 지금 입력하는 숫자가 새 PIN이 됩니다 (4자리 이상)";
         phoneStep.classList.remove("show");
         ownerLoginBox.classList.add("show");
         ownerLoginPin.focus();
       } else {
-        pendingStaffAccount = existing;
-        isCreatingStaffLoginPin = !existing.pin;
+        isCreatingStaffLoginPin = !info.hasPin;
         if (isCreatingStaffLoginPin) {
           staffLoginLabel.textContent = "보안을 위해 본인만의 PIN을 새로 등록해주세요 (숫자 4자리 이상)";
           staffLoginPinConfirm.style.display = "block";
@@ -109,7 +104,6 @@ phoneNext.addEventListener("click", async () => {
         staffLoginPin.focus();
       }
     } else {
-      pendingPhone = phone;
       phoneStep.classList.remove("show");
       registerStep.style.display = "block";
     }
@@ -129,21 +123,11 @@ ownerLoginConfirm.addEventListener("click", async () => {
   }
   ownerLoginConfirm.disabled = true;
   try {
-    const realPin = await getOwnerPin();
-    if (!realPin) {
-      // No PIN has ever been set (e.g. an owner account from before PIN creation
-      // existed) — treat this entry as creating it now.
-      await setOwnerPinDoc(pin);
-      setAccount(pendingOwnerAccount);
-      goTo("owner");
-      return;
-    }
-    if (pin === realPin) {
-      setAccount(pendingOwnerAccount);
-      goTo("owner");
-      return;
-    }
-    toast("PIN이 올바르지 않아요");
+    const account = await ownerLogin(pendingPhone, pin);
+    setAccount(account);
+    goTo("owner");
+  } catch (e) {
+    toast(e.message || "PIN이 올바르지 않아요");
     ownerLoginPin.value = "";
   } finally {
     ownerLoginConfirm.disabled = false;
@@ -166,17 +150,16 @@ staffLoginConfirm.addEventListener("click", async () => {
         staffLoginPinConfirm.value = "";
         return;
       }
-      await setStaffPin(pendingStaffAccount.phone, pin);
-      setAccount({ ...pendingStaffAccount, pin });
+      const account = await staffCreatePinAndLogin(pendingPhone, pin);
+      setAccount(account);
       goTo("staff");
       return;
     }
-    if (pin === pendingStaffAccount.pin) {
-      setAccount(pendingStaffAccount);
-      goTo("staff");
-      return;
-    }
-    toast("PIN이 올바르지 않아요");
+    const account = await staffLogin(pendingPhone, pin);
+    setAccount(account);
+    goTo("staff");
+  } catch (e) {
+    toast(e.message || "PIN이 올바르지 않아요");
     staffLoginPin.value = "";
   } finally {
     staffLoginConfirm.disabled = false;
@@ -185,16 +168,18 @@ staffLoginConfirm.addEventListener("click", async () => {
 
 async function verifyAccessCode() {
   const entered = accessCodeInput.value.trim();
-  const realCode = await getAccessCode();
-  if (!realCode) {
-    toast("아직 가입 코드가 설정되지 않았어요. 사장님에게 문의해주세요");
+  if (!entered) {
+    toast("가입 코드를 입력해주세요");
     return false;
   }
-  if (entered !== realCode) {
-    toast("가입 코드가 올바르지 않아요");
+  try {
+    const valid = await checkAccessCode(entered);
+    if (!valid) toast("가입 코드가 올바르지 않아요");
+    return valid;
+  } catch (e) {
+    toast("연결에 실패했어요. 잠시 후 다시 시도해주세요");
     return false;
   }
-  return true;
 }
 
 pickStaff.addEventListener("click", async () => {
@@ -210,7 +195,6 @@ pickStaff.addEventListener("click", async () => {
 
   // 직원은 (공유되는 사장님 PIN과 달리) 본인만의 PIN을 새로 만든다.
   pendingRole = "staff";
-  isCreatingPin = true;
   pinBoxLabel.textContent = "본인만의 PIN을 만들어주세요 (숫자 4자리 이상)";
   pinConfirmInput.style.display = "block";
   pinInput.placeholder = "새 PIN";
@@ -228,26 +212,19 @@ pickOwner.addEventListener("click", async () => {
   }
   pickOwner.disabled = true;
   const ok = await verifyAccessCode();
-  if (!ok) {
-    pickOwner.disabled = false;
-    return;
-  }
-  const existingPin = await getOwnerPin();
   pickOwner.disabled = false;
-  pendingRole = "owner";
-  isCreatingPin = !existingPin;
+  if (!ok) return;
 
-  if (isCreatingPin) {
-    pinBoxLabel.textContent = "아직 사장님 PIN이 없어요. 새로 만들어주세요 (숫자 4자리 이상)";
-    pinConfirmInput.style.display = "block";
-    pinInput.placeholder = "새 PIN";
-    pinConfirm.textContent = "PIN 만들고 시작하기";
-  } else {
-    pinBoxLabel.textContent = "사장님 PIN을 입력하세요";
-    pinConfirmInput.style.display = "none";
-    pinInput.placeholder = "PIN";
-    pinConfirm.textContent = "가입 완료";
-  }
+  // 이 매장에 사장님 PIN이 이미 있는지는 storeId를 먼저 알아야 서버에서나
+  // 확인할 수 있어서(가입 코드로 매장을 가리기 전까진 비인증 상태로는
+  // 알 길이 없다), 미리보기로 "새로 만드는지/기존 PIN인지"를 구분해 보여주는
+  // 대신 — 실제 검증·생성은 registerAccount가 한 번에 서버에서 처리하고,
+  // 여기선 오타 방지용으로 확인 입력만 받는다.
+  pendingRole = "owner";
+  pinBoxLabel.textContent = "사장님 PIN을 입력하세요 (매장에 처음 등록하는 사장님이면, 지금 입력한 값이 새 PIN이 됩니다)";
+  pinConfirmInput.style.display = "block";
+  pinInput.placeholder = "PIN";
+  pinConfirm.textContent = "가입 완료";
 
   pinBox.classList.add("show");
   pinInput.focus();
@@ -263,45 +240,34 @@ async function confirmRegisterPin() {
     return;
   }
 
-  if (pendingRole === "staff") {
-    // 항상 새로 만드는 개인 PIN이라 확인 입력과 일치하는지만 본다.
-    const confirmPin = pinConfirmInput.value.trim();
-    if (pin !== confirmPin) {
-      toast("PIN이 서로 달라요. 다시 입력해주세요");
-      pinInput.value = "";
-      pinConfirmInput.value = "";
-      return;
-    }
-    const account = await registerAccount({ phone: pendingPhone, name, role: "staff", pin });
-    setAccount(account);
-    // 신규 가입 직후에만 모리가 탭을 소개해주는 온보딩을 띄운다 — 이미
-    // 계정 있는 사람의 재로그인(goTo("staff"))과는 분리된, 여기뿐인 경로라
-    // 따로 추측할 필요 없이 정확히 "방금 가입한 사람"만 잡아낼 수 있다.
-    location.href = "staff.html?onboarding=1";
+  const confirmPin = pinConfirmInput.value.trim();
+  if (pin !== confirmPin) {
+    toast("PIN이 서로 달라요. 다시 입력해주세요");
+    pinInput.value = "";
+    pinConfirmInput.value = "";
     return;
   }
 
-  if (isCreatingPin) {
-    const confirmPin = pinConfirmInput.value.trim();
-    if (pin !== confirmPin) {
-      toast("PIN이 서로 달라요. 다시 입력해주세요");
-      pinInput.value = "";
-      pinConfirmInput.value = "";
-      return;
+  const accessCode = accessCodeInput.value.trim();
+  pinConfirm.disabled = true;
+  try {
+    const account = await registerAccount({ phone: pendingPhone, name, role: pendingRole, accessCode, pin });
+    setAccount(account);
+    if (pendingRole === "staff") {
+      // 신규 가입 직후에만 모리가 탭을 소개해주는 온보딩을 띄운다 — 이미
+      // 계정 있는 사람의 재로그인(goTo("staff"))과는 분리된, 여기뿐인 경로라
+      // 따로 추측할 필요 없이 정확히 "방금 가입한 사람"만 잡아낼 수 있다.
+      location.href = "staff.html?onboarding=1";
+    } else {
+      goTo("owner");
     }
-    await setOwnerPinDoc(pin);
-  } else {
-    const realPin = await getOwnerPin();
-    if (!realPin || pin !== realPin) {
-      toast("PIN이 올바르지 않아요");
-      pinInput.value = "";
-      return;
-    }
+  } catch (e) {
+    toast(e.message || "가입에 실패했어요");
+    pinInput.value = "";
+    pinConfirmInput.value = "";
+  } finally {
+    pinConfirm.disabled = false;
   }
-
-  const account = await registerAccount({ phone: pendingPhone, name, role: "owner" });
-  setAccount(account);
-  goTo("owner");
 }
 
 pinConfirm.addEventListener("click", confirmRegisterPin);

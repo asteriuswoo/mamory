@@ -1,6 +1,20 @@
-import { db, readyAuth, doc, getDoc, setDoc, updateDoc, serverTimestamp } from "./firebase-init.js";
+import { db, readyAuth, doc, getDoc, signInWithCustomToken, signOut, auth, callable } from "./firebase-init.js";
 import { getAccount, setAccount, clearAccount, normalizePhone } from "./util.js";
 import { removeDeviceTokenOnLogout } from "./push.js";
+
+// 2단계(로그인 구조 전환): PIN 비교는 이제 전부 서버(Cloud Functions,
+// Admin SDK)에서만 일어난다 — 클라이언트는 입력값을 넘기고 결과(성공 시
+// 커스텀 토큰)만 받는다. 예전엔 사장님 PIN/가입코드를 먼저 Firestore에서
+// 읽어와 브라우저에서 비교했는데, 그러면 입력이 틀려도 진짜 PIN 값은 이미
+// 브라우저로 전송된 뒤였다.
+const lookupAccountForLoginFn = callable("lookupAccountForLogin");
+const ownerLoginFn = callable("ownerLogin");
+const staffLoginFn = callable("staffLogin");
+const staffCreatePinAndLoginFn = callable("staffCreatePinAndLogin");
+const checkAccessCodeFn = callable("checkAccessCode");
+const registerAccountFn = callable("registerAccount");
+const rotateAccessCodeFn = callable("rotateAccessCode");
+const getCurrentAccessCodeFn = callable("getCurrentAccessCode");
 
 export async function fetchAccount(phone) {
   await readyAuth;
@@ -8,56 +22,58 @@ export async function fetchAccount(phone) {
   return snap.exists() ? snap.data() : null;
 }
 
-// storeId를 "mmth"로 고정 — 1단계 마이그레이션 이후 가입한 계정에
-// storeId가 안 찍히던 버그(2026-10-30, 강화영님 계정에서 발견)의 임시
-// 패치. 2단계(로그인 구조 전환, Task #63)에서 이 함수 자체가 Cloud
-// Function 호출로 교체되면서 가입코드로 실제 storeId를 조회하는 방식으로
-// 바뀔 예정 — 그 전까지, 매장이 하나뿐인 지금은 이렇게 고정값으로
-// 막아둔다. 두 번째 매장이 생기기 전에 반드시 Task #63로 교체할 것.
-export async function registerAccount({ phone, name, role, pin }) {
-  await readyAuth;
-  const account = { phone, name, role, storeId: "mmth", createdAt: serverTimestamp() };
-  if (pin) account.pin = pin;
-  await setDoc(doc(db, "accounts", phone), account);
-  return { phone, name, role, storeId: "mmth", ...(pin ? { pin } : {}) };
+// 로그인 전(아직 인증 안 된) 단계에서 "이 번호가 가입됐는지/역할/개인 PIN이
+// 있는지"만 돌려준다 — PIN 값 자체는 절대 안 준다. accounts/{phone}을
+// 비인증 상태로 직접 읽을 수 없게 된 지금, login.js가 전화번호 입력
+// 직후 이 함수로 대체했다.
+export async function lookupAccountForLogin(phone) {
+  const res = await lookupAccountForLoginFn({ phone });
+  return res.data;
 }
 
-// 직원 계정 전용 개인 PIN — 사장님 PIN(config/ownerPin, 전체 공유)과 달리
-// 계정마다 따로 저장돼서, 번호만 알면 남의 계정에 그대로 들어가던 문제를
-// 막는다. 아직 PIN이 없는(=이 기능 이전에 가입한) 계정은 로그인 시
-// login.js가 자동으로 등록을 요구한다.
-export async function setStaffPin(phone, pin) {
-  await readyAuth;
-  await updateDoc(doc(db, "accounts", phone), { pin, pinUpdatedAt: serverTimestamp() });
+async function signInWithToken(token, account) {
+  await signInWithCustomToken(auth, token);
+  return account;
 }
 
-// The owner PIN is not hardcoded anywhere in the app. Whoever registers as
-// "사장님" first creates it, and it's stored in Firestore so every later
-// owner login/registration checks against that same value.
-export async function getOwnerPin() {
-  await readyAuth;
-  const snap = await getDoc(doc(db, "config", "ownerPin"));
-  return snap.exists() ? snap.data().pin : null;
+export async function ownerLogin(phone, pin) {
+  const res = await ownerLoginFn({ phone, pin });
+  return signInWithToken(res.data.token, res.data.account);
 }
 
-export async function setOwnerPinDoc(pin) {
-  await readyAuth;
-  await setDoc(doc(db, "config", "ownerPin"), { pin, updatedAt: serverTimestamp() });
+export async function staffLogin(phone, pin) {
+  const res = await staffLoginFn({ phone, pin });
+  return signInWithToken(res.data.token, res.data.account);
 }
 
-// Staff/owner sign-up gate: new phone numbers can only create an account if
-// they know this code. Existing accounts are never affected — only checked
-// at the "처음 뵙네요" registration step. The owner sets/rotates it from the
-// 자재 관리 page; it starts unset until the owner configures one there.
-export async function getAccessCode() {
-  await readyAuth;
-  const snap = await getDoc(doc(db, "config", "accessCode"));
-  return snap.exists() ? snap.data().code : null;
+// 이 기능 배포 전부터 있던(=개인 PIN이 아직 없는) 직원 계정이 처음
+// 로그인할 때, PIN 생성 + 로그인을 한 번에 처리한다.
+export async function staffCreatePinAndLogin(phone, pin) {
+  const res = await staffCreatePinAndLoginFn({ phone, pin });
+  return signInWithToken(res.data.token, res.data.account);
 }
 
-export async function setAccessCodeDoc(code) {
-  await readyAuth;
-  await setDoc(doc(db, "config", "accessCode"), { code, updatedAt: serverTimestamp() });
+// 가입 화면에서 PIN 입력 전에 가입 코드 유효성만 미리 확인.
+export async function checkAccessCode(code) {
+  const res = await checkAccessCodeFn({ code });
+  return res.data.valid;
+}
+
+export async function registerAccount({ phone, name, role, accessCode, pin }) {
+  const res = await registerAccountFn({ phone, name, role, accessCode, pin });
+  return signInWithToken(res.data.token, res.data.account);
+}
+
+// 사장님 전용 — 가입 코드 변경.
+export async function rotateAccessCode(newCode) {
+  const res = await rotateAccessCodeFn({ newCode });
+  return res.data.code;
+}
+
+// 사장님 전용 — 자재관리 화면이 현재 가입 코드를 미리 채워 보여주기 위한 읽기.
+export async function getCurrentAccessCode() {
+  const res = await getCurrentAccessCodeFn();
+  return res.data.code;
 }
 
 // Call at the top of staff.html / owner.html / admin.html.
@@ -75,15 +91,28 @@ export async function setAccessCodeDoc(code) {
 // previous version of this function did by skipping readyAuth entirely, and
 // it broke live for a real user (empty 자재/시재/공유 lists, looked exactly
 // like a network outage) before this comment was written to explain why it
-// can never happen again. readyAuth itself is normally near-instant (cached
-// anon session) so this still avoids the slow part (the account getDoc).
+// can never happen again.
+//
+// 2단계부터는 익명 로그인이 없어서 readyAuth가 "세션 없음"(null)으로도
+// 끝날 수 있다 — 재방문 기기는 이전 로그인 때 받은 커스텀 토큰 세션을
+// Firebase가 알아서 복원해주니 보통 거의 즉시 끝나지만, 혹시라도 복원이
+// 막혀 영원히 안 끝나는 경우를 대비해 8초 타임아웃을 둔다.
 export async function requireAccount(expectedRole) {
   const cached = getAccount();
   if (!cached || !cached.phone) {
     location.replace("index.html");
     return null;
   }
-  await readyAuth;
+  const user = await Promise.race([
+    readyAuth,
+    new Promise((resolve) => setTimeout(() => resolve(null), 8000)),
+  ]);
+  if (!user) {
+    // 세션이 복원 안 됨(기기 데이터 삭제, 토큰 만료 등) — 다시 로그인하게 한다.
+    clearAccount();
+    location.replace("index.html");
+    return null;
+  }
   verifyAccountInBackground(expectedRole, cached);
   return cached;
 }
@@ -131,6 +160,10 @@ export async function logout() {
   const acc = getAccount();
   if (acc && acc.phone) await removeDeviceTokenOnLogout(acc.phone);
   clearAccount();
+  // 이제 로그인 세션 자체가 storeId/role 권한을 담고 있어서(예전 익명
+  // 세션과 달리), 매장 공용 기기에서 로그아웃 후에도 세션이 남아있으면
+  // 다음 사람이 그 권한을 그대로 이어받는 실제 노출 위험이 된다.
+  await signOut(auth).catch(() => {});
   location.href = "index.html";
 }
 

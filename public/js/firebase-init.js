@@ -27,14 +27,23 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   getAuth,
-  signInAnonymously,
+  signInWithCustomToken,
+  signOut,
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { getMessaging, isSupported } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging.js";
 import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 import { firebaseConfig, STORE_NAME, QUICK_ORDER_LINKS } from "./firebase-config.js";
 
 const app = initializeApp(firebaseConfig);
+// 지정 안 하면 기본값(us-central1)으로 가서 실제 함수가 배포된
+// asia-northeast3와 안 맞아 전부 404난다 — 반드시 명시해야 한다.
+const functions = getFunctions(app, "asia-northeast3");
+export { httpsCallable, signInWithCustomToken, signOut };
+export function callable(name) {
+  return httpsCallable(functions, name);
+}
 // 2026-10-12 밤: Firestore 연결 방식(롱폴링 강제)과 Auth 초기화 방식(iframe
 // 회피, IndexedDB persistence)을 이것저것 바꿔가며 모바일 연결 문제를
 // 쫓아봤는데, 결과가 그때그때 달라서(됐다 안 됐다) 오히려 더 불안정해진
@@ -100,11 +109,19 @@ export const messagingReady = isSupported()
 
 export { STORE_NAME, QUICK_ORDER_LINKS };
 
-export const readyAuth = new Promise((resolve, reject) => {
-  onAuthStateChanged(auth, (user) => {
-    if (user) resolve(user);
+// 2단계(로그인 구조 전환): 더 이상 익명 로그인으로 아무 세션이나 만들지
+// 않는다 — 로그인/가입 시 서버(Cloud Functions)가 PIN을 직접 검증하고
+// 발급해주는 커스텀 토큰으로만 세션이 생긴다. onAuthStateChanged의 첫
+// 콜백이 "지금 복원 가능한 세션이 있는지"의 최종 답이라, 그 한 번만 받고
+// 바로 resolve한다(세션이 없으면 null) — 재방문 기기는 Firebase가 그
+// 전에 로그인했던 커스텀 토큰 세션을 알아서 복원해주므로 보통 거의 즉시
+// 끝난다. 완전히 새 기기(세션 없음)는 null로 resolve되고, 그 경우
+// requireAccount()가 로그인 화면으로 돌려보낸다.
+export const readyAuth = new Promise((resolve) => {
+  const unsub = onAuthStateChanged(auth, (user) => {
+    unsub();
+    resolve(user);
   });
-  signInAnonymously(auth).catch(reject);
 });
 
 export {

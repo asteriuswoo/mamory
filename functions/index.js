@@ -1338,5 +1338,3 @@ exports.getCurrentAccessCode = onCall(async (req) => {
   const snap = await db.collection("stores").doc(storeId).collection("config").doc("accessCode").get();
   return { code: snap.exists ? snap.data().code : null };
 });
-
-

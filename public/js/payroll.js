@@ -7,7 +7,7 @@
 // 게 아니라, 직원들이 월급날 제출한 급여 요청(payrollRequests)을 직원별로
 // 모아 보여주는 수신함 역할만 한다.
 import { db, collection, collectionGroup, doc, addDoc, updateDoc, deleteDoc, getDocs, onSnapshot, query, orderBy, where, serverTimestamp } from "./firebase-init.js";
-import { toast, escapeHtml, copyText, showTopBanner } from "./util.js";
+import { toast, escapeHtml, copyText, showTopBanner, shareOrDownloadBlob } from "./util.js";
 import { avatarHtml } from "./avatar.js";
 
 let rootEl = null;
@@ -99,6 +99,27 @@ function cycleBounds(offset) {
 function formatCycleLabel(start, end) {
   const yy = String(start.getFullYear()).slice(2);
   return `${yy}.${pad2(start.getMonth() + 1)}.${pad2(start.getDate())} ~ ${pad2(end.getMonth() + 1)}.${pad2(end.getDate())}`;
+}
+
+// cycleBounds와 똑같은 anchor 방식(이번 달 날짜가 아직 안 됐으면 한 달 전으로)을
+// paydayOfMonth에도 적용해서, 지금 보고 있는 주기(cycleOffset)에 실제로 대응하는
+// 월급날의 달력 날짜를 구한다 — "오늘 날짜"만으로는 ‹ › 로 다른 주기를 넘겨봐도
+// 항상 같은 값이 나와서 주기별로 다른 잠금 상태를 구분할 수 없다.
+function paydayDateForOffset(offset) {
+  const today = new Date();
+  let anchor = new Date(today.getFullYear(), today.getMonth(), paydayOfMonth);
+  if (anchor > today) anchor = addMonths(anchor, -1);
+  return addMonths(anchor, offset);
+}
+
+// 보고 있는 주기의 월급날로부터 오늘까지 며칠 지났는지 — 음수면 아직 월급날이
+// 안 됨, GRACE_DAYS를 넘으면 유예기간도 지난 것.
+const PAYROLL_SUBMIT_GRACE_DAYS = 5;
+function daysSincePaydayFor(offset) {
+  const payday = paydayDateForOffset(offset);
+  const today = new Date();
+  const todayDateOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  return Math.floor((todayDateOnly - payday) / 86400000);
 }
 
 // "매달 O일"이라는 규칙 설명보다, 실제로 다가오는 월급날이 며칠인지 바로
@@ -797,6 +818,22 @@ function payslipTotals(cycleShifts) {
   return { totals, gross, deduction, net };
 }
 
+// 사장님이 보는 제출된 급여 요청은 제출 시점에 저장해둔 hourlyWage/shifts로
+// 시급×시간 및 수당 종류별 세부 내역을 다시 계산한다 — 지금 내(사장) 화면의
+// hourlyWage/insuranceType 전역 값은 조회 중인 직원의 값이 아니라서 쓸 수 없다.
+function requestWageBreakdown(r) {
+  return (r.shifts || []).reduce((acc, s) => {
+    const p = computeShiftPay(s, r.hourlyWage);
+    acc.hours += p.hours;
+    acc.base += p.base;
+    acc.night += p.night;
+    acc.overtime += p.overtime;
+    acc.holiday += p.holiday;
+    acc.extra += p.extra;
+    return acc;
+  }, { hours: 0, base: 0, night: 0, overtime: 0, holiday: 0, extra: 0 });
+}
+
 function bankCopyBtnHtml(accountNumber) {
   return `<span class="bank-copy-btn" data-copy-account="${escapeHtml(accountNumber)}" title="계좌번호 복사">복사</span>`;
 }
@@ -826,7 +863,7 @@ function payslipHtml(cycleShifts, cycleLabel) {
 
   const submitSectionHtml = existing ? `
     <div class="card payroll-submitted-card">
-      <div class="payroll-submitted-status">✅ 제출되었습니다</div>
+      <div class="payroll-submitted-status">✅ 이번달 급여 제출을 이미 완료했어요</div>
       <div class="payroll-payslip-sub">${formatSubmittedAt(existing.createdAt)}</div>
       <button type="button" class="btn secondary block" id="payrollViewSubmittedBtn" style="margin-top:10px;">${submittedDetailOpen ? "숨기기" : "제출한 내용 보기"}</button>
       ${submittedDetailOpen ? `
@@ -842,12 +879,11 @@ function payslipHtml(cycleShifts, cycleLabel) {
             </div>`).join("")}
         </div>` : ""}
     </div>` : (() => {
-        // 등록해둔 월급날 당일에만 제출할 수 있게 잠근다 — 잠겼을 때도
-        // 버튼 자체는 눌러지게 두고(disabled 대신), 눌렀을 때 왜 안 되는지
-        // 토스트로 알려준다. 월급날을 아직 등록 안 했으면 예전처럼 언제든
-        // 제출 가능하게 둔다.
-        const isPaydayToday = paydayOfMonth != null && new Date().getDate() === paydayOfMonth;
-        const locked = paydayOfMonth != null && !isPaydayToday;
+        // 월급날부터 +5일까지만 제출 창을 열어둔다 — 그 전(아직 월급날이 안 됨)이나
+        // 그 후(유예기간도 지남) 둘 다 잠긴다. 이미 제출했는지는 위의 existing
+        // 분기에서 먼저 걸러지므로, 여기 도달했다는 건 아직 제출 전이라는 뜻.
+        const daysSince = paydayOfMonth != null ? daysSincePaydayFor(cycleOffset) : null;
+        const locked = paydayOfMonth != null && (daysSince < 0 || daysSince > PAYROLL_SUBMIT_GRACE_DAYS);
         if (locked) {
           return `<button type="button" class="btn secondary block payroll-submit-locked" id="payrollSubmitRequestBtn" data-payday-locked="${paydayOfMonth}" style="margin-top:4px;">🔒 사장님께 이번 급여 제출하기</button>`;
         }
@@ -991,7 +1027,12 @@ function render() {
     submitRequestBtn.addEventListener("click", () => {
       const lockedDay = submitRequestBtn.dataset.paydayLocked;
       if (lockedDay) {
-        toast(`오늘은 월급날이 아니에요 (매달 ${lockedDay}일에 제출할 수 있어요)`);
+        const daysSince = daysSincePaydayFor(cycleOffset);
+        if (daysSince > PAYROLL_SUBMIT_GRACE_DAYS) {
+          toast(`제출 기간이 지났어요 (사장님께 문의)`);
+        } else {
+          toast(`급여일(${lockedDay}일)이 아니에요`);
+        }
         return;
       }
       submitPayrollRequest();
@@ -1372,7 +1413,19 @@ function renderAdmin() {
               <div class="payroll-admin-detail">
                 ${r.bankName && r.bankAccountNumber ? `<div class="row-between payroll-payslip-line"><span>🏦 입금 계좌</span><span style="display:flex; align-items:center; gap:6px;">${escapeHtml(r.bankName)} ${escapeHtml(r.bankAccountNumber)} ${bankCopyBtnHtml(r.bankAccountNumber)}</span></div>` : ""}
                 <div class="row-between payroll-payslip-line"><span>${sumIcon("plus")}지급 합계</span><span>${(r.gross || 0).toLocaleString()}원</span></div>
-                <div class="row-between payroll-payslip-line"><span>${sumIcon("minus")}공제 합계</span><span>${(r.deductionTotal || 0).toLocaleString()}원</span></div>
+                ${(() => {
+                  const wb = requestWageBreakdown(r);
+                  const row = (label, amount) => amount ? `<div class="row-between payroll-payslip-line"><span>${label}</span><span>${Math.round(amount).toLocaleString()}원</span></div>` : "";
+                  return `
+                    ${row("근무 수당", wb.base)}
+                    ${wb.hours > 0 ? `<div class="payroll-wage-breakdown-hint">시급 ${(r.hourlyWage || 0).toLocaleString()}원 × ${wb.hours % 1 === 0 ? wb.hours : wb.hours.toFixed(1)}시간(${(r.shifts || []).length}일)</div>` : ""}
+                    ${row("야간 수당", wb.night)}
+                    ${row("연장 수당", wb.overtime)}
+                    ${row("휴일 수당", wb.holiday)}
+                    ${row("추가 수당", wb.extra)}`;
+                })()}
+                <div class="row-between payroll-payslip-line"><span>${sumIcon("minus")}공제 합계 (${r.insuranceType === "4das" ? "4대보험" : "3.3%"})</span><span>${(r.deductionTotal || 0).toLocaleString()}원</span></div>
+                ${(r.deductionRows || []).map((dr) => dr.amount ? `<div class="row-between payroll-deduction-breakdown-row"><span>${escapeHtml(dr.label)}</span><span>${Math.round(dr.amount).toLocaleString()}원</span></div>` : "").join("")}
                 <div class="payroll-admin-shift-header">근무 내역</div>
                 ${(r.shifts || []).map((s) => `
                   <div class="row-between payroll-admin-shift-line">
@@ -1503,10 +1556,12 @@ function downloadPayrollImage(req) {
   ctx.fillStyle = "#9a9690";
   ctx.fillText(`제출: ${formatSubmittedAt(req.createdAt)}`, padding, y);
 
-  const link = document.createElement("a");
-  link.download = `${req.staffName || "직원"}_급여_${req.cycleStart || ""}.png`;
-  link.href = canvas.toDataURL("image/png");
-  link.click();
+  const filename = `${req.staffName || "직원"}_급여_${req.cycleStart || ""}.png`;
+  canvas.toBlob((blob) => {
+    shareOrDownloadBlob(blob, filename).catch((e) => {
+      if (e.name !== "AbortError") toast("이미지 저장에 실패했어요"); // 공유시트를 취소한 건 실패가 아니다
+    });
+  }, "image/png");
 }
 
 function ensureAdminStarted() {
